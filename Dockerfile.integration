@@ -1,0 +1,47 @@
+FROM golang:1.24-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Copy source code
+COPY . .
+
+# Download dependencies and tidy
+RUN go mod download && go mod tidy
+
+# Build for integration testing (linux-amd64)
+RUN GOOS=linux GOARCH=amd64 go build -mod=mod -o bin/solana-validator-ha ./cmd/solana-validator-ha
+
+# Final stage
+FROM alpine:latest
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates tzdata
+
+# Create app user
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -u 1001 -S appuser -G appgroup
+
+# Set working directory
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /app/bin/solana-validator-ha ./bin/solana-validator-ha
+
+# Change ownership to app user
+RUN chown -R appuser:appgroup /app
+
+# Switch to app user
+USER appuser
+
+# Expose metrics port
+EXPOSE 9090
+
+# Default command (can be overridden)
+CMD ["./bin/solana-validator-ha", "run"] 

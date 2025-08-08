@@ -1,0 +1,44 @@
+FROM golang:1.24-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Copy source code
+COPY . .
+
+# Download dependencies and tidy
+RUN go mod download && go mod tidy
+
+# Build test orchestrator
+RUN GOOS=linux GOARCH=amd64 go build -mod=mod -o bin/test-orchestrator ./integration/test-orchestrator
+
+# Final stage
+FROM alpine:latest
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates tzdata curl
+
+# Create app user
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -u 1001 -S appuser -G appgroup
+
+# Set working directory
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /app/bin/test-orchestrator ./bin/test-orchestrator
+
+# Change ownership to app user
+RUN chown -R appuser:appgroup /app
+
+# Switch to app user
+USER appuser
+
+# Default command
+CMD ["./bin/test-orchestrator"] 

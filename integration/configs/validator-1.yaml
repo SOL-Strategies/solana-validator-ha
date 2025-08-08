@@ -1,0 +1,64 @@
+# Validator 1 Configuration
+validator:
+  name: "validator-1"
+  rpc_url: "http://mock-solana:8899?validator=validator-1"
+  public_ip_service_urls: ["http://mock-solana:8899/public-ip"]
+  identities:
+    active: "/tmp/active-identity.json"
+    passive: "/tmp/passive-identity-1.json"
+
+cluster:
+  name: "mainnet-beta"
+  rpc_urls: ["http://mock-solana:8899"]
+
+prometheus:
+  port: 9090
+  static_labels:
+    environment: "integration-test"
+    validator: "validator-1"
+
+failover:
+  dry_run: true  # Test mode - don't execute actual commands
+  poll_interval_duration: "3s"
+  leaderless_threshold_duration: "9s"
+  takeover_delay_duration: "3s"
+
+  active:
+    command: "echo"
+    args:
+      - "ACTIVE: validator-1 is now active"
+    hooks:
+      pre:
+        - name: "pre-active"
+          command: "echo"
+          args: ["Pre-active hook for validator-1"]
+          must_succeed: false
+      post:
+        - name: "post-active"
+          command: "echo"
+          args: ["Post-active hook for validator-1"]
+          must_succeed: false
+
+  passive:
+    command: "echo"
+    args:
+      - "PASSIVE: validator-1 is now passive"
+    hooks:
+      pre:
+        - name: "pre-passive"
+          command: "echo"
+          args: ["Pre-passive hook for validator-1"]
+          must_succeed: false
+      post:
+        - name: "post-passive"
+          command: "echo"
+          args: ["Post-passive hook for validator-1"]
+          must_succeed: false
+
+  peers:
+    validator-1:
+      ip: "192.168.1.100"
+    validator-2:
+      ip: "192.168.1.101"
+    validator-3:
+      ip: "192.168.1.102"

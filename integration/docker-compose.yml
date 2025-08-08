@@ -1,0 +1,108 @@
+services:
+  # Mock Solana network that simulates RPC responses
+  mock-solana:
+    build:
+      context: ..
+      dockerfile: integration/Dockerfile.mock-solana
+    ports:
+      - "8899:8899"  # Solana RPC port
+    environment:
+      - ACTIVE_VALIDATOR=validator-1  # Initially validator-1 is active
+      - VALIDATOR_1_IP=172.20.0.10
+      - VALIDATOR_2_IP=172.20.0.11
+      - VALIDATOR_3_IP=172.20.0.12
+    networks:
+      validator-network:
+        ipv4_address: 172.20.0.2
+
+  # Validator 1
+  validator-1:
+    build:
+      context: ..
+      dockerfile: Dockerfile.integration
+    environment:
+      - VALIDATOR_NAME=validator-1
+      - VALIDATOR_IP=172.20.0.10
+      - SOLANA_RPC_URL=http://mock-solana:8899
+    volumes:
+      - ../integration/configs/validator-1.yaml:/app/config.yaml:ro
+      - ./test-files/active-identity.json:/tmp/active-identity.json:ro
+      - ./test-files/passive-identity-1.json:/tmp/passive-identity-1.json:ro
+    depends_on:
+      - mock-solana
+    networks:
+      validator-network:
+        ipv4_address: 172.20.0.10
+    command: ["./bin/solana-validator-ha", "run", "--config", "/app/config.yaml"]
+    ports:
+      - "9090:9090"  # Expose metrics port for monitoring
+
+  # Validator 2
+  validator-2:
+    build:
+      context: ..
+      dockerfile: Dockerfile.integration
+    environment:
+      - VALIDATOR_NAME=validator-2
+      - VALIDATOR_IP=172.20.0.11
+      - SOLANA_RPC_URL=http://mock-solana:8899
+    volumes:
+      - ../integration/configs/validator-2.yaml:/app/config.yaml:ro
+      - ./test-files/active-identity.json:/tmp/active-identity.json:ro
+      - ./test-files/passive-identity-2.json:/tmp/passive-identity-2.json:ro
+    depends_on:
+      - mock-solana
+    networks:
+      validator-network:
+        ipv4_address: 172.20.0.11
+    command: ["./bin/solana-validator-ha", "run", "--config", "/app/config.yaml"]
+    ports:
+      - "9091:9090"  # Expose metrics port for monitoring
+
+  # Validator 3
+  validator-3:
+    build:
+      context: ..
+      dockerfile: Dockerfile.integration
+    environment:
+      - VALIDATOR_NAME=validator-3
+      - VALIDATOR_IP=172.20.0.12
+      - SOLANA_RPC_URL=http://mock-solana:8899
+    volumes:
+      - ../integration/configs/validator-3.yaml:/app/config.yaml:ro
+      - ./test-files/active-identity.json:/tmp/active-identity.json:ro
+      - ./test-files/passive-identity-3.json:/tmp/passive-identity-3.json:ro
+    depends_on:
+      - mock-solana
+    networks:
+      validator-network:
+        ipv4_address: 172.20.0.12
+    command: ["./bin/solana-validator-ha", "run", "--config", "/app/config.yaml"]
+    ports:
+      - "9092:9090"  # Expose metrics port for monitoring
+
+  # Test orchestrator that controls the test scenarios
+  test-orchestrator:
+    build:
+      context: ..
+      dockerfile: integration/Dockerfile.test-orchestrator
+    environment:
+      - MOCK_SOLANA_URL=http://mock-solana:8899
+      - VALIDATOR_1_URL=http://validator-1:9090
+      - VALIDATOR_2_URL=http://validator-2:9090
+      - VALIDATOR_3_URL=http://validator-3:9090
+    depends_on:
+      - mock-solana
+      - validator-1
+      - validator-2
+      - validator-3
+    networks:
+      validator-network:
+        ipv4_address: 172.20.0.100
+
+networks:
+  validator-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16 

@@ -1,0 +1,31 @@
+FROM golang:1.24-alpine
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Copy source code
+COPY . .
+
+# Download dependencies and tidy (without vendor)
+RUN go mod download && go mod tidy
+
+# Install Air for hot reloading
+RUN go install github.com/air-verse/air@latest
+
+# Create bin directory
+RUN mkdir -p /app/bin
+
+# Build for Docker (linux-amd64)
+RUN GOOS=linux GOARCH=amd64 go build -mod=mod -o bin/solana-validator-ha-linux-amd64 ./cmd/solana-validator-ha
+
+# Expose metrics port
+EXPOSE 9090
+
+# Run with Air for hot reloading
+CMD ["air"] 
