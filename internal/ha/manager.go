@@ -3,12 +3,9 @@ package ha
 import (
 	"context"
 	"fmt"
-	"io"
 	"math/rand"
-	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -82,8 +79,6 @@ func NewManager(opts NewManagerOptions) *Manager {
 
 // Run starts the HA manager
 func (m *Manager) Run() error {
-	m.logger.Info("Starting HA manager")
-
 	// initialize
 	err := m.initialize()
 	if err != nil {
@@ -99,11 +94,11 @@ func (m *Manager) Run() error {
 
 // initialize initializes the manager
 func (m *Manager) initialize() error {
-	m.logger.Info("initializing manager")
+	m.logger.Debug("initializing manager")
 
 	// Check if already initialized
 	if m.initialized {
-		m.logger.Info("manager already initialized, skipping")
+		m.logger.Debug("manager already initialized, skipping")
 		return nil
 	}
 
@@ -119,7 +114,7 @@ func (m *Manager) initialize() error {
 	}
 
 	// now we can set ourselves as a peer and continue
-	m.logger.Info("adding us to config peers", "name", m.cfg.Validator.Name, "ip", publicIP)
+	m.logger.Debug("adding us to config peers", "name", m.cfg.Validator.Name, "ip", publicIP)
 	m.peerSelf = &config.Peer{
 		Name: m.cfg.Validator.Name,
 		IP:   publicIP,
@@ -137,14 +132,14 @@ func (m *Manager) initialize() error {
 	)
 
 	// create gossip state
-	m.logger.Info("creating gossip state")
+	m.logger.Debug("creating gossip state")
 	m.gossipState = gossip.NewState(gossip.Options{
 		ClusterRPC:   rpc.NewClient(m.cfg.Cluster.RPCURLs...),
 		ActivePubkey: m.cfg.Validator.Identities.ActiveKeyPair.PublicKey().String(),
 		ConfigPeers:  m.cfg.Failover.Peers,
 	})
 
-	m.logger.Info("initialized")
+	m.logger.Debug("initialized")
 	m.initialized = true
 	return nil
 }
@@ -158,37 +153,6 @@ func (m *Manager) getPublicIP() (string, error) {
 	}
 
 	return m.cfg.Validator.PublicIP()
-}
-
-// getPublicIPFromService fetches the public IP from a given service
-func (m *Manager) getPublicIPFromService(serviceURL string) (string, error) {
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
-
-	resp, err := client.Get(serviceURL)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("service returned status: %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	ip := strings.TrimSpace(string(body))
-
-	// Validate that it's a valid IPv4 address
-	if parsedIP := net.ParseIP(ip); parsedIP == nil || parsedIP.To4() == nil {
-		return "", fmt.Errorf("invalid IPv4 address: %s", ip)
-	}
-
-	return ip, nil
 }
 
 // startMetricsServer starts the Prometheus metrics server
@@ -214,7 +178,7 @@ func (m *Manager) startMetricsServer() {
 			Handler: mux,
 		}
 
-		m.logger.Info("starting health check server", "port", port)
+		m.logger.Debug("starting health check server", "port", port)
 
 		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			m.logger.Error("health check server error", "error", err)
@@ -224,7 +188,23 @@ func (m *Manager) startMetricsServer() {
 
 // haMonitorLoop runs the main ha monitoring loop
 func (m *Manager) haMonitorLoop() error {
-	m.logger.Info("starting HA monitor loop", "poll_interval", m.cfg.Failover.PollIntervalDuration)
+	m.logger.Info("monitoring HA state", "poll_interval", m.cfg.Failover.PollIntervalDuration)
+
+	// initial gossip state refresh to populate things and log if active peer found
+	m.gossipState.Refresh()
+
+	if m.gossipState.HasActivePeerInTheLast(m.cfg.Failover.LeaderlessThresholdDuration) {
+		activePeerState, err := m.gossipState.GetActivePeer()
+		if err != nil {
+			m.logger.Warn("failed to get active peer from state", "error", err)
+		} else {
+			activePeerFoundMessage := "active peer found"
+			if activePeerState.IP == m.peerSelf.IP {
+				activePeerFoundMessage = "active peer found (us)"
+			}
+			m.logger.Info(activePeerFoundMessage, "name", activePeerState.Name, "public_ip", activePeerState.IP, "pubkey", activePeerState.Pubkey)
+		}
+	}
 
 	ticker := time.NewTicker(m.cfg.Failover.PollIntervalDuration)
 	defer ticker.Stop()
@@ -242,7 +222,7 @@ func (m *Manager) haMonitorLoop() error {
 
 // ensureHAState implements basic HA logic
 func (m *Manager) ensureHAState() {
-	m.logger.Info("ensuring HA")
+	m.logger.Debug("ensuring HA")
 
 	// refresh gossip state
 	m.gossipState.Refresh()
@@ -250,20 +230,33 @@ func (m *Manager) ensureHAState() {
 	// refresh metrics
 	m.refreshMetrics()
 
-	// if there is an active peer found in the last failover.leaderless_threshold_duration, we are good
+	// warn if we don't appear in gossip and ensure we are passive - disconnection or starting up
+	if m.isSelfNotInGossip() {
+		m.logger.Warn("we are not in gossip - ensuring we are passive", "public_ip", m.peerSelf.IP)
+		m.ensurePassive()
+		return
+	}
+
+	// tell us if we have recently been discovered in gossip
+	if m.isSelfRecentlyInGossip() {
+		m.logger.Info("we are in gossip", "pubkey", m.selfGossipPubkey(), "public_ip", m.peerSelf.IP)
+		return
+	}
+
+	// if there is an active peer found in the last failover.leaderless_threshold_duratio - we are good
 	// having a lookback grace period is important to allow for RPC glitches and other issues
 	if m.gossipState.HasActivePeerInTheLast(m.cfg.Failover.LeaderlessThresholdDuration) {
-		m.logger.Info("active peer found - no failover required")
+		m.logger.Debug("active peer found - no failover required")
 		return
 	}
 
 	// we see no active peer in the last failover.leaderless_threshold_duration, so we need to failover
-	m.logger.Errorf("no active peer found in the last %s - failover required", m.cfg.Failover.LeaderlessThresholdDuration)
+	m.logger.Error("no active peer found in - failover required")
 
 	// if we don't see ourselves in gossip - ensure we are passive (might be starting up, have dropped from network, etc)
 	// and bow out of the failover process until we are back in gossip
 	if m.isSelfNotInGossip() {
-		m.logger.Error("we do not appear in gossip - unable to become active in failover")
+		m.logger.Warn("we do not appear in gossip - ensuring we are passive")
 		m.ensurePassive()
 		return
 	}
@@ -277,8 +270,8 @@ func (m *Manager) ensureHAState() {
 	}
 
 	// one last check to ensure we are passive
-	if m.isNotSelfPassive() {
-		m.logger.Error("we are not passive as reported by local rpc - unable to become active in failover")
+	if m.isSelfActive() {
+		m.logger.Warn("we are already active as reported by local rpc - unable to become active in failover and ensuring we are passive")
 		m.ensurePassive()
 		return
 	}
@@ -292,14 +285,13 @@ func (m *Manager) ensureHAState() {
 
 	// if someone has already taken over as active - say so and return
 	if m.gossipState.HasActivePeerInTheLast(m.cfg.Failover.LeaderlessThresholdDuration) {
-		activePeerName, activePeerState, err := m.gossipState.GetActivePeer()
+		activePeerState, err := m.gossipState.GetActivePeer()
 		if err != nil {
 			m.logger.Warn("failed to get active peer fromn state, but we know someone else already assumed active role", "error", err)
 			return
 		}
-		m.logger.Warn(fmt.Sprintf("active peer took over in the last %s - no failover to us required", m.cfg.Failover.LeaderlessThresholdDuration),
-			"active_peer_in_last", activePeerState.LastSeenAtString(),
-			"name", activePeerName,
+		m.logger.Warn(fmt.Sprintf("peer became active in the last %s", m.cfg.Failover.LeaderlessThresholdDuration),
+			"name", activePeerState.Name,
 			"ip", activePeerState.IP,
 			"pubkey", activePeerState.Pubkey,
 		)
@@ -308,6 +300,7 @@ func (m *Manager) ensureHAState() {
 
 	// now we know we are heatlhy, passive, and no one else has assumed active role
 	// we can take over as active - this should be idempotent in setting the active role
+	m.logger.Info("becoming active", "pubkey", m.cfg.Validator.Identities.ActiveKeyPair.PublicKey().String())
 	m.ensureActive()
 }
 
@@ -315,6 +308,7 @@ func (m *Manager) ensureHAState() {
 // safest thing would be to to ensure validator service always starts with passive identity
 // and the failover.passive.command simply retsarts the validator service or waits for it to start up
 func (m *Manager) ensurePassive() {
+	var err error
 	passivePubkey := m.cfg.Validator.Identities.PassiveKeyPair.PublicKey().String()
 
 	// Update failover status in cache
@@ -323,20 +317,22 @@ func (m *Manager) ensurePassive() {
 	m.cache.UpdateState(state)
 
 	// run pre hooks
-	m.logger.Info("running pre-passive hooks")
-	err := m.cfg.Failover.Passive.Hooks.RunPre(config.HooksRunOptions{
-		DryRun: m.cfg.Failover.DryRun,
-		LoggerArgs: []any{
-			"failover_stage", "pre-passive",
-		},
-	})
+	if len(m.cfg.Failover.Passive.Hooks.Pre) > 0 {
+		m.logger.Debug("running pre-passive hooks")
+		err = m.cfg.Failover.Passive.Hooks.RunPre(config.HooksRunOptions{
+			DryRun: m.cfg.Failover.DryRun,
+			LoggerArgs: []any{
+				"failover_stage", "pre-passive",
+			},
+		})
+	}
 	if err != nil {
 		m.logger.Error("failed to run pre-passive hooks", "error", err)
 		return
 	}
 
 	// run passive command
-	m.logger.Info("running passive command")
+	m.logger.Debug("running passive command")
 	err = m.cfg.Failover.Passive.RunCommand(config.RoleCommandRunOptions{
 		DryRun: m.cfg.Failover.DryRun,
 		LoggerArgs: []any{
@@ -350,13 +346,15 @@ func (m *Manager) ensurePassive() {
 	}
 
 	// run post hooks
-	m.logger.Info("running post-passive hooks")
-	m.cfg.Failover.Passive.Hooks.RunPost(config.HooksRunOptions{
-		DryRun: m.cfg.Failover.DryRun,
-		LoggerArgs: []any{
-			"failover_stage", "post-passive",
-		},
-	})
+	if len(m.cfg.Failover.Passive.Hooks.Post) > 0 {
+		m.logger.Debug("running post-passive hooks")
+		m.cfg.Failover.Passive.Hooks.RunPost(config.HooksRunOptions{
+			DryRun: m.cfg.Failover.DryRun,
+			LoggerArgs: []any{
+				"failover_stage", "post-passive",
+			},
+		})
+	}
 
 	// check to ensure the call to the failover.passive.command was successful
 	if m.isNotSelfPassive() {
@@ -366,14 +364,14 @@ func (m *Manager) ensurePassive() {
 		return
 	}
 
-	m.logger.Info("we are confirmed to be passive as reported by local rpc", "passive_pubkey", passivePubkey)
+	m.logger.Debug("we are confirmed to be passive as reported by local rpc", "passive_pubkey", passivePubkey)
 
 	// refresh gossip state to warn if we are in gossip but not passive
 	m.gossipState.Refresh()
 
 	// if we are not in gossip, warn - we may be starting up or dropped from the network
 	if m.isSelfNotInGossip() {
-		m.logger.Warn("we are not in gossip", "passive_pubkey", passivePubkey)
+		m.logger.Warn("we are not in gossip after becoming passive", "passive_pubkey", passivePubkey)
 		return
 	}
 
@@ -383,13 +381,15 @@ func (m *Manager) ensurePassive() {
 		return
 	}
 
-	m.logger.Info("we are confirmed to be passive as reported by local rpc and gossip", "passive_pubkey", passivePubkey)
+	// we are passive by local rpc and in gossip
+	m.logger.Info("we are confirmed to be passive", "passive_pubkey", passivePubkey)
 }
 
 // ensureActive makes the node active - this should be idempotent in setting the  active role
 // safest thing would be to to ensure validator service alywas starts with passive identity
 // and the failover.passive.command simply retsarts the validator service
 func (m *Manager) ensureActive() {
+	var err error
 	activePubkey := m.cfg.Validator.Identities.ActiveKeyPair.PublicKey().String()
 
 	// Update failover status in cache
@@ -398,20 +398,22 @@ func (m *Manager) ensureActive() {
 	m.cache.UpdateState(state)
 
 	// run pre hooks
-	m.logger.Info("running pre-active hooks")
-	err := m.cfg.Failover.Active.Hooks.RunPre(config.HooksRunOptions{
-		DryRun: m.cfg.Failover.DryRun,
-		LoggerArgs: []any{
-			"failover_stage", "pre-active",
-		},
-	})
+	if len(m.cfg.Failover.Active.Hooks.Pre) > 0 {
+		m.logger.Debug("running pre-active hooks")
+		err = m.cfg.Failover.Active.Hooks.RunPre(config.HooksRunOptions{
+			DryRun: m.cfg.Failover.DryRun,
+			LoggerArgs: []any{
+				"failover_stage", "pre-active",
+			},
+		})
+	}
 	if err != nil {
 		m.logger.Error("failed to run pre-active hooks", "error", err)
 		return
 	}
 
 	// run active command
-	m.logger.Info("running active command")
+	m.logger.Debug("running active command")
 	err = m.cfg.Failover.Active.RunCommand(config.RoleCommandRunOptions{
 		DryRun: m.cfg.Failover.DryRun,
 		LoggerArgs: []any{
@@ -425,13 +427,15 @@ func (m *Manager) ensureActive() {
 	}
 
 	// run post hooks
-	m.logger.Info("running post-active hooks")
-	m.cfg.Failover.Active.Hooks.RunPost(config.HooksRunOptions{
-		DryRun: m.cfg.Failover.DryRun,
-		LoggerArgs: []any{
-			"failover_stage", "post-active",
-		},
-	})
+	if len(m.cfg.Failover.Active.Hooks.Post) > 0 {
+		m.logger.Debug("running post-active hooks")
+		m.cfg.Failover.Active.Hooks.RunPost(config.HooksRunOptions{
+			DryRun: m.cfg.Failover.DryRun,
+			LoggerArgs: []any{
+				"failover_stage", "post-active",
+			},
+		})
+	}
 
 	// check to ensure the call to the failover.active.command was successful
 	if !m.isSelfActive() {
@@ -441,7 +445,7 @@ func (m *Manager) ensureActive() {
 		return
 	}
 
-	m.logger.Info("this node is confirmed to be active as reported by local rpc", "active_pubkey", activePubkey)
+	m.logger.Info("we are confirmed to be active", "active_pubkey", activePubkey)
 }
 
 // isSelfHealthy checks if the validator is healthy by calling the local RPC client
@@ -502,6 +506,21 @@ func (m *Manager) isSelfInGossip() (isInGossip bool) {
 // isSelfNotInGossip checks if the validator is not in the gossip state
 func (m *Manager) isSelfNotInGossip() (isNotInGossip bool) {
 	return !m.isSelfInGossip()
+}
+
+// isSelfRecentlyInGossip checks if the validator is in the gossip state and has been in the gossip state in the last failover.leaderless_threshold_duration
+func (m *Manager) isSelfRecentlyInGossip() (isRecentlyInGossip bool) {
+	return m.gossipState.IsRecentlyInGossip(m.peerSelf.IP)
+}
+
+// selfGossipPubkey returns the pubkey of the validator in gossip
+func (m *Manager) selfGossipPubkey() (pubkey string) {
+	for _, peer := range m.gossipState.GetPeerStates() {
+		if peer.IP == m.peerSelf.IP {
+			return peer.Pubkey
+		}
+	}
+	return ""
 }
 
 // refreshMetrics updates the cache with current state
@@ -571,7 +590,7 @@ func (m *Manager) delayTakeover() {
 	delay := time.Duration(delaySeconds) * time.Second
 	// add random jitter to the delay
 	delay += time.Duration(rand.Intn(m.cfg.Failover.TakeoverJitterSeconds)) * time.Second
-	m.logger.Info("delaying takeover", "delay", delay)
+	m.logger.Debug("delaying takeover to avoid race conditions", "delay", delay)
 	time.Sleep(delay)
 
 }

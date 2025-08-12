@@ -23,10 +23,14 @@ type State struct {
 	selfIP           string
 	clusterRPC       *rpc.Client
 	logger           *log.Logger
+	missingGossipIPs []string
+	lastActivePeer   PeerState
 }
 
 // PeerState represents the state of a peer as seen by the solana network
 type PeerState struct {
+	// Name is the vanity name of the peer
+	Name string
 	// IP is the IP address of the peer
 	IP string
 	// Pubkey is the public key of the peer
@@ -35,6 +39,8 @@ type PeerState struct {
 	LastSeenAtUTC time.Time
 	// LastSeenActive is true if the peer was the active validator when it was last seen
 	LastSeenActive bool
+	// IsRecentlyInGossip is true if the peer was recently in gossip
+	IsRecentlyInGossip bool
 }
 
 // Options are the options for peers state
@@ -102,21 +108,37 @@ func (p *State) Refresh() {
 			continue
 		}
 
-		// TODO: remove dirty hack while testing
-		isActive := node.Pubkey.String() == "peNgUgnzs1jGogUPW8SThXMvzNpzKSNf3om78xVPAYx"
-		// isActive := node.Pubkey.String() == p.activePubkey
-
 		// add the peer to the peerEntries
 		peerState := PeerState{
-			IP:             nodeIP,
-			LastSeenAtUTC:  time.Now().UTC(),
-			Pubkey:         node.Pubkey.String(),
-			LastSeenActive: isActive,
+			Name:               peerName,
+			IP:                 nodeIP,
+			LastSeenAtUTC:      time.Now().UTC(),
+			Pubkey:             node.Pubkey.String(),
+			LastSeenActive:     node.Pubkey.String() == p.activePubkey,
+			IsRecentlyInGossip: slices.Contains(p.missingGossipIPs, nodeIP),
 		}
+
+		// register the peer state
 		latestPeerStatesByName[peerName] = peerState
+
+		// log if is change of active peer
+		if peerState.LastSeenActive && p.lastActivePeer.IP != "" && p.lastActivePeer.IP != peerState.IP {
+			p.logger.Warn(fmt.Sprintf("active peer changed: %s (%s) -> %s (%s)",
+				p.lastActivePeer.IP,
+				p.lastActivePeer.Name,
+				peerState.IP,
+				peerState.Name,
+			))
+		}
+
+		// register the peer if active
+		if peerState.LastSeenActive {
+			p.lastActivePeer = peerState
+		}
+
 		// tell us what we found
 		p.logger.Debug("peer found in gossip",
-			"name", peerName,
+			"name", peerState.Name,
 			"ip", peerState.IP,
 			"pubkey", peerState.Pubkey,
 			"is_active", peerState.LastSeenActive,
@@ -130,9 +152,11 @@ func (p *State) Refresh() {
 	}
 
 	// warn if any of the config peers are not in the peerEntries
+	p.missingGossipIPs = []string{}
 	for name, peer := range p.configPeers {
 		if _, ok := latestPeerStatesByName[name]; !ok {
-			p.logger.Warn("peer not found in gossip", "name", name, "ip", peer.IP)
+			p.logger.Debug("peer not found in gossip", "name", name, "ip", peer.IP)
+			p.missingGossipIPs = append(p.missingGossipIPs, peer.IP)
 		}
 	}
 
@@ -157,7 +181,7 @@ func (p *State) HasActivePeer() bool {
 func (p *State) HasActivePeerInTheLast(duration time.Duration) bool {
 	for name, peer := range p.peerStatesByName {
 		if peer.LastSeenActive && time.Since(peer.LastSeenAtUTC) < duration {
-			p.logger.Info(fmt.Sprintf("active peer last seen in the last %s", duration),
+			p.logger.Debug(fmt.Sprintf("active peer last seen in the last %s", duration),
 				"name", name,
 				"ip", peer.IP,
 				"pubkey", peer.Pubkey,
@@ -180,13 +204,13 @@ func (p *State) HasIP(ip string) bool {
 }
 
 // GetActivePeer returns the active peer state
-func (p *State) GetActivePeer() (name string, state PeerState, err error) {
-	for name, state := range p.peerStatesByName {
+func (p *State) GetActivePeer() (state PeerState, err error) {
+	for _, state := range p.peerStatesByName {
 		if state.LastSeenActive {
-			return name, state, nil
+			return state, nil
 		}
 	}
-	return "", PeerState{}, fmt.Errorf("no active peer found")
+	return PeerState{}, fmt.Errorf("no active peer found")
 }
 
 // HasPeers returns true if the IP has any peers in the gossip state
@@ -209,4 +233,14 @@ func (p *State) GetPeerStates() map[string]PeerState {
 // LastSeenAtString returns the last seen at time as a string
 func (p *PeerState) LastSeenAtString() string {
 	return p.LastSeenAtUTC.Format(time.RFC3339)
+}
+
+// IsRecentlyInGossip returns true if the peer was recently in gossip
+func (p *State) IsRecentlyInGossip(ip string) bool {
+	for _, peer := range p.peerStatesByName {
+		if peer.IP == ip && peer.IsRecentlyInGossip {
+			return true
+		}
+	}
+	return false
 }

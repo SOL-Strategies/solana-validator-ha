@@ -29,7 +29,7 @@ func Run(opts RunOptions) error {
 	logger.Info("running command", loggerArgs...)
 
 	if opts.DryRun {
-		logger.Info("command completed successfully", loggerArgs...)
+		logger.Debug("command completed successfully", loggerArgs...)
 		return nil
 	}
 
@@ -84,7 +84,7 @@ func Run(opts RunOptions) error {
 		return err
 	}
 
-	logger.Info("command completed successfully", loggerArgs...)
+	logger.Debug("command completed successfully", loggerArgs...)
 
 	return nil
 }

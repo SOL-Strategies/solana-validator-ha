@@ -5,7 +5,6 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/charmbracelet/log"
 	"github.com/sol-strategies/solana-validator-ha/internal/command"
 )
 
@@ -107,7 +106,6 @@ func (r *Role) RunCommand(opts RoleCommandRunOptions) error {
 	}
 	loggerArgs = append(loggerArgs, opts.LoggerArgs...)
 
-	log.Info("running command", loggerArgs...)
 	if opts.DryRun {
 		return nil
 	}

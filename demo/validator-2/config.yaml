@@ -1,0 +1,30 @@
+# Configuration for solana-validator-ha binary to use with mock server
+validator:
+  name: validator-2
+  rpc_url: http://localhost:8989/validator-2-rpc
+  public_ip_service_urls:
+    - http://localhost:8989/validator-2/public-ip
+  identities:
+    active: active-identity.json
+    passive: passive-identity.json
+
+cluster:
+  name: mainnet-beta
+  rpc_urls:
+    - http://localhost:8989/solana-network-rpc
+
+prometheus:
+  port: 9097
+
+failover:
+  active:
+    command: ../set-identity.sh
+    args: ["2", active]
+  passive:
+    command: ../set-identity.sh
+    args: ["2", passive]
+  peers:
+    validator-1:
+      ip: 192.168.1.101
+    validator-3:
+      ip: 192.168.1.103

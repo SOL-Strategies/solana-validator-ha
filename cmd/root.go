@@ -3,6 +3,7 @@ package cmd
 import (
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
 	"github.com/spf13/cobra"
@@ -28,10 +29,19 @@ It monitors peers and manages failover decisions to ensure continuous validator 
 			log.Fatal("invalid log level", "error", err)
 		}
 		log.SetLevel(level)
+
+		// set the time function to ensure all logs are in UTC and in nanos
 		log.SetTimeFunction(func() time.Time {
 			return time.Now().UTC()
 		})
 		log.SetTimeFormat("2006-01-02T15:04:05.000Z07:00")
+
+		// extend styles
+		styles := log.DefaultStyles()
+		styles.Timestamp = lipgloss.NewStyle().Faint(true)
+		styles.Message = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
+		styles.Value = lipgloss.NewStyle().Foreground(lipgloss.Color("105"))
+		log.SetStyles(styles)
 
 		// Load configuration
 		cfg, err := config.NewFromConfigFile(configFile)

@@ -128,7 +128,7 @@ func (m *Metrics) initMetrics() {
 	m.registry.MustRegister(m.selfInGossip)
 	m.registry.MustRegister(m.failoverStatus)
 
-	m.logger.Info("initialized Prometheus metrics")
+	m.logger.Debug("initialized Prometheus metrics")
 }
 
 // StartServer starts the Prometheus metrics HTTP server
@@ -141,7 +141,7 @@ func (m *Metrics) StartServer(port int) error {
 		Handler: mux,
 	}
 
-	m.logger.Info("starting Prometheus metrics server", "port", port)
+	m.logger.Debug("starting Prometheus metrics server", "port", port)
 
 	err := m.server.ListenAndServe()
 	if err != nil {

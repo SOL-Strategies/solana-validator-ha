@@ -1,0 +1,26 @@
+# Mock server configuration
+# This file is read on each request to control the mock server's responses
+validators:
+  validator-1:
+    public_ip: 192.168.1.101
+    is_offline: false
+    on_startup_identity: active
+    passive_pubkey: CP6FdV1zoaB64zV7riBPcMNV4WrtH6NZqEcN8cR1yp3i
+    active_pubkey: 7TCCEYMNjpRRdVQiMMYkNWJ9ECVThcUaw8mp11AWhTKe
+    healthy: true
+
+  validator-2:
+    public_ip: 192.168.1.102
+    is_offline: false
+    on_startup_identity: passive
+    passive_pubkey: EhH5vaRnSvYKeYpNkDeFh3x1RgqqsTUsYmkrFZ2iv8mE
+    active_pubkey: 7TCCEYMNjpRRdVQiMMYkNWJ9ECVThcUaw8mp11AWhTKe
+    healthy: true
+
+  validator-3:
+    public_ip: 192.168.1.103
+    is_offline: false
+    on_startup_identity: passive
+    passive_pubkey: H4QkU478RymcAWa1NW22r9tRqbkjVrm14cobrfxGEXQV
+    active_pubkey: 7TCCEYMNjpRRdVQiMMYkNWJ9ECVThcUaw8mp11AWhTKe
+    healthy: true

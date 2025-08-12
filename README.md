@@ -1,11 +1,27 @@
 # Solana Validator HA
 
-A robust high availability manager for Solana validators that monitors network health, manages peer coordination, and orchestrates failover decisions to ensure continuous validator operation.
+A gossip-based high availability (HA) manager for Solana validators.
+
+## Demo
+
+A simulated automatic HA failover resulting from `validator-1 (active)` disconnecting from the network given the validator set `[validator-1 (active), validator-2 (passive), validator-3 (passive)]`:
+
+**validator-1** - disconnects, becomes `passive`, and `validator-3` becomes `active`
+
+![demo-validator-1](demo/validator-1/demo.gif)
+
+**validator-2** - detects `validator-1` disconnection, sees `validator-3` take over as `active`
+
+![demo-validator-2](demo/validator-2/demo.gif)
+
+**validator-3** - detects `validator-1` disconnection, takes over as `active`
+
+![demo-validator-3](demo/validator-3/demo.gif)
 
 ## Features
 
 - **🔍 Intelligent Peer Detection**: Automatically detects validator roles based on network gossip and RPC identity
-- **🛡️ Self-Healing**: Validators can transition between active/passive roles based on health and network visibility
+- **🛡️ Self-Healing**: Validators transition between active/passive roles based on health and network visibility
 - **🔗 Hook System**: Comprehensive pre/post hooks with `must_succeed` support for role transitions
 - **📝 Template Support**: Commands and hooks support Go template variables
 - **🧪 Dry Run Mode**: Test failover logic without executing actual commands
@@ -30,7 +46,7 @@ The system consists of several key components:
 
 `solana-validator-ha` aims to provide a simple, low-dependency HA solution to running 2 or more related validators on a Solana cluster where one of these should be an `active (voting)` peer with the others remaining `passive (non-voting)`. The set of validators each have a unique `passive` identity and a shared `active` identity. The program discovers its HA peers using the Solana cluster's set of validators and each peer makes independent failover decisions when no active peer is discovered.
 
-This approach safeguards against network disconnection or dead nodes, ensuring an `active` validator from the peer list is always online. To this end two important user-supplied configuration settings are required:
+This approach safeguards against network disconnection or dead nodes, ensuring an `active` validator from the peer list is always online. To this end two (‼️**very**‼️) important user-supplied configuration settings are required:
 
 1. A command to run to assume the `active` role. This is simply a reference to a user-supplied command that will be called on the current node only if a failover is required, the node is healthy, is discoverable on the Solana cluster, and no other peers have already assumed the `active` role. As such it should not return until it has successfully set and confirmed the node is active. Typically this would be something along the lines of:
    
@@ -46,7 +62,7 @@ This approach safeguards against network disconnection or dead nodes, ensuring a
       #...
    ```
 
-2. A command to run to assume a `passive` role (a.k.a _Seppukku_). This is simply a reference to an idepmpotent user-supplied command that ensures the validator is set to `passive`. An `active` validator that detects itself as disconnected from the Solana network will call this independently to ensure it doesn't come back online as `active` and cause duplicate identity atempts. Operators may find it safest to configure validators to always start with a `passive` identity so that this would simply require restarting the validator service and waiting for it to report healthy. Something along the lines of:
+2. A command to run to assume a `passive` role (a.k.a _Seppukku_). This is simply a reference to an **idempotent** user-supplied command that ensures the validator is set to `passive`. An `active` validator that detects itself as disconnected from the Solana network will call this independently to ensure it doesn't come back online as `active` and cause duplicate identity atempts. Operators may find it safest to configure validators to always start with a `passive` identity so that this would simply require restarting the validator service and waiting for it to report healthy. Something along the lines of:
 
    ```yaml
       #...

@@ -1,0 +1,13 @@
+services:
+  mock-server:
+    build:
+      context: ./mock-server
+      dockerfile: Dockerfile
+    ports:
+      - "8989:8989"
+    volumes:
+      - ./mock-config.yaml:/config/mock-config.yaml:ro
+    environment:
+      - CONFIG_PATH=/config/mock-config.yaml
+    command: ["go", "run", "main.go", "/config/mock-config.yaml"]
+    restart: unless-stopped

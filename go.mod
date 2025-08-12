@@ -3,6 +3,7 @@ module github.com/sol-strategies/solana-validator-ha
 go 1.24
 
 require (
+	github.com/charmbracelet/lipgloss v0.9.1
 	github.com/charmbracelet/log v0.3.1
 	github.com/gagliardetto/solana-go v1.8.4
 	github.com/iancoleman/strcase v0.3.0
@@ -21,7 +22,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/blendle/zapdriver v1.3.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
-	github.com/charmbracelet/lipgloss v0.9.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dfuse-io/logging v0.0.0-20201110202154-26697de88c79 // indirect
 	github.com/fatih/color v1.9.0 // indirect
