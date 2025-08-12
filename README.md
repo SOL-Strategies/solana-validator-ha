@@ -1,4 +1,4 @@
-# Solana Validator HA
+# solana-validator-ha
 
 A gossip-based high availability (HA) manager for Solana validators.
 
