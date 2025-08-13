@@ -15,6 +15,8 @@ const (
 
 // Config represents the complete configuration
 type Config struct {
+	// Log
+	Log Log `koanf:"log"`
 	// Validator is the local validator configuration
 	Validator Validator `koanf:"validator"`
 	// Cluster is the Solana cluster configuration
@@ -121,7 +123,12 @@ func (c *Config) Initialize() error {
 
 // validate validates the configuration
 func (c *Config) validate() error {
-	err := c.Validator.Validate()
+	err := c.Log.Validate()
+	if err != nil {
+		return err
+	}
+
+	err = c.Validator.Validate()
 	if err != nil {
 		return err
 	}
@@ -151,6 +158,7 @@ func (c *Config) validate() error {
 
 // setDefaults sets default values for configuration
 func (c *Config) setDefaults() {
+	c.Log.SetDefaults()
 	c.Validator.SetDefaults()
 	c.Cluster.SetDefaults()
 	c.Prometheus.SetDefaults()

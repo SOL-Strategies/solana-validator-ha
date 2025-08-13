@@ -251,7 +251,7 @@ func (m *Manager) ensureHAState() {
 	}
 
 	// we see no active peer in the last failover.leaderless_threshold_duration, so we need to failover
-	m.logger.Error("no active peer found in - failover required")
+	m.logger.Error("no active peer found in gossip - failover required")
 
 	// if we don't see ourselves in gossip - ensure we are passive (might be starting up, have dropped from network, etc)
 	// and bow out of the failover process until we are back in gossip

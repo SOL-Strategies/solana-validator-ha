@@ -109,6 +109,29 @@ It is important to note that this does not safeguard against `delinquent` vote a
 
 The application uses a `YAML` configuration file with the following root sections:
 
+### Log Configuration
+
+```yaml
+# log
+# description:
+#   Logging configuration
+log:
+
+  # level
+  # required: false
+  # default: info
+  # description:
+  #   Minimum log level to print. One of: debug, info, warn, error, fatal
+  level: info
+
+  # format
+  # required: false
+  # default: text
+  # description:
+  #   Log format. One of: text, logfmt, json
+  format: text
+```
+
 ### Validator Configuration
 ```yaml
 # validator
