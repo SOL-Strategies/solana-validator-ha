@@ -1,10 +1,18 @@
 package cmd
 
 import (
+	_ "embed"
+	"strings"
+
 	"github.com/charmbracelet/log"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
 	"github.com/spf13/cobra"
 )
+
+//go:embed version.txt
+var versionFile string
+
+var version = strings.TrimSpace(strings.Split(versionFile, "\n")[0])
 
 var (
 	configFile   string
@@ -13,8 +21,9 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "solana-validator-ha",
-	Short: "High availability manager for Solana validators",
+	Use:     "solana-validator-ha",
+	Short:   "High availability manager for Solana validators",
+	Version: version,
 	Long: `Solana Validator HA is a high availability manager for Solana validators.
 It monitors peers and manages failover decisions to ensure continuous validator operation.`,
 	SilenceUsage:  true,

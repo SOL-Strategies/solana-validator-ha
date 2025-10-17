@@ -441,9 +441,10 @@ make dev-setup  # Install air for hot reloading
 air             # Start with hot reloading
 ```
 
-For Docker-based development:
+For Docker-based development with hot reloading:
 ```bash
-make dev        # Start with Docker Compose
+make dev        # Start development environment with hot reload
+make dev-stop   # Stop development environment
 ```
 
 ## Testing
@@ -547,25 +548,29 @@ services:
 ### Automated Releases
 The project includes GitHub Actions for automated releases:
 1. Create a semantic version tag (e.g., `v1.0.0`)
-2. GitHub Actions automatically builds for all platforms
-3. Generates checksums and creates release
+2. GitHub Actions automatically builds for all platforms using Go 1.25
+3. Generates compressed binaries with checksums and creates release
 
 ### Manual Build
 ```bash
 # Build for current platform
 make build
 
-# Build for all platforms
+# Build for all platforms (with compression and checksums)
 make build-all
 
-# Generate checksums
-make checksums
+# Clean build artifacts
+make clean
 ```
 
 **Supported Platforms:**
 - Linux (amd64, arm64)
-- macOS (amd64, arm64) 
-- Windows (amd64)
+- macOS (amd64, arm64)
+
+**Release Process:**
+1. Tag your commit: `git tag v1.0.0`
+2. Push the tag: `git push origin v1.0.0`
+3. GitHub Actions will automatically build and create a release
 
 ## Troubleshooting
 

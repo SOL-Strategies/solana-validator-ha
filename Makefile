@@ -1,37 +1,71 @@
-.PHONY: build test clean docker-build docker-run help
+# Makefile for solana-validator-ha
 
 # Variables
-BINARY_NAME=solana-validator-ha
-VERSION=$(shell git describe --tags --always --dirty)
-BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
-LDFLAGS=-ldflags "-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME}"
+BINARY_NAME := solana-validator-ha
+BUILD_DIR := bin
+LDFLAGS := -ldflags="-s -w"
+export COMPOSE_BAKE := true
+
+# Build targets
+PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
 # Default target
+.PHONY: all
 all: build
 
-# Build targets for different platforms
-BUILD_TARGETS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64
-
-# Development build (current platform)
+# Local development build
+.PHONY: build
 build:
-	@echo "Building ${BINARY_NAME} for development..."
-	go mod tidy
-	go build -mod=mod ${LDFLAGS} -o bin/${BINARY_NAME} ./cmd/solana-validator-ha
+	@echo "Building $(BINARY_NAME)..."
+	@mkdir -p $(BUILD_DIR)
+	@go mod tidy
+	@CGO_ENABLED=0 go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/solana-validator-ha
 
-# Build for Docker development (linux-amd64)
+# Docker build (linux-amd64)
+.PHONY: build-docker
 build-docker:
-	@echo "Building ${BINARY_NAME} for Docker (linux-amd64)..."
-	go mod tidy
-	GOOS=linux GOARCH=amd64 go build -mod=mod ${LDFLAGS} -o bin/${BINARY_NAME}-linux-amd64 ./cmd/solana-validator-ha
+	@echo "Building $(BINARY_NAME) for Docker..."
+	@mkdir -p $(BUILD_DIR)
+	@go mod tidy
+	@VERSION=$$(cat cmd/version.txt | tr -d '\n'); \
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-$$VERSION-linux-amd64 ./cmd/solana-validator-ha
 
-# Build for all release platforms
+# Cross-platform build for all platforms
+.PHONY: build-all
 build-all:
-	@echo "Building ${BINARY_NAME} for all platforms..."
-	go mod tidy
-	@for target in $(BUILD_TARGETS); do \
-		echo "Building for $$target..."; \
-		GOOS=$$(echo $$target | cut -d'-' -f1) GOARCH=$$(echo $$target | cut -d'-' -f2) go build -mod=mod ${LDFLAGS} -o bin/${BINARY_NAME}-$$target$$(if [ "$$target" = "windows-amd64" ]; then echo ".exe"; fi) ./cmd/solana-validator-ha; \
+	@echo "Building $(BINARY_NAME) for all platforms..."
+	@echo "Debug: Current directory: $$(pwd)"
+	@echo "Debug: Contents of cmd/:"
+	@ls -la cmd/ || echo "cmd/ directory not found"
+	@echo "Debug: Contents of cmd/solana-validator-ha/:"
+	@ls -la cmd/solana-validator-ha/ || echo "cmd/solana-validator-ha/ directory not found"
+	@mkdir -p $(BUILD_DIR)
+	@go mod tidy
+	@VERSION=$$(cat cmd/version.txt | tr -d '\n'); \
+	for platform in $(PLATFORMS); do \
+		OS=$$(echo $$platform | cut -d'/' -f1); \
+		ARCH=$$(echo $$platform | cut -d'/' -f2); \
+		OUTPUT_NAME=$(BINARY_NAME)-$$VERSION-$$OS-$$ARCH; \
+		echo "Building for $$OS/$$ARCH..."; \
+		CGO_ENABLED=0 GOOS=$$OS GOARCH=$$ARCH go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$$OUTPUT_NAME ./cmd/solana-validator-ha; \
 	done
+	@echo "Compressing binaries..."
+	@cd $(BUILD_DIR) && \
+	for binary in $(BINARY_NAME)-*; do \
+		if [ -f "$$binary" ] && [ "$${binary##*.}" != "sha256" ]; then \
+			echo "Compressing $$binary..."; \
+			gzip "$$binary"; \
+		fi; \
+	done
+	@echo "Generating checksums..."
+	@cd $(BUILD_DIR) && \
+	for binary in $(BINARY_NAME)-*.gz; do \
+		if [ -f "$$binary" ]; then \
+			echo "Generating checksum for $$binary..."; \
+			sha256sum "$$binary" > "$$binary.sha256"; \
+		fi; \
+	done
+	@echo "Build complete. Compressed binaries and checksums are in $(BUILD_DIR)/"
 
 # Run tests
 test:
@@ -85,9 +119,16 @@ docker-run:
 	docker run -p 9090:9090 -v $(PWD)/config.yaml:/app/config.yaml ${BINARY_NAME}:${VERSION} run --config /app/config.yaml
 
 # Development with hot reload
+.PHONY: dev
 dev:
-	@echo "Starting development environment..."
-	docker compose -f docker-compose.dev.yml up --build
+	@echo "Starting development environment with hot reload..."
+	@docker compose -f docker-compose.dev.yml up --build solana-validator-ha
+
+# Stop Docker development
+.PHONY: dev-stop
+dev-stop:
+	@echo "Stopping development environment..."
+	@docker compose -f docker-compose.dev.yml down
 
 # Development setup (local)
 dev-setup:
@@ -96,6 +137,12 @@ dev-setup:
 	go mod tidy
 	go install github.com/air-verse/air@latest
 	@echo "Development environment ready! Run 'air' to start with hot reloading."
+
+# Clean build artifacts
+.PHONY: clean
+clean:
+	@echo "Cleaning build artifacts..."
+	@rm -rf $(BUILD_DIR)
 
 # Generate checksums
 checksums:
@@ -117,21 +164,22 @@ uninstall:
 # Show help
 help:
 	@echo "Available targets:"
-	@echo "  build        - Build for development (current platform)"
-	@echo "  build-docker - Build for Docker development (linux-amd64)"
-	@echo "  build-all    - Build for all release platforms"
-	@echo "  test         - Run tests"
-	@echo "  test-coverage- Run tests with coverage"
+	@echo "  build          - Build the binary locally"
+	@echo "  build-all      - Build binaries for all platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64)"
+	@echo "  build-docker   - Build for Docker (linux-amd64)"
+	@echo "  clean          - Clean build artifacts"
+	@echo "  test           - Run tests"
+	@echo "  test-coverage  - Run tests with coverage"
 	@echo "  integration-test - Run integration tests"
-	@echo "  clean        - Clean build artifacts"
-	@echo "  deps         - Install dependencies"
-	@echo "  fmt          - Format code"
-	@echo "  lint         - Run linter"
-	@echo "  docker-build - Build Docker image"
-	@echo "  docker-run   - Run Docker container"
-	@echo "  dev          - Start development environment (Docker)"
-	@echo "  dev-setup    - Setup local development environment"
-	@echo "  checksums    - Generate checksums"
-	@echo "  install      - Install binary"
-	@echo "  uninstall    - Uninstall binary"
-	@echo "  help         - Show this help"
+	@echo "  deps           - Install dependencies"
+	@echo "  fmt            - Format code"
+	@echo "  lint           - Run linter"
+	@echo "  docker-build   - Build Docker image"
+	@echo "  docker-run     - Run Docker container"
+	@echo "  dev             - Start development environment with hot reload (Docker)"
+	@echo "  dev-stop        - Stop development environment"
+	@echo "  dev-setup       - Setup local development environment"
+	@echo "  checksums      - Generate checksums"
+	@echo "  install        - Install binary"
+	@echo "  uninstall      - Uninstall binary"
+	@echo "  help           - Show this help"
