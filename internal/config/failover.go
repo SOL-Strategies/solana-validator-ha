@@ -125,4 +125,8 @@ func (f *Failover) SetDefaults() {
 	if f.TakeoverJitterSeconds == 0 {
 		f.TakeoverJitterSeconds = 3
 	}
+
+	// Set role names
+	f.Active.Name = "active"
+	f.Passive.Name = "passive"
 }

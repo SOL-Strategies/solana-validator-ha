@@ -1,6 +1,6 @@
 module mock-server
 
-go 1.21
+go 1.25
 
 require github.com/knadh/koanf v1.5.0
 

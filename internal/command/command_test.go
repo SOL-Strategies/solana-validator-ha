@@ -448,6 +448,56 @@ func TestRun_CommandWithEmptyStringArgs(t *testing.T) {
 	assert.NoError(t, err, "expected command to succeed with empty string arguments")
 }
 
+func TestRun_WithStreaming(t *testing.T) {
+	// Create a test script that outputs to both stdout and stderr
+	scriptContent := `#!/bin/sh
+echo "This is stdout line 1"
+echo "This is stderr line 1" >&2
+echo "This is stdout line 2"
+echo "This is stderr line 2" >&2
+echo "This is stdout line 3"
+`
+	scriptPath := createTestScript(t, scriptContent, 0)
+	defer os.Remove(scriptPath)
+
+	opts := RunOptions{
+		Command:      scriptPath,
+		Args:         []string{},
+		DryRun:       false,
+		StreamOutput: true,
+		LoggerArgs: []any{
+			"test", "streaming",
+		},
+	}
+
+	err := Run(opts)
+	assert.NoError(t, err, "expected streaming command to succeed")
+}
+
+func TestRun_WithStreamingAndFailure(t *testing.T) {
+	// Create a test script that outputs to both stdout and stderr then fails
+	scriptContent := `#!/bin/sh
+echo "This is stdout before failure"
+echo "This is stderr before failure" >&2
+exit 1
+`
+	scriptPath := createTestScript(t, scriptContent, 1)
+	defer os.Remove(scriptPath)
+
+	opts := RunOptions{
+		Command:      scriptPath,
+		Args:         []string{},
+		DryRun:       false,
+		StreamOutput: true,
+		LoggerArgs: []any{
+			"test", "streaming_failure",
+		},
+	}
+
+	err := Run(opts)
+	assert.Error(t, err, "expected streaming command to fail")
+}
+
 // Benchmark tests
 func BenchmarkRun_Success(b *testing.B) {
 	scriptPath := createTestScript(b, "echo 'benchmark test'", 0)
@@ -489,4 +539,89 @@ func createTestScript(t testing.TB, content string, expectedExitCode int) string
 	require.NoError(t, err, "failed to create test script")
 
 	return scriptPath
+}
+
+func TestRun_WithEnvironmentVariables(t *testing.T) {
+	// Create a test script that outputs environment variables
+	scriptContent := `#!/bin/sh
+echo "TEST_VAR1: $TEST_VAR1"
+echo "TEST_VAR2: $TEST_VAR2"
+echo "PATH: $PATH"
+`
+	scriptPath := createTestScript(t, scriptContent, 0)
+	defer os.Remove(scriptPath)
+
+	env := map[string]string{
+		"TEST_VAR1": "value1",
+		"TEST_VAR2": "value2",
+	}
+
+	opts := RunOptions{
+		Command:      scriptPath,
+		Args:         []string{},
+		Env:          env,
+		DryRun:       false,
+		StreamOutput: false,
+		LoggerArgs: []any{
+			"test", "env_vars",
+		},
+	}
+
+	err := Run(opts)
+	assert.NoError(t, err, "expected command with env vars to succeed")
+}
+
+func TestRun_WithEnvironmentVariablesStreaming(t *testing.T) {
+	// Create a test script that outputs environment variables
+	scriptContent := `#!/bin/sh
+echo "TEST_VAR1: $TEST_VAR1"
+echo "TEST_VAR2: $TEST_VAR2"
+echo "PATH: $PATH"
+`
+	scriptPath := createTestScript(t, scriptContent, 0)
+	defer os.Remove(scriptPath)
+
+	env := map[string]string{
+		"TEST_VAR1": "value1",
+		"TEST_VAR2": "value2",
+	}
+
+	opts := RunOptions{
+		Command:      scriptPath,
+		Args:         []string{},
+		Env:          env,
+		DryRun:       false,
+		StreamOutput: true,
+		LoggerArgs: []any{
+			"test", "env_vars_streaming",
+		},
+	}
+
+	err := Run(opts)
+	assert.NoError(t, err, "expected streaming command with env vars to succeed")
+}
+
+func TestRun_WithEmptyEnvironmentVariables(t *testing.T) {
+	// Create a test script that outputs environment variables
+	scriptContent := `#!/bin/sh
+echo "TEST_VAR1: $TEST_VAR1"
+echo "TEST_VAR2: $TEST_VAR2"
+echo "PATH: $PATH"
+`
+	scriptPath := createTestScript(t, scriptContent, 0)
+	defer os.Remove(scriptPath)
+
+	opts := RunOptions{
+		Command:      scriptPath,
+		Args:         []string{},
+		Env:          map[string]string{}, // Empty env map
+		DryRun:       false,
+		StreamOutput: false,
+		LoggerArgs: []any{
+			"test", "empty_env_vars",
+		},
+	}
+
+	err := Run(opts)
+	assert.NoError(t, err, "expected command with empty env vars to succeed")
 }

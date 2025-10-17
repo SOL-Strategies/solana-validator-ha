@@ -578,19 +578,22 @@ func (m *Manager) delayTakeover() {
 		return
 	}
 
-	// arbitrary delay by declaration of peer order + failover.takeover_jitter_seconds
-	var delaySeconds int
-	for i, ip := range m.cfg.Failover.Peers.GetRankedIPs() {
-		if ip == m.peerSelf.IP {
-			delaySeconds = i + 1
-			break
-		}
+	// get the peer rank - artificial ordering of peers by IP so that it is common across all nodes
+	// running this function
+	selfPeerRank := len(m.cfg.Failover.Peers) + 1
+
+	// if find yourself in the ranked list, use that rank
+	if rank, ok := m.cfg.Failover.Peers.GetRankedIPs()[m.peerSelf.IP]; ok {
+		selfPeerRank = rank
 	}
 
-	delay := time.Duration(delaySeconds) * time.Second
-	// add random jitter to the delay
-	delay += time.Duration(rand.Intn(m.cfg.Failover.TakeoverJitterSeconds)) * time.Second
-	m.logger.Debug("delaying takeover to avoid race conditions", "delay", delay)
-	time.Sleep(delay)
+	// set delay seconds based on rank
+	delay := time.Duration(selfPeerRank) * time.Second
 
+	// add random jitter to the delay to safeguard against multiple nodes trying to become active at the same time
+	delay += time.Duration(rand.Intn(m.cfg.Failover.TakeoverJitterSeconds)) * time.Second
+
+	m.logger.Debug("delaying takeover to avoid race conditions", "delay", delay, "self_peer_rank", selfPeerRank)
+	time.Sleep(delay)
+	m.logger.Debug("takeover delay complete", "self_peer_rank", selfPeerRank)
 }

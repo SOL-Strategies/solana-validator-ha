@@ -24,6 +24,7 @@ type Hook struct {
 
 // HookRunOptions represents options for running a hook
 type HookRunOptions struct {
+	HookType   string // "pre" or "post"
 	DryRun     bool
 	LoggerArgs []any
 }
@@ -87,10 +88,12 @@ func (h *Hook) Run(opts HookRunOptions) error {
 
 	log.Info("running hook", loggerArgs...)
 	return command.Run(command.RunOptions{
-		Command:    h.Command,
-		Args:       h.Args,
-		DryRun:     opts.DryRun,
-		LoggerArgs: loggerArgs,
+		Name:         fmt.Sprintf("%s-hook %s", opts.HookType, h.Name),
+		Command:      h.Command,
+		Args:         h.Args,
+		DryRun:       opts.DryRun,
+		LoggerArgs:   loggerArgs,
+		StreamOutput: true,
 	})
 }
 
@@ -104,6 +107,7 @@ func (h *Hooks) RunPre(opts HooksRunOptions) error {
 	// run pre hooks
 	for _, hook := range h.Pre {
 		err := hook.Run(HookRunOptions{
+			HookType:   "pre",
 			DryRun:     opts.DryRun,
 			LoggerArgs: loggerArgs,
 		})
@@ -128,6 +132,7 @@ func (h *Hooks) RunPost(opts HooksRunOptions) {
 	// run post hooks - failures are logged but not returned
 	for _, hook := range h.Post {
 		err := hook.Run(HookRunOptions{
+			HookType:   "post",
 			DryRun:     opts.DryRun,
 			LoggerArgs: loggerArgs,
 		})

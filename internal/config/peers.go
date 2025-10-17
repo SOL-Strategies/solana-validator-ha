@@ -51,11 +51,15 @@ func (p *Peers) GetIPs() []string {
 // GetRankedIPs returns the IP addresses in ascending order
 // this is arbitrary but used to impose some portable guaranteed
 // rank among peers without sharing any other configuration
-func (p *Peers) GetRankedIPs() []string {
+func (p *Peers) GetRankedIPs() (rankedIPs map[string]int) {
+	rankedIPs = make(map[string]int)
 	ips := p.GetIPs()
-	if len(ips) <= 1 {
-		return ips
-	}
 	sort.Strings(ips)
-	return ips
+
+	// ips are sorted in ascending order now
+	for ipIndex, ip := range ips {
+		rankedIPs[ip] = ipIndex + 1
+	}
+
+	return rankedIPs
 }

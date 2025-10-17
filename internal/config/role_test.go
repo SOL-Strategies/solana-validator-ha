@@ -35,6 +35,11 @@ func TestRole_RenderCommands(t *testing.T) {
 	role := &Role{
 		Command: "systemctl {{.ActiveIdentityPubkey}}",
 		Args:    []string{"--identity", "{{.ActiveIdentityKeypairFile}}"},
+		Env: map[string]string{
+			"SOLANA_IDENTITY": "{{.ActiveIdentityPubkey}}",
+			"SOLANA_KEYPAIR":  "{{.ActiveIdentityKeypairFile}}",
+			"SOLANA_SELF":     "{{.SelfName}}",
+		},
 		Hooks: Hooks{
 			Pre: []Hook{
 				{Name: "pre-hook", Command: "echo '{{.PassiveIdentityPubkey}}'"},
@@ -50,6 +55,7 @@ func TestRole_RenderCommands(t *testing.T) {
 		ActiveIdentityPubkey:       "active-pubkey",
 		PassiveIdentityKeypairFile: "/path/to/passive.json",
 		PassiveIdentityPubkey:      "passive-pubkey",
+		SelfName:                   "validator-1",
 	}
 
 	err := role.RenderCommands(data)
@@ -60,6 +66,11 @@ func TestRole_RenderCommands(t *testing.T) {
 	assert.Equal(t, []string{"--identity", "/path/to/active.json"}, role.Args)
 	assert.Equal(t, "echo 'passive-pubkey'", role.Hooks.Pre[0].Command)
 	assert.Equal(t, "echo '/path/to/passive.json'", role.Hooks.Post[0].Command)
+
+	// Check that environment variables were rendered
+	assert.Equal(t, "active-pubkey", role.Env["SOLANA_IDENTITY"])
+	assert.Equal(t, "/path/to/active.json", role.Env["SOLANA_KEYPAIR"])
+	assert.Equal(t, "validator-1", role.Env["SOLANA_SELF"])
 }
 
 func TestRole_RenderCommandsWithInvalidTemplate(t *testing.T) {
@@ -74,7 +85,25 @@ func TestRole_RenderCommandsWithInvalidTemplate(t *testing.T) {
 
 	err := role.RenderCommands(data)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to render role.command and role.args")
+	assert.Contains(t, err.Error(), "failed to render role.command, role.args, and role.env")
+}
+
+func TestRole_RenderCommandsWithInvalidEnvTemplate(t *testing.T) {
+	role := &Role{
+		Command: "systemctl start solana",
+		Env: map[string]string{
+			"SOLANA_IDENTITY": "{{.InvalidField}}",
+		},
+	}
+
+	data := RoleCommandTemplateData{
+		ActiveIdentityKeypairFile: "/path/to/active.json",
+		ActiveIdentityPubkey:      "active-pubkey",
+	}
+
+	err := role.RenderCommands(data)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to render env[SOLANA_IDENTITY]")
 }
 
 func TestRole_RenderTemplateString(t *testing.T) {

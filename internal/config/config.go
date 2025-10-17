@@ -113,6 +113,7 @@ func (c *Config) Initialize() error {
 		ActiveIdentityPubkey:       c.Validator.Identities.ActiveKeyPair.PublicKey().String(),
 		PassiveIdentityKeypairFile: c.Validator.Identities.PassiveKeyPairFile,
 		PassiveIdentityPubkey:      c.Validator.Identities.PassiveKeyPair.PublicKey().String(),
+		SelfName:                   c.Validator.Name,
 	})
 	if err != nil {
 		return err

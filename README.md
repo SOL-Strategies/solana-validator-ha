@@ -282,7 +282,7 @@ failover:
   # required: true
   # description:
   #   Commands and hooks to execute when the failover logic determines this validator should become active
-  #   All command and args values support Go template strings with the following data:
+  #   All command, args and env map values support Go template strings with the following data:
   #     - {{ .ActiveIdentityKeypairFile }} - Resolved absolute path to validator.identities.active
   #     - {{ .PassiveIdentityKeypairFile }} - Resolved absolute path to validator.identities.passive
   #     - {{ .ActiveIdentityPubkey }} - Active public key string from validator.identities.active
@@ -296,13 +296,21 @@ failover:
     #   Command to run to make the current validator assume an active role - be mindful of its importance
    command: set-identity-with-rollback.sh
 
+   # env
+   # required: false
+   # description:
+   #   Environment variables for active.command
+   env:
+    CUSTOM_ENV_VAR: "{{ .Identities.ActiveIdentityPubkey }}"
+
    # args
    # required: false
    # description:
    #   Args for active.command
    args: [
-     "--to-identity-file", "{{ .Identities.PassiveKeypairFile }}",
-     "--rollback-identity-file", "{{ .Identities.PassiveKeypairFile }}",
+     "active",
+     "--active-identity-file", "{{ .Identities.ActiveIdentityKeypairFile }}",
+     "--passive-identity-file", "{{ .Identities.PassiveIdentityKeypairFile }}",
    ]
 
    # hooks
@@ -315,9 +323,10 @@ failover:
    hooks:
 
     pre:
-      - name: pre-active-hook
+      - name: notify-slack-promoting
         command: /home/solana/solana-validator-ha/hooks/pre-active/send-slack-alert.sh
         must_succeed: false # optional, defaults to false
+        env: {}
         args: [
           "--channel", "#save-my-bacon",
           "--message", "solana-validator-ha promoting {{ .SelfName }} to active by changing identities from {{ .PassiveIdentityPubkey }} -> {{ .ActiveIdentityPubkey }}"
@@ -325,8 +334,9 @@ failover:
       # ...
 
     post:
-      - name: post-active-hook
+      - name: notify-slack-promoted
         command: /home/solana/solana-validator-ha/hooks/post-active/send-slack-alert.sh
+        env: {}
         args: [
           "--channel", "#saved-my-bacon",
           "--message", "solana-validator-ha promoted {{ .SelfName }} to active with identity {{ .ActiveIdentityPubkey }}"
@@ -374,7 +384,7 @@ failover:
    hooks:
 
     pre:
-      - name: pre-passive-hook
+      - name: notify-slack-demoting
         command: /home/solana/solana-validator-ha/hooks/pre-passive/send-slack-alert.sh
         must_succeed: false # optional, defaults to false
         args: [
@@ -384,7 +394,7 @@ failover:
       # ...
 
     post:
-      - name: post-passive-hook
+      - name: notify-slack-demoted
         command: /home/solana/solana-validator-ha/hooks/post-passive/send-slack-alert.sh
         args: [
           "--channel", "#postmortem-shelf",
