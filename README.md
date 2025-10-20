@@ -56,8 +56,8 @@ This approach safeguards against network disconnection or dead nodes, ensuring a
        active:
          command: "set-identity-with-rollback.sh" # user-supplied command -everyone's setup is different :-)
          args: [
-           "--to-identity-file", "{{ .Identities.PassiveKeypairFile }}",
-           "--rollback-identity-file", "{{ .Identities.PassiveKeypairFile }}",
+           "--to-identity-file", "{{ .PassiveIdentityKeypairFile }}",
+           "--rollback-identity-file", "{{ .PassiveIdentityKeypairFile }}",
          ]
       #...
    ```

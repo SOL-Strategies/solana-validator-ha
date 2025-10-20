@@ -190,22 +190,13 @@ func (m *Manager) startMetricsServer() {
 func (m *Manager) haMonitorLoop() error {
 	m.logger.Info("monitoring HA state", "poll_interval", m.cfg.Failover.PollIntervalDuration)
 
-	// initial gossip state refresh to populate things and log if active peer found
+	// initial gossip state population
 	m.gossipState.Refresh()
 
-	if m.gossipState.HasActivePeerInTheLast(m.cfg.Failover.LeaderlessThresholdDuration) {
-		activePeerState, err := m.gossipState.GetActivePeer()
-		if err != nil {
-			m.logger.Warn("failed to get active peer from state", "error", err)
-		} else {
-			activePeerFoundMessage := "active peer found"
-			if activePeerState.IP == m.peerSelf.IP {
-				activePeerFoundMessage = "active peer found (us)"
-			}
-			m.logger.Info(activePeerFoundMessage, "name", activePeerState.Name, "public_ip", activePeerState.IP, "pubkey", activePeerState.Pubkey)
-		}
-	}
+	// check for active peer in state and log if found
+	m.checkForActivePeer()
 
+	// start the monitor loop with initial loaded state
 	ticker := time.NewTicker(m.cfg.Failover.PollIntervalDuration)
 	defer ticker.Stop()
 
@@ -218,6 +209,27 @@ func (m *Manager) haMonitorLoop() error {
 			m.ensureHAState()
 		}
 	}
+}
+
+// checkForActivePeer checks for an active peer in the gossip state
+func (m *Manager) checkForActivePeer() {
+	if !m.gossipState.HasActivePeerInTheLast(m.cfg.Failover.LeaderlessThresholdDuration) {
+		m.logger.Warn(fmt.Sprintf("no active peer found in gossip in the last %s", m.cfg.Failover.LeaderlessThresholdDuration))
+		return
+	}
+
+	activePeerState, err := m.gossipState.GetActivePeer()
+	if err != nil {
+		m.logger.Warn("failed to get active peer from state", "error", err)
+		return
+	}
+
+	activePeerFoundMessage := "active peer found"
+	if activePeerState.IP == m.peerSelf.IP {
+		activePeerFoundMessage += " (us)"
+	}
+
+	m.logger.Info(activePeerFoundMessage, "name", activePeerState.Name, "public_ip", activePeerState.IP, "pubkey", activePeerState.Pubkey)
 }
 
 // ensureHAState implements basic HA logic
