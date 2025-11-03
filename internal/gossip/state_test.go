@@ -90,7 +90,7 @@ func TestHasActivePeer(t *testing.T) {
 	assert.True(t, state.HasActivePeer())
 }
 
-func TestHasActivePeerInTheLast(t *testing.T) {
+func TestHasActivePeerInTheLastNSamples(t *testing.T) {
 	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
 
 	opts := Options{
@@ -102,36 +102,34 @@ func TestHasActivePeerInTheLast(t *testing.T) {
 
 	state := NewState(opts)
 
-	// Test with no active peers
+	// Test with no active peers (leaderlessSamplesCount should increment)
 	state.peerStatesByName = map[string]PeerState{
 		"peer1": {IP: "192.168.1.2", Pubkey: "pubkey1", LastSeenAtUTC: time.Now().UTC(), LastSeenActive: false},
 	}
+	state.leaderlessSamplesCount = 5 // Set count to 5
 
-	assert.False(t, state.HasActivePeerInTheLast(time.Minute))
+	// With threshold of 3, count of 5 should fail (5 >= 3)
+	assert.False(t, state.HasActivePeerInTheLastNSamples(3))
 
-	// Test with recently active peer
+	// With threshold of 10, count of 5 should pass (5 < 10)
+	assert.True(t, state.HasActivePeerInTheLastNSamples(10))
+
+	// Test with active peer found (leaderlessSamplesCount should be reset)
 	state.peerStatesByName["peer2"] = PeerState{
 		IP:             "192.168.1.3",
 		Pubkey:         "pubkey2",
 		LastSeenAtUTC:  time.Now().UTC(),
 		LastSeenActive: true,
 	}
+	state.leaderlessSamplesCount = 0 // Reset count when active peer found
 
-	assert.True(t, state.HasActivePeerInTheLast(time.Minute))
+	// With threshold of 3, count of 0 should pass (0 < 3)
+	assert.True(t, state.HasActivePeerInTheLastNSamples(3))
 
-	// Test with old active peer
-	state.peerStatesByName["peer3"] = PeerState{
-		IP:             "192.168.1.4",
-		Pubkey:         "pubkey3",
-		LastSeenAtUTC:  time.Now().UTC().Add(-2 * time.Hour),
-		LastSeenActive: true,
-	}
-
-	assert.True(t, state.HasActivePeerInTheLast(time.Minute)) // peer2 is still recent
-
-	// Test with a very short duration that should fail
-	// We'll use a negative duration to ensure it fails
-	assert.False(t, state.HasActivePeerInTheLast(-time.Second))
+	// Test with count at threshold boundary
+	state.leaderlessSamplesCount = 3
+	assert.False(t, state.HasActivePeerInTheLastNSamples(3)) // 3 >= 3, should fail
+	assert.True(t, state.HasActivePeerInTheLastNSamples(4))  // 3 < 4, should pass
 }
 
 func TestGetActivePeer(t *testing.T) {
@@ -337,7 +335,8 @@ func TestState_EmptyConfigPeers(t *testing.T) {
 
 	// Test all methods with empty config
 	assert.False(t, state.HasActivePeer())
-	assert.False(t, state.HasActivePeerInTheLast(time.Minute))
+	state.leaderlessSamplesCount = 5 // Set count high
+	assert.False(t, state.HasActivePeerInTheLastNSamples(3))
 	assert.False(t, state.HasIP("192.168.1.1"))
 	assert.False(t, state.HasPeers("192.168.1.1"))
 
@@ -348,7 +347,7 @@ func TestState_EmptyConfigPeers(t *testing.T) {
 	assert.Empty(t, peerStates)
 }
 
-func TestState_TimeBasedLogic(t *testing.T) {
+func TestState_SampleBasedLogic(t *testing.T) {
 	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
 
 	opts := Options{
@@ -360,7 +359,7 @@ func TestState_TimeBasedLogic(t *testing.T) {
 
 	state := NewState(opts)
 
-	// Test with peer seen exactly at the boundary
+	// Test with active peer (leaderlessSamplesCount should be 0)
 	now := time.Now().UTC()
 	state.peerStatesByName = map[string]PeerState{
 		"peer1": {
@@ -370,16 +369,23 @@ func TestState_TimeBasedLogic(t *testing.T) {
 			LastSeenActive: true,
 		},
 	}
+	state.leaderlessSamplesCount = 0 // Reset when active peer found
 
-	// Should be active within 1 minute
-	assert.True(t, state.HasActivePeerInTheLast(time.Minute))
+	// Should pass with threshold of 3 (0 < 3)
+	assert.True(t, state.HasActivePeerInTheLastNSamples(3))
 
-	// Should be active within 1 hour
-	assert.True(t, state.HasActivePeerInTheLast(time.Hour))
+	// Should pass with threshold of 1 (0 < 1)
+	assert.True(t, state.HasActivePeerInTheLastNSamples(1))
 
-	// Test with a very short duration that should fail
-	// We'll use a negative duration to ensure it fails
-	assert.False(t, state.HasActivePeerInTheLast(-time.Second))
+	// Test with no active peer (leaderlessSamplesCount increments)
+	state.leaderlessSamplesCount = 5
+	delete(state.peerStatesByName, "peer1") // Remove active peer
+
+	// Should fail with threshold of 3 (5 >= 3)
+	assert.False(t, state.HasActivePeerInTheLastNSamples(3))
+
+	// Should pass with threshold of 10 (5 < 10)
+	assert.True(t, state.HasActivePeerInTheLastNSamples(10))
 }
 
 func TestState_ConcurrentAccess(t *testing.T) {

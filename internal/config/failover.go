@@ -8,13 +8,13 @@ import (
 
 // Failover represents failover decision parameters
 type Failover struct {
-	DryRun                      bool          `koanf:"dry_run"`
-	PollIntervalDuration        time.Duration `koanf:"poll_interval_duration"`
-	LeaderlessThresholdDuration time.Duration `koanf:"leaderless_threshold_duration"`
-	TakeoverJitterSeconds       int           `koanf:"takeover_jitter_seconds"`
-	Active                      Role          `koanf:"active"`
-	Passive                     Role          `koanf:"passive"`
-	Peers                       Peers         `koanf:"peers"`
+	DryRun                     bool          `koanf:"dry_run"`
+	PollIntervalDuration       time.Duration `koanf:"poll_interval_duration"`
+	LeaderlessSamplesThreshold int           `koanf:"leaderless_samples_threshold"`
+	TakeoverJitterSeconds      int           `koanf:"takeover_jitter_seconds"`
+	Active                     Role          `koanf:"active"`
+	Passive                    Role          `koanf:"passive"`
+	Peers                      Peers         `koanf:"peers"`
 }
 
 func (f *Failover) Validate() error {
@@ -23,9 +23,9 @@ func (f *Failover) Validate() error {
 		return fmt.Errorf("failover.poll_interval_duration must be greater than zero")
 	}
 
-	// failover.leaderless_threshold_duration must be greater than zero
-	if f.LeaderlessThresholdDuration <= 0 {
-		return fmt.Errorf("failover.leaderless_threshold_duration must be positive and non-zero")
+	// failover.leaderless_samples_threshold must be greater than zero
+	if f.LeaderlessSamplesThreshold <= 0 {
+		return fmt.Errorf("failover.leaderless_samples_threshold must be positive and non-zero")
 	}
 
 	// failover.active.command must be defined
@@ -119,8 +119,8 @@ func (f *Failover) SetDefaults() {
 	if f.PollIntervalDuration == 0 {
 		f.PollIntervalDuration = 5 * time.Second
 	}
-	if f.LeaderlessThresholdDuration == 0 {
-		f.LeaderlessThresholdDuration = 15 * time.Second
+	if f.LeaderlessSamplesThreshold == 0 {
+		f.LeaderlessSamplesThreshold = 3 //  3 x poll interval = (at least) 15 seconds
 	}
 	if f.TakeoverJitterSeconds == 0 {
 		f.TakeoverJitterSeconds = 3

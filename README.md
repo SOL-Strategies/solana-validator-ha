@@ -48,7 +48,7 @@ The system consists of several key components:
 
 This approach safeguards against network disconnection or dead nodes, ensuring an `active` validator from the peer list is always online. To this end two (‼️**very**‼️) important user-supplied configuration settings are required:
 
-1. A command to run to assume the `active` role. This is simply a reference to a user-supplied command that will be called on the current node only if a failover is required, the node is healthy, is discoverable on the Solana cluster, and no other peers have already assumed the `active` role. As such it should not return until it has successfully set and confirmed the node is active. Typically this would be something along the lines of:
+1. A command to run for a node to assume the `active` role. This is simply a reference to a user-supplied command that will be called on the current node only if a failover is required, the node is healthy, is discoverable on the Solana cluster, is responding on its gossip port, and no other peers have already assumed the `active` role. As such it should not return until it has successfully set and confirmed the node is active. Typically this would be something along the lines of:
    
    ```yaml
       #...
@@ -74,9 +74,6 @@ This approach safeguards against network disconnection or dead nodes, ensuring a
          ]
       #...
    ```
-
-
-It is important to note that this does not safeguard against `delinquent` vote accounts. Failing over on these events cannot be guaranteed to fix things.
 
 ## Quick Start
 
@@ -248,13 +245,13 @@ failover:
   #   and evaluate failover decisions
   poll_interval_duration: 5s
 
-  # leaderless_threshold_duration
+  # leaderless_samples_threshold
   # required: false
-  # default: 15s
+  # default: 3 - (at least) 15s with poll_interval_duration at default of 5s
   # description:
-  #   A Go duration string for how long to consider this validator cluster "leaderless" (no active validator seen on the Solana network)
-  #   and thus trigger a failover event. Consider this in the context for poll_interval_duration to allow for occasional failed polls
-  leaderless_threshold_duration: 15s
+  #   Number of gossip samples to allow without a leader (active, voting node) before considering the validator cluster leaderless
+  #   and thus triggering a failover. A node running on an identity with a delinquent vote account is not consiodered to be a leader.
+  leaderless_samples_threshold: 3
 
   # takeover_delay_duration
   # required: false

@@ -13,17 +13,17 @@ func TestFailover_SetDefaults(t *testing.T) {
 
 	// Check that defaults are set
 	assert.Equal(t, 5*time.Second, failover.PollIntervalDuration)
-	assert.Equal(t, 15*time.Second, failover.LeaderlessThresholdDuration)
+	assert.Equal(t, 3, failover.LeaderlessSamplesThreshold)
 	assert.Equal(t, 3, failover.TakeoverJitterSeconds)
 }
 
 func TestFailover_Validate(t *testing.T) {
 	// Test with valid failover config
 	failover := &Failover{
-		DryRun:                      false,
-		PollIntervalDuration:        30 * time.Second,
-		LeaderlessThresholdDuration: 5 * time.Minute,
-		TakeoverJitterSeconds:       10,
+		DryRun:                     false,
+		PollIntervalDuration:       30 * time.Second,
+		LeaderlessSamplesThreshold: 10,
+		TakeoverJitterSeconds:      10,
 		Active: Role{
 			Command: "systemctl start solana",
 		},
@@ -45,15 +45,15 @@ func TestFailover_Validate(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failover.poll_interval_duration must be greater than zero")
 
-	// Test with zero leaderless threshold
+	// Test with zero leaderless samples threshold
 	failover.PollIntervalDuration = 30 * time.Second
-	failover.LeaderlessThresholdDuration = 0
+	failover.LeaderlessSamplesThreshold = 0
 	err = failover.Validate()
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failover.leaderless_threshold_duration must be positive and non-zero")
+	assert.Contains(t, err.Error(), "failover.leaderless_samples_threshold must be positive and non-zero")
 
 	// Test with empty active command
-	failover.LeaderlessThresholdDuration = 5 * time.Minute
+	failover.LeaderlessSamplesThreshold = 10
 	failover.Active.Command = ""
 	err = failover.Validate()
 	assert.Error(t, err)
@@ -93,9 +93,9 @@ func TestFailover_Validate(t *testing.T) {
 
 func TestFailover_ValidateWithHooks(t *testing.T) {
 	failover := &Failover{
-		PollIntervalDuration:        30 * time.Second,
-		LeaderlessThresholdDuration: 5 * time.Minute,
-		TakeoverJitterSeconds:       10,
+		PollIntervalDuration:       30 * time.Second,
+		LeaderlessSamplesThreshold: 10,
+		TakeoverJitterSeconds:      10,
 		Active: Role{
 			Command: "systemctl start solana",
 			Hooks: Hooks{

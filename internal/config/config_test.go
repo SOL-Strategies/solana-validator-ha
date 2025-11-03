@@ -89,10 +89,10 @@ func TestValidate(t *testing.T) {
 			Port: 9090,
 		},
 		Failover: Failover{
-			DryRun:                      false,
-			PollIntervalDuration:        30 * time.Second,
-			LeaderlessThresholdDuration: 5 * time.Minute,
-			TakeoverJitterSeconds:       10,
+			DryRun:                     false,
+			PollIntervalDuration:       30 * time.Second,
+			LeaderlessSamplesThreshold: 10,
+			TakeoverJitterSeconds:      10,
 			Active: Role{
 				Command: "systemctl start solana",
 			},

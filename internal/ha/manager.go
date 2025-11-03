@@ -213,8 +213,8 @@ func (m *Manager) haMonitorLoop() error {
 
 // checkForActivePeer checks for an active peer in the gossip state
 func (m *Manager) checkForActivePeer() {
-	if !m.gossipState.HasActivePeerInTheLast(m.cfg.Failover.LeaderlessThresholdDuration) {
-		m.logger.Warn(fmt.Sprintf("no active peer found in gossip in the last %s", m.cfg.Failover.LeaderlessThresholdDuration))
+	if !m.gossipState.HasActivePeerInTheLastNSamples(m.cfg.Failover.LeaderlessSamplesThreshold) {
+		m.logger.Warn(fmt.Sprintf("no active peer found in gossip in the last %d samples", m.cfg.Failover.LeaderlessSamplesThreshold))
 		return
 	}
 
@@ -242,38 +242,32 @@ func (m *Manager) ensureHAState() {
 	// refresh metrics
 	m.refreshMetrics()
 
-	// warn if we don't appear in gossip and ensure we are passive - disconnection or starting up
+	// warn if we don't appear in gossip and bow out
 	if m.isSelfNotInGossip() {
 		m.logger.Warn("we are not in gossip - ensuring we are passive", "public_ip", m.peerSelf.IP)
-		m.ensurePassive()
+		m.ensurePassive()       // makes sure even we can't get network response we take ourselves out if we come back
+		m.gossipState.Refresh() // refresh gossip state for clean next run
 		return
 	}
 
-	// tell us if we have recently been discovered in gossip
-	if m.isSelfRecentlyInGossip() {
-		m.logger.Info("we are in gossip", "pubkey", m.selfGossipPubkey(), "public_ip", m.peerSelf.IP)
-		return
-	}
-
-	// if there is an active peer found in the last failover.leaderless_threshold_duratio - we are good
+	// if there is an active peer found in the last failover.leaderless_threshold_duration - we are good
 	// having a lookback grace period is important to allow for RPC glitches and other issues
-	if m.gossipState.HasActivePeerInTheLast(m.cfg.Failover.LeaderlessThresholdDuration) {
+	if m.gossipState.HasActivePeerInTheLastNSamples(m.cfg.Failover.LeaderlessSamplesThreshold) {
 		m.logger.Debug("active peer found - no failover required")
 		return
 	}
 
 	// we see no active peer in the last failover.leaderless_threshold_duration, so we need to failover
-	m.logger.Error("no active peer found in gossip - failover required")
+	m.logger.Error(fmt.Sprintf("no active peer found in the last %d samples - failover required", m.cfg.Failover.LeaderlessSamplesThreshold))
 
-	// if we don't see ourselves in gossip - ensure we are passive (might be starting up, have dropped from network, etc)
-	// and bow out of the failover process until we are back in gossip
+	// if we don't see ourselves in gossip - bow out of the failover process and make sure we are passive - disconnection or starting up
 	if m.isSelfNotInGossip() {
 		m.logger.Warn("we do not appear in gossip - ensuring we are passive")
 		m.ensurePassive()
+		m.gossipState.Refresh() // refresh gossip state for clean next run
 		return
 	}
-
-	// at this point we know we are in gossip and passive - begin checks to see if we can take over as active
+	m.logger.Debug("we are in gossip", "pubkey", m.selfGossipPubkey(), "public_ip", m.peerSelf.IP)
 
 	// to participate in failover we must be healthy
 	if m.isSelfUnhealthy() {
@@ -281,12 +275,14 @@ func (m *Manager) ensureHAState() {
 		return
 	}
 
-	// one last check to ensure we are passive
+	// one last check to ensure we are NOT already active
 	if m.isSelfActive() {
-		m.logger.Warn("we are already active as reported by local rpc - unable to become active in failover and ensuring we are passive")
-		m.ensurePassive()
+		m.logger.Warn("we are already active as reported by local rpc")
 		return
 	}
+
+	// at this point we know we are in gossip, healthy, and passive
+	// so we begin checks to make sure none of our peers have already taken over as active
 
 	// introduce a delay based on IP to safeguard against multiple nodes trying to become active at the same time
 	m.delayTakeover()
@@ -296,13 +292,13 @@ func (m *Manager) ensureHAState() {
 	m.gossipState.Refresh()
 
 	// if someone has already taken over as active - say so and return
-	if m.gossipState.HasActivePeerInTheLast(m.cfg.Failover.LeaderlessThresholdDuration) {
+	if m.gossipState.HasActivePeerInTheLastNSamples(m.cfg.Failover.LeaderlessSamplesThreshold) {
 		activePeerState, err := m.gossipState.GetActivePeer()
 		if err != nil {
 			m.logger.Warn("failed to get active peer fromn state, but we know someone else already assumed active role", "error", err)
 			return
 		}
-		m.logger.Warn(fmt.Sprintf("peer became active in the last %s", m.cfg.Failover.LeaderlessThresholdDuration),
+		m.logger.Warn(fmt.Sprintf("peer became active in the last %d samples", m.cfg.Failover.LeaderlessSamplesThreshold),
 			"name", activePeerState.Name,
 			"ip", activePeerState.IP,
 			"pubkey", activePeerState.Pubkey,
@@ -310,10 +306,11 @@ func (m *Manager) ensureHAState() {
 		return
 	}
 
-	// now we know we are heatlhy, passive, and no one else has assumed active role
+	// now we know we are healthy, passive, and none of our peers have assumed active role
 	// we can take over as active - this should be idempotent in setting the active role
 	m.logger.Info("becoming active", "pubkey", m.cfg.Validator.Identities.ActiveKeyPair.PublicKey().String())
 	m.ensureActive()
+	m.gossipState.Refresh() // refresh gossip state for clean next run
 }
 
 // ensurePassive calls a user-specified command that should be idempotent in setting the passive role
@@ -518,11 +515,6 @@ func (m *Manager) isSelfInGossip() (isInGossip bool) {
 // isSelfNotInGossip checks if the validator is not in the gossip state
 func (m *Manager) isSelfNotInGossip() (isNotInGossip bool) {
 	return !m.isSelfInGossip()
-}
-
-// isSelfRecentlyInGossip checks if the validator is in the gossip state and has been in the gossip state in the last failover.leaderless_threshold_duration
-func (m *Manager) isSelfRecentlyInGossip() (isRecentlyInGossip bool) {
-	return m.gossipState.IsRecentlyInGossip(m.peerSelf.IP)
 }
 
 // selfGossipPubkey returns the pubkey of the validator in gossip
