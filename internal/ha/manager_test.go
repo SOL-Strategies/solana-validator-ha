@@ -36,10 +36,10 @@ func createTestConfig() *config.Config {
 			RPCURLs: []string{"https://api.mainnet-beta.solana.com"},
 		},
 		Failover: config.Failover{
-			PollIntervalDuration:        5 * time.Second,
-			LeaderlessThresholdDuration: 15 * time.Second,
-			TakeoverJitterSeconds:       5,
-			DryRun:                      true,
+			PollIntervalDuration:       5 * time.Second,
+			LeaderlessSamplesThreshold: 3,
+			TakeoverJitterSeconds:      5,
+			DryRun:                     true,
 			Peers: map[string]config.Peer{
 				"peer1": {IP: "192.168.1.101", Name: "peer1"},
 				"peer2": {IP: "192.168.1.102", Name: "peer2"},
@@ -284,7 +284,7 @@ func TestManager_ConfigurationValidation(t *testing.T) {
 	assert.Equal(t, "mainnet-beta", manager.cfg.Cluster.Name)
 	assert.Len(t, manager.cfg.Cluster.RPCURLs, 1)
 	assert.Equal(t, 5*time.Second, manager.cfg.Failover.PollIntervalDuration)
-	assert.Equal(t, 15*time.Second, manager.cfg.Failover.LeaderlessThresholdDuration)
+	assert.Equal(t, 3, manager.cfg.Failover.LeaderlessSamplesThreshold)
 	assert.Equal(t, 5, manager.cfg.Failover.TakeoverJitterSeconds)
 	assert.True(t, manager.cfg.Failover.DryRun)
 	assert.Len(t, manager.cfg.Failover.Peers, 2)
@@ -384,11 +384,11 @@ func TestManager_ConfigurationEdgeCases(t *testing.T) {
 			RPCURLs: []string{"https://api.mainnet-beta.solana.com"},
 		},
 		Failover: config.Failover{
-			PollIntervalDuration:        5 * time.Second,
-			LeaderlessThresholdDuration: 15 * time.Second,
-			TakeoverJitterSeconds:       5,
-			DryRun:                      true,
-			Peers:                       map[string]config.Peer{},
+			PollIntervalDuration:       5 * time.Second,
+			LeaderlessSamplesThreshold: 3,
+			TakeoverJitterSeconds:      5,
+			DryRun:                     true,
+			Peers:                      map[string]config.Peer{},
 		},
 		Prometheus: config.Prometheus{
 			Port: 9090,

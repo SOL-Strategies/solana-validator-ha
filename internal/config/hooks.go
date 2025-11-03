@@ -86,7 +86,6 @@ func (h *Hook) Run(opts HookRunOptions) error {
 		return nil
 	}
 
-	log.Info("running hook", loggerArgs...)
 	return command.Run(command.RunOptions{
 		Name:         fmt.Sprintf("%s-hook %s", opts.HookType, h.Name),
 		Command:      h.Command,

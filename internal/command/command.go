@@ -32,17 +32,17 @@ type RunOptions struct {
 // (e.g., failover commands that may need to wait for services to start/stop).
 func Run(opts RunOptions) error {
 	logger := log.WithPrefix(fmt.Sprintf("command[%s]", opts.Name))
+	envString := ""
+	for key, value := range opts.Env {
+		envString += fmt.Sprintf("%s=%s ", key, value)
+	}
+	runMsg := fmt.Sprintf("%s %s %s", envString, opts.Command, strings.Join(opts.Args, " "))
+	runMsg = strings.TrimSpace(runMsg)
 
-	logger.With(
-		"cmd", opts.Command,
-		"args", opts.Args,
-		"env", opts.Env,
-		"dry_run", opts.DryRun,
-		"stream_output", opts.StreamOutput,
-	).Info("running")
+	logger.Info(runMsg)
 
 	if opts.DryRun {
-		logger.Debug("command completed successfully")
+		logger.Debug("command completed successfully - dry run")
 		return nil
 	}
 

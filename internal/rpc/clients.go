@@ -100,12 +100,34 @@ func executeWithRetry[T any](c *Client, ctx context.Context, op rpcOperation[T])
 
 		// Success! Update the last successful URL
 		c.lastSuccessfulURL = url
-		c.logger.Debug("method call succeeded", "method", op.name, "rpc_url", url, "attempted_urls", attemptedURLs)
 		return result, nil
 	}
 
 	var zero T
 	return zero, fmt.Errorf("method call failed on all RPC endpoints method: %s, attempted_urls: %v, errors: %v", op.name, attemptedURLs, errors)
+}
+
+// GetSlot gets the current slot from the first working RPC client
+func (c *Client) GetSlot(ctx context.Context) (uint64, error) {
+	return executeWithRetry(c, ctx, rpcOperation[uint64]{
+		name: "GetSlot",
+		execute: func(client *rpc.Client, ctx context.Context) (uint64, error) {
+			return client.GetSlot(ctx, rpc.CommitmentProcessed)
+		},
+	})
+}
+
+// GetVoteAccounts gets the vote accounts from the first working RPC client
+
+func (c *Client) GetVoteAccounts(ctx context.Context) (*rpc.GetVoteAccountsResult, error) {
+	return executeWithRetry(c, ctx, rpcOperation[*rpc.GetVoteAccountsResult]{
+		name: "GetVoteAccounts",
+		execute: func(client *rpc.Client, ctx context.Context) (*rpc.GetVoteAccountsResult, error) {
+			return client.GetVoteAccounts(ctx, &rpc.GetVoteAccountsOpts{
+				Commitment: rpc.CommitmentProcessed,
+			})
+		},
+	})
 }
 
 // GetClusterNodes tries each RPC client in order and returns the first successful response
