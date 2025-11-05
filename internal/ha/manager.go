@@ -12,6 +12,7 @@ import (
 	solanagorpc "github.com/gagliardetto/solana-go/rpc"
 	"github.com/sol-strategies/solana-validator-ha/internal/cache"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
+	"github.com/sol-strategies/solana-validator-ha/internal/constants"
 	"github.com/sol-strategies/solana-validator-ha/internal/gossip"
 	"github.com/sol-strategies/solana-validator-ha/internal/prometheus"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
@@ -43,6 +44,7 @@ type Manager struct {
 	localRPC        *rpc.Client
 	peerCount       int
 	initialized     bool
+	logPrefix       string
 }
 
 // NewManager creates a new HA manager from options
@@ -63,8 +65,8 @@ func NewManager(opts NewManagerOptions) *Manager {
 		cfg:       opts.Cfg,
 		metrics:   metrics,
 		cache:     cache,
-		logger:    log.WithPrefix("ha_manager"),
-		localRPC:  rpc.NewClient(opts.Cfg.Validator.RPCURL),
+		logger:    log.WithPrefix(fmt.Sprintf("[%s ha_manager]", opts.Cfg.Validator.Name)),
+		localRPC:  rpc.NewClient(opts.Cfg.Validator.Name, opts.Cfg.Validator.RPCURL),
 		ctx:       ctx,
 		cancel:    cancel,
 		peerCount: len(opts.Cfg.Failover.Peers),
@@ -108,6 +110,10 @@ func (m *Manager) initialize() error {
 		return err
 	}
 
+	// set global log prefix to pass everywhere
+	m.logPrefix = fmt.Sprintf("%s %v", m.cfg.Validator.Name, publicIP)
+	m.logger = log.WithPrefix(fmt.Sprintf("[%s ha_manager]", m.logPrefix))
+
 	// peers config file must not declare ourselves
 	if m.cfg.Failover.Peers.HasIP(publicIP) {
 		return fmt.Errorf("failover.peers must not reference ourselves, found %s in failover.peers", publicIP)
@@ -134,9 +140,10 @@ func (m *Manager) initialize() error {
 	// create gossip state
 	m.logger.Debug("creating gossip state")
 	m.gossipState = gossip.NewState(gossip.Options{
-		ClusterRPC:   rpc.NewClient(m.cfg.Cluster.RPCURLs...),
+		ClusterRPC:   rpc.NewClient(m.logPrefix, m.cfg.Cluster.RPCURLs...),
 		ActivePubkey: m.cfg.Validator.Identities.ActiveKeyPair.PublicKey().String(),
 		ConfigPeers:  m.cfg.Failover.Peers,
+		LogPrefix:    m.logPrefix,
 	})
 
 	m.logger.Debug("initialized")
@@ -196,9 +203,12 @@ func (m *Manager) haMonitorLoop() error {
 	// check for active peer in state and log if found
 	m.checkForActivePeer()
 
-	// start the monitor loop with initial loaded state
+	// start the monitor loop with ticker aligned to interval boundaries
 	ticker := time.NewTicker(m.cfg.Failover.PollIntervalDuration)
 	defer ticker.Stop()
+
+	interval := m.cfg.Failover.PollIntervalDuration
+	intervalNanos := int64(interval)
 
 	for {
 		select {
@@ -206,6 +216,26 @@ func (m *Manager) haMonitorLoop() error {
 			m.logger.Info("HA monitor loop done")
 			return nil
 		case <-ticker.C:
+			// Wait until the next aligned interval before running
+			// This ensures all nodes run at the same synchronized times
+			// For example, with 5s interval: all nodes run at 12:01:05, 12:01:10, etc.
+			now := time.Now()
+			nanosSinceEpoch := now.UnixNano()
+			remainder := nanosSinceEpoch % intervalNanos
+
+			if remainder != 0 {
+				// Not aligned yet, wait until the next interval boundary
+				waitDuration := interval - time.Duration(remainder)
+				m.logger.Debug(fmt.Sprintf("synchronization, ensuring HA monitor loop runs at %s", now.Add(waitDuration).Format(time.RFC3339)))
+				select {
+				case <-m.ctx.Done():
+					m.logger.Info("HA monitor loop done")
+					return nil
+				case <-time.After(waitDuration):
+					// Now we're at the aligned time
+				}
+			}
+			// Run at the aligned interval
 			m.ensureHAState()
 		}
 	}
@@ -213,8 +243,9 @@ func (m *Manager) haMonitorLoop() error {
 
 // checkForActivePeer checks for an active peer in the gossip state
 func (m *Manager) checkForActivePeer() {
-	if !m.gossipState.HasActivePeerInTheLastNSamples(m.cfg.Failover.LeaderlessSamplesThreshold) {
-		m.logger.Warn(fmt.Sprintf("no active peer found in gossip in the last %d samples", m.cfg.Failover.LeaderlessSamplesThreshold))
+	if m.gossipState.LeaderlessSamplesExceedsThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
+		m.logger.Warn(fmt.Sprintf("leaderless samples exceeds threshold %d > %d",
+			m.gossipState.LeaderlessSamplesCount, m.cfg.Failover.LeaderlessSamplesThreshold))
 		return
 	}
 
@@ -225,7 +256,7 @@ func (m *Manager) checkForActivePeer() {
 	}
 
 	activePeerFoundMessage := "active peer found"
-	if activePeerState.IP == m.peerSelf.IP {
+	if activePeerState.IPEquals(m.peerSelf.IP) {
 		activePeerFoundMessage += " (us)"
 	}
 
@@ -242,29 +273,21 @@ func (m *Manager) ensureHAState() {
 	// refresh metrics
 	m.refreshMetrics()
 
-	// warn if we don't appear in gossip and bow out
-	if m.isSelfNotInGossip() {
-		m.logger.Warn("we are not in gossip - ensuring we are passive", "public_ip", m.peerSelf.IP)
-		m.ensurePassive()       // makes sure even we can't get network response we take ourselves out if we come back
-		m.gossipState.Refresh() // refresh gossip state for clean next run
-		return
-	}
-
-	// if there is an active peer found in the last failover.leaderless_threshold_duration - we are good
+	// if there is an active peer found in the last failover.leaderless_samples_threshold - we are good
 	// having a lookback grace period is important to allow for RPC glitches and other issues
-	if m.gossipState.HasActivePeerInTheLastNSamples(m.cfg.Failover.LeaderlessSamplesThreshold) {
+	if !m.gossipState.LeaderlessSamplesExceedsThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
 		m.logger.Debug("active peer found - no failover required")
 		return
 	}
 
-	// we see no active peer in the last failover.leaderless_threshold_duration, so we need to failover
-	m.logger.Error(fmt.Sprintf("no active peer found in the last %d samples - failover required", m.cfg.Failover.LeaderlessSamplesThreshold))
+	// we see no active peer in the last failover.leaderless_samples_threshold, so we need to failover
+	m.logger.Error(fmt.Sprintf("no active peer found in the last %d samples - failover required", m.gossipState.LeaderlessSamplesCount))
 
 	// if we don't see ourselves in gossip - bow out of the failover process and make sure we are passive - disconnection or starting up
 	if m.isSelfNotInGossip() {
-		m.logger.Warn("we do not appear in gossip - ensuring we are passive")
+		m.logger.Error("we do not appear in gossip - unable to become active in failover, ensuring we are passive")
 		m.ensurePassive()
-		m.gossipState.Refresh() // refresh gossip state for clean next run
+		// m.gossipState.Refresh() // refresh gossip state for clean next run
 		return
 	}
 	m.logger.Debug("we are in gossip", "pubkey", m.selfGossipPubkey(), "public_ip", m.peerSelf.IP)
@@ -277,7 +300,7 @@ func (m *Manager) ensureHAState() {
 
 	// one last check to ensure we are NOT already active
 	if m.isSelfActive() {
-		m.logger.Warn("we are already active as reported by local rpc")
+		m.logger.Warn("we are already active - nothing to do")
 		return
 	}
 
@@ -288,18 +311,18 @@ func (m *Manager) ensureHAState() {
 	m.delayTakeover()
 
 	// refresh the peers state to ensure no one else has taken over already if we know
-	// there are at least 2 possible peers other than ourselves
+	// there are at least 2 possible peers other than ourselves - this will reset the leaderless samples count
+	// if a new leader is found
 	m.gossipState.Refresh()
 
 	// if someone has already taken over as active - say so and return
-	if m.gossipState.HasActivePeerInTheLastNSamples(m.cfg.Failover.LeaderlessSamplesThreshold) {
+	if m.gossipState.LeaderlessSamplesBelowThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
 		activePeerState, err := m.gossipState.GetActivePeer()
 		if err != nil {
-			m.logger.Warn("failed to get active peer fromn state, but we know someone else already assumed active role", "error", err)
+			m.logger.Warn("failed to get active peer from state, but we know someone else already assumed active role", "error", err)
 			return
 		}
-		m.logger.Warn(fmt.Sprintf("peer became active in the last %d samples", m.cfg.Failover.LeaderlessSamplesThreshold),
-			"name", activePeerState.Name,
+		m.logger.Warn(fmt.Sprintf("peer %s is active, seen at %s - noting to do", activePeerState.Name, activePeerState.LastSeenAtString()),
 			"ip", activePeerState.IP,
 			"pubkey", activePeerState.Pubkey,
 		)
@@ -308,9 +331,7 @@ func (m *Manager) ensureHAState() {
 
 	// now we know we are healthy, passive, and none of our peers have assumed active role
 	// we can take over as active - this should be idempotent in setting the active role
-	m.logger.Info("becoming active", "pubkey", m.cfg.Validator.Identities.ActiveKeyPair.PublicKey().String())
 	m.ensureActive()
-	m.gossipState.Refresh() // refresh gossip state for clean next run
 }
 
 // ensurePassive calls a user-specified command that should be idempotent in setting the passive role
@@ -319,17 +340,19 @@ func (m *Manager) ensureHAState() {
 func (m *Manager) ensurePassive() {
 	var err error
 	passivePubkey := m.cfg.Validator.Identities.PassiveKeyPair.PublicKey().String()
+	m.logger.Info("becoming passive", "pubkey", passivePubkey)
 
 	// Update failover status in cache
 	state := m.cache.GetState()
-	state.FailoverStatus = "becoming_passive"
+	state.FailoverStatus = constants.StatusBecomingPassive
 	m.cache.UpdateState(state)
 
 	// run pre hooks
 	if len(m.cfg.Failover.Passive.Hooks.Pre) > 0 {
 		m.logger.Debug("running pre-passive hooks")
 		err = m.cfg.Failover.Passive.Hooks.RunPre(config.HooksRunOptions{
-			DryRun: m.cfg.Failover.DryRun,
+			DryRun:       m.cfg.Failover.DryRun,
+			LoggerPrefix: m.logPrefix,
 			LoggerArgs: []any{
 				"failover_stage", "pre-passive",
 			},
@@ -343,9 +366,10 @@ func (m *Manager) ensurePassive() {
 	// run passive command
 	m.logger.Debug("running passive command")
 	err = m.cfg.Failover.Passive.RunCommand(config.RoleCommandRunOptions{
-		DryRun: m.cfg.Failover.DryRun,
+		DryRun:       m.cfg.Failover.DryRun,
+		LoggerPrefix: m.logPrefix,
 		LoggerArgs: []any{
-			"failover_stage", "passive",
+			"failover_stage", constants.RoleNamePassive,
 			"passive_pubkey", passivePubkey,
 		},
 	})
@@ -358,7 +382,8 @@ func (m *Manager) ensurePassive() {
 	if len(m.cfg.Failover.Passive.Hooks.Post) > 0 {
 		m.logger.Debug("running post-passive hooks")
 		m.cfg.Failover.Passive.Hooks.RunPost(config.HooksRunOptions{
-			DryRun: m.cfg.Failover.DryRun,
+			DryRun:       m.cfg.Failover.DryRun,
+			LoggerPrefix: m.logPrefix,
 			LoggerArgs: []any{
 				"failover_stage", "post-passive",
 			},
@@ -400,17 +425,19 @@ func (m *Manager) ensurePassive() {
 func (m *Manager) ensureActive() {
 	var err error
 	activePubkey := m.cfg.Validator.Identities.ActiveKeyPair.PublicKey().String()
+	m.logger.Info("becoming active", "pubkey", activePubkey)
 
 	// Update failover status in cache
 	state := m.cache.GetState()
-	state.FailoverStatus = "becoming_active"
+	state.FailoverStatus = constants.StatusBecomingActive
 	m.cache.UpdateState(state)
 
 	// run pre hooks
 	if len(m.cfg.Failover.Active.Hooks.Pre) > 0 {
 		m.logger.Debug("running pre-active hooks")
 		err = m.cfg.Failover.Active.Hooks.RunPre(config.HooksRunOptions{
-			DryRun: m.cfg.Failover.DryRun,
+			DryRun:       m.cfg.Failover.DryRun,
+			LoggerPrefix: m.logPrefix,
 			LoggerArgs: []any{
 				"failover_stage", "pre-active",
 			},
@@ -424,9 +451,10 @@ func (m *Manager) ensureActive() {
 	// run active command
 	m.logger.Debug("running active command")
 	err = m.cfg.Failover.Active.RunCommand(config.RoleCommandRunOptions{
-		DryRun: m.cfg.Failover.DryRun,
+		DryRun:       m.cfg.Failover.DryRun,
+		LoggerPrefix: m.logPrefix,
 		LoggerArgs: []any{
-			"failover_stage", "active",
+			"failover_stage", constants.RoleNameActive,
 			"active_pubkey", activePubkey,
 		},
 	})
@@ -439,7 +467,8 @@ func (m *Manager) ensureActive() {
 	if len(m.cfg.Failover.Active.Hooks.Post) > 0 {
 		m.logger.Debug("running post-active hooks")
 		m.cfg.Failover.Active.Hooks.RunPost(config.HooksRunOptions{
-			DryRun: m.cfg.Failover.DryRun,
+			DryRun:       m.cfg.Failover.DryRun,
+			LoggerPrefix: m.logPrefix,
 			LoggerArgs: []any{
 				"failover_stage", "post-active",
 			},
@@ -534,17 +563,17 @@ func (m *Manager) refreshMetrics() {
 	// Determine role and status
 	var role, status string
 	if m.isSelfActive() {
-		role = "active"
+		role = constants.RoleNameActive
 	} else if m.isSelfPassive() {
-		role = "passive"
+		role = constants.RoleNamePassive
 	} else {
-		role = "unknown"
+		role = constants.RoleNameUnknown
 	}
 
 	if m.isSelfHealthy() {
-		status = "healthy"
+		status = constants.StatusHealthy
 	} else {
-		status = "unhealthy"
+		status = constants.StatusUnhealthy
 	}
 
 	// Get peer count and self in gossip status
@@ -559,7 +588,7 @@ func (m *Manager) refreshMetrics() {
 		Status:         status,
 		PeerCount:      peerCount,
 		SelfInGossip:   selfInGossip,
-		FailoverStatus: "idle",
+		FailoverStatus: constants.StatusIdle,
 	}
 
 	m.cache.UpdateState(state)

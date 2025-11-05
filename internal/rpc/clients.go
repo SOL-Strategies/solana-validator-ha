@@ -2,7 +2,10 @@ package rpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -23,13 +26,13 @@ type Client struct {
 }
 
 // NewClient creates a new RPC client with one or more URLs
-func NewClient(urls ...string) *Client {
+func NewClient(logPrefix string, urls ...string) *Client {
 	clients := make(map[string]*rpc.Client)
 	for _, url := range urls {
 		clients[url] = rpc.New(url)
 	}
 	return &Client{
-		logger:            log.WithPrefix("rpc_client"),
+		logger:            log.WithPrefix(fmt.Sprintf("[%s rpc_client]", logPrefix)),
 		urls:              urls,
 		clients:           clients,
 		lastSuccessfulURL: "",
@@ -167,10 +170,66 @@ func (c *Client) GetIdentity(ctx context.Context) (*rpc.GetIdentityResult, error
 
 // GetHealth gets the health from the first working RPC client
 func (c *Client) GetHealth(ctx context.Context) (string, error) {
-	return executeWithRetry(c, ctx, rpcOperation[string]{
+	result, err := executeWithRetry(c, ctx, rpcOperation[string]{
 		name: "GetHealth",
 		execute: func(client *rpc.Client, ctx context.Context) (string, error) {
 			return client.GetHealth(ctx)
 		},
 	})
+
+	if err != nil {
+		// Return just the error message, not the full error
+		return "", errors.New(extractErrorMessage(err))
+	}
+
+	return result, nil
+}
+
+// extractErrorMessage extracts just the message from an RPC error
+func extractErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	// First, try to use reflection to find the Message field directly
+	// This works if the error is an RPCError or directly contains it
+	v := reflect.ValueOf(err)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+
+	if v.Kind() == reflect.Struct {
+		messageField := v.FieldByName("Message")
+		if messageField.IsValid() && messageField.Kind() == reflect.String {
+			message := messageField.String()
+			if message != "" {
+				return message
+			}
+		}
+	}
+
+	// If reflection didn't work, the error might be wrapped by fmt.Errorf
+	// Parse the error string to extract the message from RPCError formatted by spew
+	// Format: Message: (string) (len=17) "Node is unhealthy",
+	errStr := err.Error()
+
+	// Look for "Message:" followed by a quoted string
+	msgIdx := strings.Index(errStr, "Message:")
+	if msgIdx != -1 {
+		// Find the quoted string after "Message:"
+		// Skip past "Message:" and any type information like "(string) (len=17)"
+		afterMsg := errStr[msgIdx+len("Message:"):]
+		// Find the first quote
+		quoteStart := strings.Index(afterMsg, `"`)
+		if quoteStart != -1 {
+			// Find the closing quote
+			quoteEnd := strings.Index(afterMsg[quoteStart+1:], `"`)
+			if quoteEnd != -1 {
+				return afterMsg[quoteStart+1 : quoteStart+1+quoteEnd]
+			}
+		}
+	}
+
+	// Fall back to error string if we can't extract the message
+	return errStr
 }

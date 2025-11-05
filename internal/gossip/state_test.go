@@ -12,7 +12,7 @@ import (
 
 func TestNewState(t *testing.T) {
 	// Create a real RPC client for this test since we're not testing RPC functionality
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -34,7 +34,7 @@ func TestNewState(t *testing.T) {
 }
 
 func TestHasIP(t *testing.T) {
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -60,7 +60,7 @@ func TestHasIP(t *testing.T) {
 }
 
 func TestHasActivePeer(t *testing.T) {
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -91,7 +91,7 @@ func TestHasActivePeer(t *testing.T) {
 }
 
 func TestHasActivePeerInTheLastNSamples(t *testing.T) {
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -106,13 +106,13 @@ func TestHasActivePeerInTheLastNSamples(t *testing.T) {
 	state.peerStatesByName = map[string]PeerState{
 		"peer1": {IP: "192.168.1.2", Pubkey: "pubkey1", LastSeenAtUTC: time.Now().UTC(), LastSeenActive: false},
 	}
-	state.leaderlessSamplesCount = 5 // Set count to 5
+	state.LeaderlessSamplesCount = 5 // Set count to 5
 
 	// With threshold of 3, count of 5 should fail (5 >= 3)
-	assert.False(t, state.HasActivePeerInTheLastNSamples(3))
+	assert.False(t, state.LeaderlessSamplesBelowThreshold(3))
 
 	// With threshold of 10, count of 5 should pass (5 < 10)
-	assert.True(t, state.HasActivePeerInTheLastNSamples(10))
+	assert.True(t, state.LeaderlessSamplesBelowThreshold(10))
 
 	// Test with active peer found (leaderlessSamplesCount should be reset)
 	state.peerStatesByName["peer2"] = PeerState{
@@ -121,19 +121,19 @@ func TestHasActivePeerInTheLastNSamples(t *testing.T) {
 		LastSeenAtUTC:  time.Now().UTC(),
 		LastSeenActive: true,
 	}
-	state.leaderlessSamplesCount = 0 // Reset count when active peer found
+	state.LeaderlessSamplesCount = 0 // Reset count when active peer found
 
 	// With threshold of 3, count of 0 should pass (0 < 3)
-	assert.True(t, state.HasActivePeerInTheLastNSamples(3))
+	assert.True(t, state.LeaderlessSamplesBelowThreshold(3))
 
 	// Test with count at threshold boundary
-	state.leaderlessSamplesCount = 3
-	assert.False(t, state.HasActivePeerInTheLastNSamples(3)) // 3 >= 3, should fail
-	assert.True(t, state.HasActivePeerInTheLastNSamples(4))  // 3 < 4, should pass
+	state.LeaderlessSamplesCount = 3
+	assert.False(t, state.LeaderlessSamplesBelowThreshold(3)) // 3 >= 3, should fail
+	assert.True(t, state.LeaderlessSamplesBelowThreshold(4))  // 3 < 4, should pass
 }
 
 func TestGetActivePeer(t *testing.T) {
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -166,7 +166,7 @@ func TestGetActivePeer(t *testing.T) {
 }
 
 func TestHasPeers(t *testing.T) {
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -200,7 +200,7 @@ func TestHasPeers(t *testing.T) {
 }
 
 func TestGetPeerStates(t *testing.T) {
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -242,7 +242,7 @@ func TestPeerState_LastSeenAtString(t *testing.T) {
 func TestRefresh_WithRPCError(t *testing.T) {
 	// Test that Refresh handles RPC errors gracefully
 	// We'll use a real RPC client but with an invalid URL to simulate failure
-	invalidRPC := rpc.NewClient("https://invalid-url-that-will-fail.com")
+	invalidRPC := rpc.NewClient("test", "https://invalid-url-that-will-fail.com")
 
 	opts := Options{
 		ClusterRPC:   invalidRPC,
@@ -271,7 +271,7 @@ func TestRefresh_WithRPCError(t *testing.T) {
 func TestRefresh_WithValidRPC(t *testing.T) {
 	// Test Refresh with a valid RPC client
 	// This test may fail if the RPC endpoint is not available, but that's expected
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -295,7 +295,7 @@ func TestRefresh_WithValidRPC(t *testing.T) {
 }
 
 func TestState_EdgeCases(t *testing.T) {
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -322,7 +322,7 @@ func TestState_EdgeCases(t *testing.T) {
 }
 
 func TestState_EmptyConfigPeers(t *testing.T) {
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -335,8 +335,8 @@ func TestState_EmptyConfigPeers(t *testing.T) {
 
 	// Test all methods with empty config
 	assert.False(t, state.HasActivePeer())
-	state.leaderlessSamplesCount = 5 // Set count high
-	assert.False(t, state.HasActivePeerInTheLastNSamples(3))
+	state.LeaderlessSamplesCount = 5 // Set count high
+	assert.False(t, state.LeaderlessSamplesBelowThreshold(3))
 	assert.False(t, state.HasIP("192.168.1.1"))
 	assert.False(t, state.HasPeers("192.168.1.1"))
 
@@ -348,7 +348,7 @@ func TestState_EmptyConfigPeers(t *testing.T) {
 }
 
 func TestState_SampleBasedLogic(t *testing.T) {
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,
@@ -369,27 +369,27 @@ func TestState_SampleBasedLogic(t *testing.T) {
 			LastSeenActive: true,
 		},
 	}
-	state.leaderlessSamplesCount = 0 // Reset when active peer found
+	state.LeaderlessSamplesCount = 0 // Reset when active peer found
 
 	// Should pass with threshold of 3 (0 < 3)
-	assert.True(t, state.HasActivePeerInTheLastNSamples(3))
+	assert.True(t, state.LeaderlessSamplesBelowThreshold(3))
 
 	// Should pass with threshold of 1 (0 < 1)
-	assert.True(t, state.HasActivePeerInTheLastNSamples(1))
+	assert.True(t, state.LeaderlessSamplesBelowThreshold(1))
 
-	// Test with no active peer (leaderlessSamplesCount increments)
-	state.leaderlessSamplesCount = 5
+	// Test with no active peer (LeaderlessSamplesCount increments)
+	state.LeaderlessSamplesCount = 5
 	delete(state.peerStatesByName, "peer1") // Remove active peer
 
 	// Should fail with threshold of 3 (5 >= 3)
-	assert.False(t, state.HasActivePeerInTheLastNSamples(3))
+	assert.False(t, state.LeaderlessSamplesBelowThreshold(3))
 
 	// Should pass with threshold of 10 (5 < 10)
-	assert.True(t, state.HasActivePeerInTheLastNSamples(10))
+	assert.True(t, state.LeaderlessSamplesBelowThreshold(10))
 }
 
 func TestState_ConcurrentAccess(t *testing.T) {
-	realRPC := rpc.NewClient("https://api.mainnet-beta.solana.com")
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
 
 	opts := Options{
 		ClusterRPC:   realRPC,

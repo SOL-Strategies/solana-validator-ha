@@ -121,7 +121,7 @@ func mockSlowServer(t *testing.T, delay time.Duration) *httptest.Server {
 
 func TestNewClient(t *testing.T) {
 	// Test creating client with multiple URLs
-	client := NewClient("http://localhost:8899", "https://api.testnet.solana.com")
+	client := NewClient("test", "http://localhost:8899", "https://api.testnet.solana.com")
 
 	assert.NotNil(t, client)
 	assert.Len(t, client.clients, 2)
@@ -153,7 +153,7 @@ func TestGetClusterNodes(t *testing.T) {
 		"getClusterNodes": mockResponse,
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient("test", server.URL)
 	ctx := context.Background()
 
 	result, err := client.GetClusterNodes(ctx)
@@ -185,7 +185,7 @@ func TestGetIdentity(t *testing.T) {
 		"getIdentity": mockResponse,
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient("test", server.URL)
 	ctx := context.Background()
 
 	result, err := client.GetIdentity(ctx)
@@ -201,7 +201,7 @@ func TestGetHealth(t *testing.T) {
 		"getHealth": mockResponse,
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient("test", server.URL)
 	ctx := context.Background()
 
 	result, err := client.GetHealth(ctx)
@@ -221,7 +221,7 @@ func TestRetryLogic(t *testing.T) {
 	})
 
 	// Create client with failing server first, then working server
-	client := NewClient(failingServer.URL, workingServer.URL)
+	client := NewClient("test", failingServer.URL, workingServer.URL)
 	ctx := context.Background()
 
 	// Should succeed by retrying to the working server
@@ -235,7 +235,7 @@ func TestAllEndpointsFail(t *testing.T) {
 	failingServer1 := mockFailingServer(t)
 	failingServer2 := mockFailingServer(t)
 
-	client := NewClient(failingServer1.URL, failingServer2.URL)
+	client := NewClient("test", failingServer1.URL, failingServer2.URL)
 	ctx := context.Background()
 
 	// Should fail when all endpoints fail
@@ -250,7 +250,7 @@ func TestTimeout(t *testing.T) {
 	// Create a slow server that takes longer than the timeout
 	slowServer := mockSlowServer(t, 10*time.Second)
 
-	client := NewClient(slowServer.URL)
+	client := NewClient("test", slowServer.URL)
 	ctx := context.Background()
 
 	// Should timeout
@@ -264,7 +264,7 @@ func TestCustomTimeout(t *testing.T) {
 	// Create a slow server
 	slowServer := mockSlowServer(t, 2*time.Second)
 
-	client := NewClient(slowServer.URL)
+	client := NewClient("test", slowServer.URL)
 	client.timeout = 1 * time.Second // Set custom timeout
 	ctx := context.Background()
 
@@ -291,7 +291,7 @@ func TestMultipleWorkingEndpoints(t *testing.T) {
 		"getIdentity": mockResponse2,
 	})
 
-	client := NewClient(server1.URL, server2.URL)
+	client := NewClient("test", server1.URL, server2.URL)
 	ctx := context.Background()
 
 	// Should succeed with the first working server
@@ -302,7 +302,7 @@ func TestMultipleWorkingEndpoints(t *testing.T) {
 
 func TestEmptyURLs(t *testing.T) {
 	// Test creating client with no URLs
-	client := NewClient()
+	client := NewClient("test")
 	assert.NotNil(t, client)
 	assert.Len(t, client.clients, 0)
 }
@@ -310,7 +310,7 @@ func TestEmptyURLs(t *testing.T) {
 func TestInvalidURL(t *testing.T) {
 	// Test with invalid URL - this should still create the client
 	// but the actual RPC calls will fail
-	client := NewClient("invalid-url")
+	client := NewClient("test", "invalid-url")
 	assert.NotNil(t, client)
 	assert.Len(t, client.clients, 1)
 	assert.Contains(t, client.clients, "invalid-url")
@@ -325,7 +325,7 @@ func TestContextCancellation(t *testing.T) {
 	// Create a slow server
 	slowServer := mockSlowServer(t, 5*time.Second)
 
-	client := NewClient(slowServer.URL)
+	client := NewClient("test", slowServer.URL)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Cancel the context immediately
@@ -368,7 +368,7 @@ func TestComplexClusterNodesResponse(t *testing.T) {
 		"getClusterNodes": mockResponse,
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient("test", server.URL)
 	ctx := context.Background()
 
 	result, err := client.GetClusterNodes(ctx)
@@ -432,7 +432,7 @@ func TestGetURLsToTry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := NewClient(tt.urls...)
+			client := NewClient("test", tt.urls...)
 			client.lastSuccessfulURL = tt.lastSuccessfulURL
 
 			result := client.getURLsToTry()
@@ -475,7 +475,7 @@ func TestLastSuccessfulURLAvoidance(t *testing.T) {
 	}
 
 	// Create client with multiple URLs
-	client := NewClient(urls...)
+	client := NewClient("test", urls...)
 
 	// Make several calls and verify it avoids the last successful URL initially
 	ctx := context.Background()
@@ -549,7 +549,7 @@ func TestLastSuccessfulURLWithFailures(t *testing.T) {
 	}
 
 	// Create client with multiple URLs
-	client := NewClient(urls...)
+	client := NewClient("test", urls...)
 
 	// Make 6 calls - should avoid lastSuccessfulURL but server 0 always fails
 	ctx := context.Background()

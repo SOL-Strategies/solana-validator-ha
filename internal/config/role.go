@@ -27,8 +27,9 @@ type Role struct {
 }
 
 type RoleCommandRunOptions struct {
-	DryRun     bool
-	LoggerArgs []any
+	DryRun       bool
+	LoggerPrefix string
+	LoggerArgs   []any
 }
 
 // Validate validates the role configuration
@@ -145,6 +146,7 @@ func (r *Role) RunCommand(opts RoleCommandRunOptions) error {
 		Args:         r.Args,
 		Env:          r.Env,
 		DryRun:       opts.DryRun,
+		LoggerPrefix: opts.LoggerPrefix,
 		LoggerArgs:   loggerArgs,
 		StreamOutput: true,
 	})

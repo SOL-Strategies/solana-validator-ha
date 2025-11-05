@@ -6,6 +6,7 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/iancoleman/strcase"
 	"github.com/sol-strategies/solana-validator-ha/internal/command"
+	"github.com/sol-strategies/solana-validator-ha/internal/constants"
 )
 
 // Hooks represents a pre/post hook command
@@ -24,15 +25,17 @@ type Hook struct {
 
 // HookRunOptions represents options for running a hook
 type HookRunOptions struct {
-	HookType   string // "pre" or "post"
-	DryRun     bool
-	LoggerArgs []any
+	HookType     string // "pre" or "post"
+	DryRun       bool
+	LoggerPrefix string
+	LoggerArgs   []any
 }
 
 // HooksRunOptions represents options for running hooks
 type HooksRunOptions struct {
-	DryRun     bool
-	LoggerArgs []any
+	DryRun       bool
+	LoggerPrefix string
+	LoggerArgs   []any
 }
 
 // Validate validates the hooks configuration
@@ -40,14 +43,14 @@ func (h *Hooks) Validate() error {
 	// hooks.pre must all be valid if defined
 	for i, hook := range h.Pre {
 		if err := hook.Validate(true); err != nil {
-			return fmt.Errorf("hooks.pre[%d]: %w", i, err)
+			return fmt.Errorf("hooks.%s[%d]: %w", constants.HookTypePre, i, err)
 		}
 	}
 
 	// hooks.post must all be valid if defined
 	for i, hook := range h.Post {
 		if err := hook.Validate(false); err != nil {
-			return fmt.Errorf("hooks.post[%d]: %w", i, err)
+			return fmt.Errorf("hooks.%s[%d]: %w", constants.HookTypePost, i, err)
 		}
 	}
 
@@ -91,6 +94,7 @@ func (h *Hook) Run(opts HookRunOptions) error {
 		Command:      h.Command,
 		Args:         h.Args,
 		DryRun:       opts.DryRun,
+		LoggerPrefix: opts.LoggerPrefix,
 		LoggerArgs:   loggerArgs,
 		StreamOutput: true,
 	})
@@ -99,16 +103,17 @@ func (h *Hook) Run(opts HookRunOptions) error {
 // RunPre runs the pre hooks
 func (h *Hooks) RunPre(opts HooksRunOptions) error {
 	loggerArgs := []any{
-		"hook_type", "pre",
+		"hook_type", constants.HookTypePre,
 	}
 	loggerArgs = append(loggerArgs, opts.LoggerArgs...)
 
 	// run pre hooks
 	for _, hook := range h.Pre {
 		err := hook.Run(HookRunOptions{
-			HookType:   "pre",
-			DryRun:     opts.DryRun,
-			LoggerArgs: loggerArgs,
+			HookType:     constants.HookTypePre,
+			DryRun:       opts.DryRun,
+			LoggerPrefix: opts.LoggerPrefix,
+			LoggerArgs:   loggerArgs,
 		})
 		if err != nil && hook.MustSucceed {
 			return err
@@ -124,16 +129,17 @@ func (h *Hooks) RunPre(opts HooksRunOptions) error {
 // RunPost runs the post hooks
 func (h *Hooks) RunPost(opts HooksRunOptions) {
 	loggerArgs := []any{
-		"hook_type", "post",
+		"hook_type", constants.HookTypePost,
 	}
 	loggerArgs = append(loggerArgs, opts.LoggerArgs...)
 
 	// run post hooks - failures are logged but not returned
 	for _, hook := range h.Post {
 		err := hook.Run(HookRunOptions{
-			HookType:   "post",
-			DryRun:     opts.DryRun,
-			LoggerArgs: loggerArgs,
+			HookType:     constants.HookTypePost,
+			DryRun:       opts.DryRun,
+			LoggerPrefix: opts.LoggerPrefix,
+			LoggerArgs:   loggerArgs,
 		})
 		if err != nil {
 			log.Error("hook failed", loggerArgs...)

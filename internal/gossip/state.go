@@ -28,7 +28,7 @@ type State struct {
 	missingGossipIPs       []string
 	lastActivePeer         PeerState
 	activePeerLastSeenAt   time.Time
-	leaderlessSamplesCount int
+	LeaderlessSamplesCount int
 }
 
 // PeerState represents the state of a peer as seen by the solana network
@@ -53,12 +53,13 @@ type Options struct {
 	ActivePubkey string
 	SelfIP       string
 	ConfigPeers  config.Peers
+	LogPrefix    string
 }
 
 // NewState creates a new gossip state
 func NewState(opts Options) *State {
 	return &State{
-		logger:           log.WithPrefix("gossip_state"),
+		logger:           log.WithPrefix(fmt.Sprintf("[%s gossip_state]", opts.LogPrefix)),
 		clusterRPC:       opts.ClusterRPC,
 		activePubkey:     opts.ActivePubkey,
 		selfIP:           opts.SelfIP,
@@ -221,11 +222,11 @@ func (p *State) Refresh() {
 
 	// update state
 	if isLeaderlessSample {
-		p.leaderlessSamplesCount++
+		p.LeaderlessSamplesCount++
 		p.logger.Warn("no active peer found",
-			"leaderless_samples_count", p.leaderlessSamplesCount)
+			"leaderless_samples_count", p.LeaderlessSamplesCount)
 	} else {
-		p.leaderlessSamplesCount = 0
+		p.LeaderlessSamplesCount = 0
 	}
 	p.missingGossipIPs = latestMissingGossipIPs
 	p.peerStatesByName = latestPeerStatesByName
@@ -353,9 +354,14 @@ func (p *State) HasActivePeer() bool {
 	return false
 }
 
-// HasActivePeerInTheLastNSamples allows for up to n samples without an active peer before declaring leaderless
-func (p *State) HasActivePeerInTheLastNSamples(n int) bool {
-	return p.leaderlessSamplesCount < n
+// LeaderlessSamplesExceedsThreshold allows for up to n samples without an active peer before declaring leaderless
+func (p *State) LeaderlessSamplesExceedsThreshold(n int) bool {
+	return p.LeaderlessSamplesCount >= n
+}
+
+// LeaderlessSamplesBelowThreshold allows for up to n samples without an active peer before declaring leaderless
+func (p *State) LeaderlessSamplesBelowThreshold(n int) bool {
+	return p.LeaderlessSamplesCount < n
 }
 
 // HasIP returns true if the IP is in the peers gossip state
@@ -400,16 +406,6 @@ func (p *PeerState) LastSeenAtString() string {
 	return p.LastSeenAtUTC.Format(time.RFC3339)
 }
 
-// IsRecentlyInGossip returns true if the peer was recently in gossip
-func (p *State) IsRecentlyInGossip(ip string) bool {
-	for _, peer := range p.peerStatesByName {
-		if peer.IP == ip && peer.IsRecentlyInGossip {
-			return true
-		}
-	}
-	return false
-}
-
 func (p *State) peerNameFromIP(ip string) (string, bool) {
 	for name, peer := range p.configPeers {
 		if peer.IP == ip {
@@ -426,4 +422,9 @@ func (p *State) hasConfigPeerWithIP(ip string) bool {
 		}
 	}
 	return false
+}
+
+// IPEquals returns true if the IP is equal to the peer's IP
+func (p *PeerState) IPEquals(ip string) bool {
+	return p.IP == ip
 }
