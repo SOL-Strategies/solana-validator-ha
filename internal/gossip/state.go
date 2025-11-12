@@ -266,7 +266,7 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 		}
 		// rent exempt min is 890880 lamports
 		if balance.Value <= 890880 {
-			p.logger.Error("node is delinquent from balance being below rent-exempt minimum - assuming still active to not trigger a false-positive failover - FIX balance pronto!",
+			p.logger.Error("‼️ node is delinquent from balance being below rent-exempt minimum - assuming still active to not trigger a false-positive failover - FIX balance pronto!",
 				"gossip_address", *node.Gossip,
 				"pubkey", node.Pubkey.String(),
 				"current_slot", currentSlot,
@@ -276,7 +276,7 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 		}
 
 		// ohhh shit! we're delinquent - snitch on this guy!
-		p.logger.Debug("node is delinquent - not voting",
+		p.logger.Error("‼️ node is delinquent - not voting",
 			"gossip_address", *node.Gossip,
 			"pubkey", node.Pubkey.String(),
 			"current_slot", currentSlot,
