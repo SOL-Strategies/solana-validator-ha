@@ -2,6 +2,9 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/charmbracelet/log"
 	"github.com/knadh/koanf"
@@ -76,8 +79,35 @@ func NewFromConfigFile(configFile string) (*Config, error) {
 
 // LoadFromFile loads configuration from file into the struct
 func (c *Config) LoadFromFile(filePath string) error {
+	// Expand ~ to home directory
+	if strings.HasPrefix(filePath, "~/") || filePath == "~" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("error getting home directory: %w", err)
+		}
+		if filePath == "~" {
+			filePath = homeDir
+		} else {
+			filePath = strings.Replace(filePath, "~", homeDir, 1)
+		}
+	}
+
+	// Resolve to absolute path
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return fmt.Errorf("error resolving absolute path: %w", err)
+	}
+
+	// Resolve symlinks to get the actual file path
+	resolvedPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		// If EvalSymlinks fails (e.g., path doesn't exist yet), use the absolute path
+		// The file provider will handle the actual file opening
+		resolvedPath = absPath
+	}
+
 	k := koanf.New(".")
-	c.File = filePath
+	c.File = resolvedPath
 
 	// Load YAML config file
 	if err := k.Load(file.Provider(c.File), yaml.Parser()); err != nil {
