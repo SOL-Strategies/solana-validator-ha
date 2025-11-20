@@ -245,13 +245,13 @@ failover:
   #   and thus triggering a failover. A node running on an identity with a delinquent vote account is not consiodered to be a leader.
   leaderless_samples_threshold: 3
 
-  # takeover_delay_duration
+  # takeover_jitter_duration
   # required: false
-  # default: 3
+  # default: 3s
   # description:
-  #   A random jitter delay to add to a passive peer before taking over as active. This is to safeguard against race conditions where
-  #  two or more passive validators attempt to take over as passive at the same time.
-  takeover_jitter_seconds: 3
+  #   A Go duration string for a random jitter delay to add to a passive peer before taking over as active. This is to safeguard against race conditions where
+  #  two or more passive validators attempt to take over as passive at the same time. A warning will be issued if set below 1s as this may void the usefulness of jitter.
+  takeover_jitter_duration: 3s
 
   # peers
   # required: true

@@ -92,7 +92,7 @@ func TestValidate(t *testing.T) {
 			DryRun:                     false,
 			PollIntervalDuration:       30 * time.Second,
 			LeaderlessSamplesThreshold: 10,
-			TakeoverJitterSeconds:      10,
+			TakeoverJitterDuration:     10 * time.Second,
 			Active: Role{
 				Command: "systemctl start solana",
 			},
@@ -158,7 +158,7 @@ failover:
   dry_run: true
   poll_interval_duration: "30s"
   leaderless_threshold_duration: "5m"
-  takeover_jitter_seconds: 10
+  takeover_jitter_duration: "10s"
   active:
     command: "systemctl start solana"
   passive:
@@ -215,7 +215,7 @@ failover:
   dry_run: true
   poll_interval_duration: "30s"
   leaderless_threshold_duration: "5m"
-  takeover_delay_duration: "10s"
+  takeover_jitter_duration: "10s"
   active:
     command: "systemctl start solana"
   passive:

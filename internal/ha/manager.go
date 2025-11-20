@@ -624,7 +624,13 @@ func (m *Manager) delayTakeover() {
 	delay := time.Duration(selfPeerRank) * time.Second
 
 	// add random jitter to the delay to safeguard against multiple nodes trying to become active at the same time
-	delay += time.Duration(rand.Intn(m.cfg.Failover.TakeoverJitterSeconds)) * time.Second
+	// generate a random delay between 0 and TakeoverJitterDuration (inclusive)
+	jitterNanos := m.cfg.Failover.TakeoverJitterDuration.Nanoseconds()
+	if jitterNanos > 0 {
+		// rand.Int63n(n) returns [0, n), so we use n+1 to make it inclusive [0, n]
+		randomJitterNanos := rand.Int63n(jitterNanos + 1)
+		delay += time.Duration(randomJitterNanos)
+	}
 
 	m.logger.Debug("delaying takeover to avoid race conditions", "delay", delay, "self_peer_rank", selfPeerRank)
 	time.Sleep(delay)

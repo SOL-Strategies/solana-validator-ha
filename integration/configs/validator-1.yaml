@@ -21,7 +21,7 @@ failover:
   dry_run: true  # Test mode - don't execute actual commands
   poll_interval_duration: "3s"
   leaderless_threshold_duration: "9s"
-  takeover_delay_duration: "3s"
+  takeover_jitter_duration: "3s"
 
   active:
     command: "echo"
