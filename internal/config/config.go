@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/log"
 	"github.com/knadh/koanf"
@@ -182,6 +183,11 @@ func (c *Config) validate() error {
 	// failover.dry_run if true print warning
 	if c.Failover.DryRun {
 		c.logger.Warn("failover.dry_run is true - failovers will dry-run commands only and be no-op")
+	}
+
+	// failover.takeover_jitter_duration if below 1s print warning
+	if c.Failover.TakeoverJitterDuration > 0 && c.Failover.TakeoverJitterDuration < time.Second {
+		c.logger.Warn("failover.takeover_jitter_duration is below 1s - this may void the usefulness of jitter in preventing race conditions")
 	}
 
 	return nil

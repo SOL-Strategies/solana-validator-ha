@@ -38,7 +38,7 @@ func createTestConfig() *config.Config {
 		Failover: config.Failover{
 			PollIntervalDuration:       5 * time.Second,
 			LeaderlessSamplesThreshold: 3,
-			TakeoverJitterSeconds:      5,
+			TakeoverJitterDuration:     5 * time.Second,
 			DryRun:                     true,
 			Peers: map[string]config.Peer{
 				"peer1": {IP: "192.168.1.101", Name: "peer1"},
@@ -285,7 +285,7 @@ func TestManager_ConfigurationValidation(t *testing.T) {
 	assert.Len(t, manager.cfg.Cluster.RPCURLs, 1)
 	assert.Equal(t, 5*time.Second, manager.cfg.Failover.PollIntervalDuration)
 	assert.Equal(t, 3, manager.cfg.Failover.LeaderlessSamplesThreshold)
-	assert.Equal(t, 5, manager.cfg.Failover.TakeoverJitterSeconds)
+	assert.Equal(t, 5*time.Second, manager.cfg.Failover.TakeoverJitterDuration)
 	assert.True(t, manager.cfg.Failover.DryRun)
 	assert.Len(t, manager.cfg.Failover.Peers, 2)
 	assert.Equal(t, 9090, manager.cfg.Prometheus.Port)
@@ -386,7 +386,7 @@ func TestManager_ConfigurationEdgeCases(t *testing.T) {
 		Failover: config.Failover{
 			PollIntervalDuration:       5 * time.Second,
 			LeaderlessSamplesThreshold: 3,
-			TakeoverJitterSeconds:      5,
+			TakeoverJitterDuration:     5 * time.Second,
 			DryRun:                     true,
 			Peers:                      map[string]config.Peer{},
 		},

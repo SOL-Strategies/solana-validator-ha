@@ -11,7 +11,7 @@ type Failover struct {
 	DryRun                     bool          `koanf:"dry_run"`
 	PollIntervalDuration       time.Duration `koanf:"poll_interval_duration"`
 	LeaderlessSamplesThreshold int           `koanf:"leaderless_samples_threshold"`
-	TakeoverJitterSeconds      int           `koanf:"takeover_jitter_seconds"`
+	TakeoverJitterDuration     time.Duration `koanf:"takeover_jitter_duration"`
 	Active                     Role          `koanf:"active"`
 	Passive                    Role          `koanf:"passive"`
 	Peers                      Peers         `koanf:"peers"`
@@ -122,8 +122,8 @@ func (f *Failover) SetDefaults() {
 	if f.LeaderlessSamplesThreshold == 0 {
 		f.LeaderlessSamplesThreshold = 3 //  3 x poll interval = (at least) 15 seconds
 	}
-	if f.TakeoverJitterSeconds == 0 {
-		f.TakeoverJitterSeconds = 3
+	if f.TakeoverJitterDuration == 0 {
+		f.TakeoverJitterDuration = 3 * time.Second
 	}
 
 	// Set role names

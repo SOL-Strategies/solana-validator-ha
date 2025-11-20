@@ -14,7 +14,7 @@ func TestFailover_SetDefaults(t *testing.T) {
 	// Check that defaults are set
 	assert.Equal(t, 5*time.Second, failover.PollIntervalDuration)
 	assert.Equal(t, 3, failover.LeaderlessSamplesThreshold)
-	assert.Equal(t, 3, failover.TakeoverJitterSeconds)
+	assert.Equal(t, 3*time.Second, failover.TakeoverJitterDuration)
 }
 
 func TestFailover_Validate(t *testing.T) {
@@ -23,7 +23,7 @@ func TestFailover_Validate(t *testing.T) {
 		DryRun:                     false,
 		PollIntervalDuration:       30 * time.Second,
 		LeaderlessSamplesThreshold: 10,
-		TakeoverJitterSeconds:      10,
+		TakeoverJitterDuration:     10 * time.Second,
 		Active: Role{
 			Command: "systemctl start solana",
 		},
@@ -95,7 +95,7 @@ func TestFailover_ValidateWithHooks(t *testing.T) {
 	failover := &Failover{
 		PollIntervalDuration:       30 * time.Second,
 		LeaderlessSamplesThreshold: 10,
-		TakeoverJitterSeconds:      10,
+		TakeoverJitterDuration:     10 * time.Second,
 		Active: Role{
 			Command: "systemctl start solana",
 			Hooks: Hooks{
