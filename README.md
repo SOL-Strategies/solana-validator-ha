@@ -122,6 +122,7 @@ log:
 ```
 
 ### Validator Configuration
+
 ```yaml
 # validator
 # description:
@@ -168,6 +169,7 @@ validator:
 ```
 
 ### Prometheus Configuration
+
 ```yaml
 # prometheus
 # description:
@@ -192,6 +194,7 @@ prometheus:
 ```
 
 ### Cluster Configuration
+
 ```yaml
 # cluster
 # required: true
@@ -216,6 +219,9 @@ cluster:
 ```
 
 ### Failover Configuration
+
+See [example-scripts/ha-set-role.sh](example-scripts/ha-set-role.sh) for an example failover script to set role `active|passive`.
+
 ```yaml
 # failover
 # description:
