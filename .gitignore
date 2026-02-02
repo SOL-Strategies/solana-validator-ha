@@ -89,3 +89,6 @@ local-test-files/
 integration/test-files/
 
 demo/e2e/*.tape
+
+.claude
+scratchpad

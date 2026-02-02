@@ -147,6 +147,7 @@ func (m *Manager) initialize() error {
 		ConfigPeers:                    m.cfg.Failover.Peers,
 		DelinquentSlotDistanceOverride: m.cfg.Failover.DelinquentSlotDistanceOverride,
 		LogPrefix:                      m.logPrefix,
+		PeerGossipMinPresenceDuration:  m.cfg.Failover.PeerGossipMinPresenceDuration,
 	})
 
 	m.logger.Debug("initialized")
@@ -296,11 +297,11 @@ func (m *Manager) ensureHAState() {
 		}
 
 		// RPC succeeded but we're not in the results
-		// Check if there are other peers visible that could take over
-		if !m.gossipState.HasPeers(m.peerSelf.IP) {
-			// No other peers visible either - we might be the last node standing
+		// Check if there are other peers present (visible within grace period) that could take over
+		if !m.gossipState.HasPresentPeers(m.peerSelf.IP) {
+			// No other peers present - we might be the last node standing
 			// Don't call ensurePassive to avoid taking the entire cluster offline
-			m.logger.Warn("we do not appear in gossip and no other peers are visible (but RPC is working) - skipping ensurePassive to avoid taking entire cluster offline")
+			m.logger.Warn("we do not appear in gossip and no other peers are present (but RPC is working) - skipping ensurePassive to avoid taking entire cluster offline")
 			return
 		}
 
@@ -353,6 +354,12 @@ func (m *Manager) ensureHAState() {
 	}
 
 	// now we know we are healthy, passive, and none of our peers have assumed active role
+	// final check: verify we are within slots threshold before taking over
+	if !m.isSelfWithinSlotsThreshold() {
+		m.logger.Warn("failover required but self is not within slots threshold - waiting")
+		return
+	}
+
 	// we can take over as active - this should be idempotent in setting the active role
 	m.ensureActive()
 }
@@ -567,6 +574,45 @@ func (m *Manager) isSelfInGossip() (isInGossip bool) {
 // isSelfNotInGossip checks if the validator is not in the gossip state
 func (m *Manager) isSelfNotInGossip() (isNotInGossip bool) {
 	return !m.isSelfInGossip()
+}
+
+// isSelfWithinSlotsThreshold checks if local validator is caught up enough to take over
+func (m *Manager) isSelfWithinSlotsThreshold() bool {
+	// Get network slot from cluster RPC
+	clusterRPC := rpc.NewClient(m.logPrefix, m.cfg.Cluster.RPCURLs...)
+	networkSlot, err := clusterRPC.GetSlot(m.ctx)
+	if err != nil {
+		m.logger.Error("failed to get network slot", "error", err)
+		return true // Forgive RPC error, allow takeover attempt
+	}
+
+	// Get local processed slot
+	localSlot, err := m.localRPC.GetSlot(m.ctx)
+	if err != nil {
+		m.logger.Error("failed to get local slot", "error", err)
+		return false // Local RPC error = not ready
+	}
+
+	// Calculate delta: positive = ahead, zero = at network, negative = behind
+	slotsDelta := int64(localSlot) - int64(networkSlot)
+
+	// Check if delta is within allowed range
+	if slotsDelta < m.cfg.Failover.SelfSlotsDeltaAllowed {
+		m.logger.Warn("self is too far behind network to take over",
+			"local_slot", localSlot,
+			"network_slot", networkSlot,
+			"slots_delta", slotsDelta,
+			"self_slots_delta_allowed", m.cfg.Failover.SelfSlotsDeltaAllowed,
+		)
+		return false
+	}
+
+	m.logger.Debug("self is within slots threshold",
+		"local_slot", localSlot,
+		"network_slot", networkSlot,
+		"slots_delta", slotsDelta,
+	)
+	return true
 }
 
 // selfGossipPubkey returns the pubkey of the validator in gossip

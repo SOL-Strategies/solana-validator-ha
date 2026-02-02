@@ -16,6 +16,9 @@ func TestFailover_SetDefaults(t *testing.T) {
 	assert.Equal(t, 3, failover.LeaderlessSamplesThreshold)
 	// TakeoverJitterDuration is no longer set by default - it remains at zero value
 	assert.Equal(t, time.Duration(0), failover.TakeoverJitterDuration)
+	// Check new health stability defaults
+	assert.Equal(t, 30*time.Second, failover.PeerGossipMinPresenceDuration)
+	assert.Equal(t, int64(-2), failover.SelfSlotsDeltaAllowed)
 }
 
 func TestFailover_Validate(t *testing.T) {
@@ -119,6 +122,52 @@ func TestFailover_Validate(t *testing.T) {
 	}
 	err = failover.Validate()
 	assert.NoError(t, err)
+}
+
+func TestFailover_ValidateSelfSlotsDeltaAllowed(t *testing.T) {
+	// Create a valid base config
+	failover := &Failover{
+		PollIntervalDuration:       30 * time.Second,
+		LeaderlessSamplesThreshold: 10,
+		Active:                     Role{Command: "systemctl start solana"},
+		Passive:                    Role{Command: "systemctl stop solana"},
+		Peers:                      Peers{"validator-1": {IP: "192.168.1.10"}},
+	}
+
+	// Test with zero value (should pass - means use default)
+	failover.SelfSlotsDeltaAllowed = 0
+	err := failover.Validate()
+	assert.NoError(t, err)
+
+	// Test with -2 (should pass - at boundary)
+	failover.SelfSlotsDeltaAllowed = -2
+	err = failover.Validate()
+	assert.NoError(t, err)
+
+	// Test with -3 (should pass - more lenient)
+	failover.SelfSlotsDeltaAllowed = -3
+	err = failover.Validate()
+	assert.NoError(t, err)
+
+	// Test with -10 (should pass - very lenient)
+	failover.SelfSlotsDeltaAllowed = -10
+	err = failover.Validate()
+	assert.NoError(t, err)
+
+	// Test with -1 (should fail - too restrictive)
+	failover.SelfSlotsDeltaAllowed = -1
+	err = failover.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failover.self_slots_delta_allowed must be <= -2")
+
+	// Test with 0 explicitly set vs zero value
+	// (already tested above - 0 means use default)
+
+	// Test with 1 (should fail - way too restrictive)
+	failover.SelfSlotsDeltaAllowed = 1
+	err = failover.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failover.self_slots_delta_allowed must be <= -2")
 }
 
 func TestFailover_ValidateWithHooks(t *testing.T) {

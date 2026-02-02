@@ -32,6 +32,11 @@ type State struct {
 	LeaderlessSamplesCount         int
 	delinquentSlotDistanceOverride config.DelinquentSlotDistanceOverride
 	lastRefreshHadRPCError         bool
+	// lastSeenInGossipAt tracks when each peer (by IP) was last seen in gossip
+	// This persists across Refresh() cycles even when peers temporarily disappear
+	lastSeenInGossipAt map[string]time.Time
+	// peerGossipMinPresenceDuration is how long a peer must be visible to be "present"
+	peerGossipMinPresenceDuration time.Duration
 }
 
 // PeerState represents the state of a peer as seen by the solana network
@@ -58,6 +63,7 @@ type Options struct {
 	SelfIP                         string
 	ConfigPeers                    config.Peers
 	LogPrefix                      string
+	PeerGossipMinPresenceDuration  time.Duration
 }
 
 // NewState creates a new gossip state
@@ -70,6 +76,8 @@ func NewState(opts Options) *State {
 		configPeers:                    opts.ConfigPeers,
 		peerStatesByName:               make(map[string]PeerState),
 		delinquentSlotDistanceOverride: opts.DelinquentSlotDistanceOverride,
+		lastSeenInGossipAt:             make(map[string]time.Time),
+		peerGossipMinPresenceDuration:  opts.PeerGossipMinPresenceDuration,
 	}
 }
 
@@ -136,6 +144,9 @@ func (p *State) Refresh() {
 		}
 
 		// now we know the peer is alive and voting (if it is an active node) - so we can add it to the state
+
+		// update lastSeenInGossipAt for presence tracking (persists across Refresh cycles)
+		p.lastSeenInGossipAt[nodeIP] = time.Now().UTC()
 
 		// add the peer to the peerEntries
 		peerState := PeerState{
@@ -474,4 +485,31 @@ func (p *State) hasConfigPeerWithIP(ip string) bool {
 // IPEquals returns true if the IP is equal to the peer's IP
 func (p *PeerState) IPEquals(ip string) bool {
 	return p.IP == ip
+}
+
+// IsPeerPresent checks if a peer has been visible in gossip within the grace period
+// This does NOT verify the peer is healthy or caught up - just that it's running
+func (p *State) IsPeerPresent(peerIP string) bool {
+	lastSeen, exists := p.lastSeenInGossipAt[peerIP]
+	if !exists {
+		return false
+	}
+	return time.Since(lastSeen) <= p.peerGossipMinPresenceDuration
+}
+
+// HasPresentPeers returns true if any peers (excluding self) are present
+// Used for last-man-standing guardrail
+func (p *State) HasPresentPeers(selfIP string) bool {
+	for _, peerState := range p.peerStatesByName {
+		if peerState.IP != selfIP && p.IsPeerPresent(peerState.IP) {
+			return true
+		}
+	}
+	return false
+}
+
+// GetLastSeenInGossipAt returns when the peer was last seen in gossip
+func (p *State) GetLastSeenInGossipAt(peerIP string) (time.Time, bool) {
+	t, exists := p.lastSeenInGossipAt[peerIP]
+	return t, exists
 }

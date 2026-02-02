@@ -959,3 +959,137 @@ func TestManager_EnsurePassive_WithDryRun(t *testing.T) {
 	state := manager.cache.GetState()
 	assert.Equal(t, "becoming_passive", state.FailoverStatus)
 }
+
+func TestManager_IsSelfWithinSlotsThreshold(t *testing.T) {
+	t.Run("returns true when network RPC fails (forgive)", func(t *testing.T) {
+		cfg := createTestConfig()
+		cfg.Failover.SelfSlotsDeltaAllowed = -2
+		// Use invalid URL to ensure network RPC fails first
+		cfg.Cluster.RPCURLs = []string{"http://invalid-url-that-will-fail.local:8899"}
+
+		opts := NewManagerOptions{
+			Cfg:             cfg,
+			GetPublicIPFunc: mockPublicIPFunc,
+		}
+
+		manager := NewManager(opts)
+		err := manager.initialize()
+		require.NoError(t, err)
+
+		// With invalid cluster RPC URL, network RPC will fail first
+		// Function should return true to forgive RPC error
+		result := manager.isSelfWithinSlotsThreshold()
+		assert.True(t, result, "should return true when network RPC fails (forgive)")
+	})
+
+	t.Run("returns false when local RPC fails", func(t *testing.T) {
+		cfg := createTestConfig()
+		cfg.Failover.SelfSlotsDeltaAllowed = -2
+		// Use valid mainnet URL so network RPC succeeds
+		cfg.Cluster.RPCURLs = []string{"https://api.mainnet-beta.solana.com"}
+		// Local RPC will fail (localhost:8899 not running)
+
+		opts := NewManagerOptions{
+			Cfg:             cfg,
+			GetPublicIPFunc: mockPublicIPFunc,
+		}
+
+		manager := NewManager(opts)
+		err := manager.initialize()
+		require.NoError(t, err)
+
+		// Network RPC succeeds, local RPC fails
+		// Function should return false (not ready)
+		result := manager.isSelfWithinSlotsThreshold()
+		assert.False(t, result, "should return false when local RPC fails (not ready)")
+	})
+
+	t.Run("uses SelfSlotsDeltaAllowed from config", func(t *testing.T) {
+		cfg := createTestConfig()
+		cfg.Failover.SelfSlotsDeltaAllowed = -10
+		// Use invalid URL to ensure network RPC fails first
+		cfg.Cluster.RPCURLs = []string{"http://invalid-url-that-will-fail.local:8899"}
+
+		opts := NewManagerOptions{
+			Cfg:             cfg,
+			GetPublicIPFunc: mockPublicIPFunc,
+		}
+
+		manager := NewManager(opts)
+		err := manager.initialize()
+		require.NoError(t, err)
+
+		// Verify config is properly set
+		assert.Equal(t, int64(-10), manager.cfg.Failover.SelfSlotsDeltaAllowed)
+
+		// Function should return true (network RPC fails)
+		result := manager.isSelfWithinSlotsThreshold()
+		assert.True(t, result)
+	})
+
+	t.Run("with default threshold value", func(t *testing.T) {
+		cfg := createTestConfig()
+		// SelfSlotsDeltaAllowed = 0 means use default (-2)
+		cfg.Failover.SelfSlotsDeltaAllowed = 0
+		cfg.Failover.SetDefaults() // This will set default to -2
+		// Use invalid URL to ensure network RPC fails first
+		cfg.Cluster.RPCURLs = []string{"http://invalid-url-that-will-fail.local:8899"}
+
+		opts := NewManagerOptions{
+			Cfg:             cfg,
+			GetPublicIPFunc: mockPublicIPFunc,
+		}
+
+		manager := NewManager(opts)
+		err := manager.initialize()
+		require.NoError(t, err)
+
+		// Verify default was applied
+		assert.Equal(t, int64(-2), manager.cfg.Failover.SelfSlotsDeltaAllowed)
+
+		// Function should return true (network RPC fails)
+		result := manager.isSelfWithinSlotsThreshold()
+		assert.True(t, result)
+	})
+
+	t.Run("with strict threshold", func(t *testing.T) {
+		cfg := createTestConfig()
+		cfg.Failover.SelfSlotsDeltaAllowed = -100 // Very strict: must be within 100 slots
+		// Use invalid URL to ensure network RPC fails first
+		cfg.Cluster.RPCURLs = []string{"http://invalid-url-that-will-fail.local:8899"}
+
+		opts := NewManagerOptions{
+			Cfg:             cfg,
+			GetPublicIPFunc: mockPublicIPFunc,
+		}
+
+		manager := NewManager(opts)
+		err := manager.initialize()
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(-100), manager.cfg.Failover.SelfSlotsDeltaAllowed)
+
+		// Function should return true (network RPC fails, so forgive)
+		result := manager.isSelfWithinSlotsThreshold()
+		assert.True(t, result)
+	})
+}
+
+func TestManager_ConfigPassesPresenceDurationToGossipState(t *testing.T) {
+	cfg := createTestConfig()
+	cfg.Failover.PeerGossipMinPresenceDuration = 45 * time.Second
+
+	opts := NewManagerOptions{
+		Cfg:             cfg,
+		GetPublicIPFunc: mockPublicIPFunc,
+	}
+
+	manager := NewManager(opts)
+	err := manager.initialize()
+	require.NoError(t, err)
+
+	// Verify gossipState was initialized with the presence duration
+	assert.NotNil(t, manager.gossipState)
+	// The config value should be properly set
+	assert.Equal(t, 45*time.Second, manager.cfg.Failover.PeerGossipMinPresenceDuration)
+}

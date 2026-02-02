@@ -16,6 +16,14 @@ type Failover struct {
 	Passive                        Role                           `koanf:"passive"`
 	Peers                          Peers                          `koanf:"peers"`
 	DelinquentSlotDistanceOverride DelinquentSlotDistanceOverride `koanf:"delinquent_slot_distance_override"`
+	// PeerGossipMinPresenceDuration is how long a peer must be visible in gossip
+	// to be considered "present" (smooths out brief network glitches)
+	PeerGossipMinPresenceDuration time.Duration `koanf:"peer_gossip_min_presence_duration"`
+	// SelfSlotsDeltaAllowed is minimum delta (local_slot - network_slot) for self to take over
+	// delta > 0: ahead of network, delta = 0: at network, delta < 0: behind network
+	// Self can take over if: delta >= SelfSlotsDeltaAllowed
+	// Example: -2 means self can be at most 2 slots behind to take over
+	SelfSlotsDeltaAllowed int64 `koanf:"self_slots_delta_allowed"`
 }
 
 // DelinquentSlotDistanceOverride represents an sdk override for the delinquent slot distance
@@ -105,6 +113,12 @@ func (f *Failover) Validate() error {
 	// Note: DelinquentSlotDistanceOverride.Value is uint64, so it cannot be negative
 	// No validation needed for negative values since uint64 cannot hold negative numbers
 
+	// failover.self_slots_delta_allowed must be <= -2 (normal ops can have delta of -1 or -2)
+	// Note: 0 is allowed as it means "use default" (will be set to -2 in SetDefaults)
+	if f.SelfSlotsDeltaAllowed != 0 && f.SelfSlotsDeltaAllowed > -2 {
+		return fmt.Errorf("failover.self_slots_delta_allowed must be <= -2 (value %d is too restrictive for normal operations where delta can be -1 or -2)", f.SelfSlotsDeltaAllowed)
+	}
+
 	return nil
 }
 
@@ -131,6 +145,12 @@ func (f *Failover) SetDefaults() {
 	}
 	if f.LeaderlessSamplesThreshold == 0 {
 		f.LeaderlessSamplesThreshold = 3 //  3 x poll interval = (at least) 15 seconds
+	}
+	if f.PeerGossipMinPresenceDuration == 0 {
+		f.PeerGossipMinPresenceDuration = 30 * time.Second // peer must be visible for 30s
+	}
+	if f.SelfSlotsDeltaAllowed == 0 {
+		f.SelfSlotsDeltaAllowed = -2 // allow self to be up to 2 slots behind
 	}
 
 	// Set role names

@@ -587,3 +587,217 @@ func TestGetSortedIPs(t *testing.T) {
 	expected = []string{"10.0.0.1", "172.16.0.1", "192.168.1.1"}
 	assert.Equal(t, expected, sortedIPs, "IPs should be sorted lexicographically")
 }
+
+func TestIsPeerPresent(t *testing.T) {
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
+
+	opts := Options{
+		ClusterRPC:                    realRPC,
+		ActivePubkey:                  "test-active-pubkey",
+		SelfIP:                        "192.168.1.1",
+		ConfigPeers:                   map[string]config.Peer{},
+		PeerGossipMinPresenceDuration: 30 * time.Second,
+	}
+
+	state := NewState(opts)
+
+	t.Run("returns false for unknown peer", func(t *testing.T) {
+		assert.False(t, state.IsPeerPresent("192.168.1.99"))
+	})
+
+	t.Run("returns true for recently seen peer", func(t *testing.T) {
+		// Simulate peer seen just now
+		state.lastSeenInGossipAt["192.168.1.2"] = time.Now().UTC()
+		assert.True(t, state.IsPeerPresent("192.168.1.2"))
+	})
+
+	t.Run("returns true for peer seen within grace period", func(t *testing.T) {
+		// Simulate peer seen 15 seconds ago (within 30s grace period)
+		state.lastSeenInGossipAt["192.168.1.3"] = time.Now().UTC().Add(-15 * time.Second)
+		assert.True(t, state.IsPeerPresent("192.168.1.3"))
+	})
+
+	t.Run("returns true near grace period boundary", func(t *testing.T) {
+		// Peer seen just within the grace period boundary (29.9s ago)
+		state.lastSeenInGossipAt["192.168.1.4"] = time.Now().UTC().Add(-29900 * time.Millisecond)
+		assert.True(t, state.IsPeerPresent("192.168.1.4"))
+	})
+
+	t.Run("returns false for peer seen beyond grace period", func(t *testing.T) {
+		// Simulate peer seen 31 seconds ago (beyond 30s grace period)
+		state.lastSeenInGossipAt["192.168.1.5"] = time.Now().UTC().Add(-31 * time.Second)
+		assert.False(t, state.IsPeerPresent("192.168.1.5"))
+	})
+
+	t.Run("returns false for peer seen long ago", func(t *testing.T) {
+		// Simulate peer seen 5 minutes ago
+		state.lastSeenInGossipAt["192.168.1.6"] = time.Now().UTC().Add(-5 * time.Minute)
+		assert.False(t, state.IsPeerPresent("192.168.1.6"))
+	})
+}
+
+func TestHasPresentPeers(t *testing.T) {
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
+
+	opts := Options{
+		ClusterRPC:                    realRPC,
+		ActivePubkey:                  "test-active-pubkey",
+		SelfIP:                        "192.168.1.1",
+		ConfigPeers:                   map[string]config.Peer{},
+		PeerGossipMinPresenceDuration: 30 * time.Second,
+	}
+
+	state := NewState(opts)
+
+	t.Run("returns false with no peers in state", func(t *testing.T) {
+		assert.False(t, state.HasPresentPeers("192.168.1.1"))
+	})
+
+	t.Run("returns false when only self is in state", func(t *testing.T) {
+		state.peerStatesByName = map[string]PeerState{
+			"self": {IP: "192.168.1.1", Pubkey: "pubkey1", LastSeenAtUTC: time.Now().UTC()},
+		}
+		state.lastSeenInGossipAt["192.168.1.1"] = time.Now().UTC()
+		assert.False(t, state.HasPresentPeers("192.168.1.1"))
+	})
+
+	t.Run("returns true when other peer is present", func(t *testing.T) {
+		state.peerStatesByName = map[string]PeerState{
+			"self":  {IP: "192.168.1.1", Pubkey: "pubkey1", LastSeenAtUTC: time.Now().UTC()},
+			"peer2": {IP: "192.168.1.2", Pubkey: "pubkey2", LastSeenAtUTC: time.Now().UTC()},
+		}
+		state.lastSeenInGossipAt["192.168.1.1"] = time.Now().UTC()
+		state.lastSeenInGossipAt["192.168.1.2"] = time.Now().UTC()
+		assert.True(t, state.HasPresentPeers("192.168.1.1"))
+	})
+
+	t.Run("returns false when other peer is stale", func(t *testing.T) {
+		state.peerStatesByName = map[string]PeerState{
+			"self":  {IP: "192.168.1.1", Pubkey: "pubkey1", LastSeenAtUTC: time.Now().UTC()},
+			"peer2": {IP: "192.168.1.2", Pubkey: "pubkey2", LastSeenAtUTC: time.Now().UTC()},
+		}
+		state.lastSeenInGossipAt["192.168.1.1"] = time.Now().UTC()
+		// Peer2 was seen 60 seconds ago - beyond grace period
+		state.lastSeenInGossipAt["192.168.1.2"] = time.Now().UTC().Add(-60 * time.Second)
+		assert.False(t, state.HasPresentPeers("192.168.1.1"))
+	})
+
+	t.Run("returns true when at least one peer is present among multiple", func(t *testing.T) {
+		state.peerStatesByName = map[string]PeerState{
+			"self":  {IP: "192.168.1.1", Pubkey: "pubkey1", LastSeenAtUTC: time.Now().UTC()},
+			"peer2": {IP: "192.168.1.2", Pubkey: "pubkey2", LastSeenAtUTC: time.Now().UTC()},
+			"peer3": {IP: "192.168.1.3", Pubkey: "pubkey3", LastSeenAtUTC: time.Now().UTC()},
+		}
+		// peer2 is stale
+		state.lastSeenInGossipAt["192.168.1.2"] = time.Now().UTC().Add(-60 * time.Second)
+		// peer3 is present
+		state.lastSeenInGossipAt["192.168.1.3"] = time.Now().UTC()
+		assert.True(t, state.HasPresentPeers("192.168.1.1"))
+	})
+
+	t.Run("returns false when peer in state but never tracked in lastSeenInGossipAt", func(t *testing.T) {
+		state.peerStatesByName = map[string]PeerState{
+			"self":  {IP: "192.168.1.1", Pubkey: "pubkey1", LastSeenAtUTC: time.Now().UTC()},
+			"peer2": {IP: "192.168.1.2", Pubkey: "pubkey2", LastSeenAtUTC: time.Now().UTC()},
+		}
+		// Clear lastSeenInGossipAt - peer2 was never tracked
+		state.lastSeenInGossipAt = make(map[string]time.Time)
+		assert.False(t, state.HasPresentPeers("192.168.1.1"))
+	})
+}
+
+func TestGetLastSeenInGossipAt(t *testing.T) {
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
+
+	opts := Options{
+		ClusterRPC:                    realRPC,
+		ActivePubkey:                  "test-active-pubkey",
+		SelfIP:                        "192.168.1.1",
+		ConfigPeers:                   map[string]config.Peer{},
+		PeerGossipMinPresenceDuration: 30 * time.Second,
+	}
+
+	state := NewState(opts)
+
+	t.Run("returns false for unknown peer", func(t *testing.T) {
+		_, exists := state.GetLastSeenInGossipAt("192.168.1.99")
+		assert.False(t, exists)
+	})
+
+	t.Run("returns correct time for tracked peer", func(t *testing.T) {
+		expectedTime := time.Now().UTC()
+		state.lastSeenInGossipAt["192.168.1.2"] = expectedTime
+
+		gotTime, exists := state.GetLastSeenInGossipAt("192.168.1.2")
+		assert.True(t, exists)
+		assert.Equal(t, expectedTime, gotTime)
+	})
+
+	t.Run("returns correct time even for stale peer", func(t *testing.T) {
+		// Even stale peers should return their last seen time
+		expectedTime := time.Now().UTC().Add(-5 * time.Minute)
+		state.lastSeenInGossipAt["192.168.1.3"] = expectedTime
+
+		gotTime, exists := state.GetLastSeenInGossipAt("192.168.1.3")
+		assert.True(t, exists)
+		assert.Equal(t, expectedTime, gotTime)
+	})
+}
+
+func TestPresenceTrackingWithDifferentDurations(t *testing.T) {
+	realRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
+
+	t.Run("short grace period (5s)", func(t *testing.T) {
+		opts := Options{
+			ClusterRPC:                    realRPC,
+			ActivePubkey:                  "test-active-pubkey",
+			SelfIP:                        "192.168.1.1",
+			ConfigPeers:                   map[string]config.Peer{},
+			PeerGossipMinPresenceDuration: 5 * time.Second,
+		}
+		state := NewState(opts)
+
+		// Peer seen 3 seconds ago - should be present
+		state.lastSeenInGossipAt["192.168.1.2"] = time.Now().UTC().Add(-3 * time.Second)
+		assert.True(t, state.IsPeerPresent("192.168.1.2"))
+
+		// Peer seen 6 seconds ago - should not be present
+		state.lastSeenInGossipAt["192.168.1.3"] = time.Now().UTC().Add(-6 * time.Second)
+		assert.False(t, state.IsPeerPresent("192.168.1.3"))
+	})
+
+	t.Run("long grace period (2m)", func(t *testing.T) {
+		opts := Options{
+			ClusterRPC:                    realRPC,
+			ActivePubkey:                  "test-active-pubkey",
+			SelfIP:                        "192.168.1.1",
+			ConfigPeers:                   map[string]config.Peer{},
+			PeerGossipMinPresenceDuration: 2 * time.Minute,
+		}
+		state := NewState(opts)
+
+		// Peer seen 90 seconds ago - should still be present with 2m grace
+		state.lastSeenInGossipAt["192.168.1.2"] = time.Now().UTC().Add(-90 * time.Second)
+		assert.True(t, state.IsPeerPresent("192.168.1.2"))
+
+		// Peer seen 3 minutes ago - should not be present
+		state.lastSeenInGossipAt["192.168.1.3"] = time.Now().UTC().Add(-3 * time.Minute)
+		assert.False(t, state.IsPeerPresent("192.168.1.3"))
+	})
+
+	t.Run("zero grace period", func(t *testing.T) {
+		opts := Options{
+			ClusterRPC:                    realRPC,
+			ActivePubkey:                  "test-active-pubkey",
+			SelfIP:                        "192.168.1.1",
+			ConfigPeers:                   map[string]config.Peer{},
+			PeerGossipMinPresenceDuration: 0,
+		}
+		state := NewState(opts)
+
+		// With zero grace period, only peers seen exactly now would be present
+		// Since we can't set exact now, any past time should fail
+		state.lastSeenInGossipAt["192.168.1.2"] = time.Now().UTC().Add(-1 * time.Millisecond)
+		assert.False(t, state.IsPeerPresent("192.168.1.2"))
+	})
+}
