@@ -128,24 +128,22 @@ func TestValidate(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "validator.rpc_url must be a valid URL")
 
-	// Test with local RPC in cluster.rpc_urls (should fail)
+	// Test with local RPC in cluster.rpc_urls (allowed with warning, requires mutual entrypoints)
 	cfg.Validator.RPCURL = "http://localhost:8899"
 	cfg.Cluster.RPCURLs = []string{"http://localhost:8899", "https://api.testnet.solana.com"}
 	err = cfg.validate()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "cluster.rpc_urls must not contain the local validator RPC URL")
+	assert.NoError(t, err) // Now allowed (warning logged, not error)
 
-	// Test with different ports on same host (should still fail)
+	// Test with different ports on same host (allowed, different endpoint)
 	cfg.Validator.RPCURL = "http://localhost:8899"
 	cfg.Cluster.RPCURLs = []string{"http://localhost:8900"}
 	err = cfg.validate()
-	assert.NoError(t, err) // Different port means different host:port, so this should pass
+	assert.NoError(t, err)
 
-	// Test with same host:port in cluster.rpc_urls (should fail)
+	// Test with same host:port in cluster.rpc_urls (allowed with warning)
 	cfg.Cluster.RPCURLs = []string{"https://localhost:8899"}
 	err = cfg.validate()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "cluster.rpc_urls must not contain the local validator RPC URL")
+	assert.NoError(t, err) // Now allowed (warning logged, not error)
 }
 
 func createTempConfigFile(t *testing.T) string {

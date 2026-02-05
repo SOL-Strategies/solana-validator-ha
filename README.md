@@ -230,6 +230,36 @@ cluster:
   rpc_urls: []  # Uses cluster defaults if empty
 ```
 
+#### Using Local RPC for Faster Peer Detection
+
+By default, peer health is detected via gossip data from remote cluster RPCs. Gossip propagation through the network can take 30-60 seconds to reflect a peer's delinquency, which adds latency to failover detection.
+
+**For faster failover**, you can include the local validator's RPC URL in `cluster.rpc_urls` if your HA peers are configured as **mutual entrypoints** in agave. When validators list each other as `--entrypoint`, they establish a direct gossip link via UDP, meaning the local RPC will have near-instant gossip data about its HA peer.
+
+**Requirements:**
+1. Each HA validator must include the other as an `--entrypoint` flag in agave startup
+2. The entrypoint relationship is purely about gossip connectivity - voting/stake status doesn't affect it
+
+**Example agave configuration:**
+```bash
+# On validator A (185.26.11.91)
+agave-validator ... --entrypoint 186.233.187.141:8001
+
+# On validator B (186.233.187.141)
+agave-validator ... --entrypoint 185.26.11.91:8001
+```
+
+**Example cluster config with local RPC:**
+```yaml
+cluster:
+  name: "mainnet-beta"
+  rpc_urls:
+    - "http://127.0.0.1:8899"           # Local RPC first (direct gossip, sub-second detection)
+    - "https://api.mainnet-beta.solana.com"  # Fallback if local validator is down
+```
+
+With this configuration, peer delinquency can be detected in sub-seconds rather than 30-60 seconds, significantly reducing failover time. The program will fall back to remote RPCs if the local validator is unavailable.
+
 ### Failover Configuration
 
 See [example-scripts/ha-set-role.sh](example-scripts/ha-set-role.sh) for an example failover script to set role `active|passive`).
