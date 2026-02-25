@@ -547,7 +547,7 @@ func (m *Manager) ensureActive() {
 // independent interval. This decouples health streak tracking from the gossip poll loop,
 // ensuring the streak timer is not skewed by the latency of gossip RPC calls.
 func (m *Manager) startHealthyTracker() {
-	m.logger.Info("starting self health tracker",
+	m.logger.Info("starting local state tracker",
 		"poll_interval", m.cfg.Failover.SelfHealthy.PollIntervalDuration,
 		"minimum_duration", m.cfg.Failover.SelfHealthy.MinimumDuration,
 	)
