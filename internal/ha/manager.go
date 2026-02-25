@@ -13,6 +13,7 @@ import (
 	"github.com/sol-strategies/solana-validator-ha/internal/constants"
 	"github.com/sol-strategies/solana-validator-ha/internal/gossip"
 	"github.com/sol-strategies/solana-validator-ha/internal/local"
+	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/sol-strategies/solana-validator-ha/internal/prometheus"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
 )
@@ -50,7 +51,7 @@ func NewManager(opts NewManagerOptions) *Manager {
 	// Create metrics with cache
 	metrics := prometheus.New(prometheus.Options{
 		Config: opts.Cfg,
-		Logger: log.WithPrefix("metrics"),
+		Logger: logging.New(opts.Cfg.Validator.Name, "metrics"),
 		Cache:  cache,
 	})
 
@@ -58,7 +59,7 @@ func NewManager(opts NewManagerOptions) *Manager {
 		cfg:       opts.Cfg,
 		metrics:   metrics,
 		cache:     cache,
-		logger:    log.WithPrefix("ha_manager"),
+		logger:    logging.New(opts.Cfg.Validator.Name, "ha_manager"),
 		ctx:       ctx,
 		cancel:    cancel,
 		peerCount: len(opts.Cfg.Failover.Peers),
@@ -108,7 +109,7 @@ func (m *Manager) initialize() error {
 
 	// set global log prefix to pass everywhere
 	m.logPrefix = m.cfg.Validator.Name
-	m.logger = log.WithPrefix("ha_manager")
+	m.logger = logging.New(m.logPrefix, "ha_manager")
 
 	// peers config file must not declare ourselves
 	if m.cfg.Failover.Peers.HasIP(publicIP) {
@@ -153,6 +154,7 @@ func (m *Manager) initialize() error {
 		Cfg:          m.cfg.Failover.SelfHealthy,
 		ActivePubkey: m.cfg.Validator.Identities.ActivePubkey(),
 		Ctx:          m.ctx,
+		LogPrefix:    m.logPrefix,
 	})
 
 	m.logger.Debug("initialized")

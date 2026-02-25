@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/log"
 	solanagorpc "github.com/gagliardetto/solana-go/rpc"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
+	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
 )
 
@@ -32,6 +33,7 @@ type Options struct {
 	Cfg          config.SelfHealthy
 	ActivePubkey string
 	Ctx          context.Context
+	LogPrefix    string
 }
 
 // NewState creates a new local State.
@@ -40,7 +42,7 @@ func NewState(opts Options) *State {
 		rpc:          opts.RPC,
 		cfg:          opts.Cfg,
 		activePubkey: opts.ActivePubkey,
-		logger:       log.WithPrefix("local_state"),
+		logger:       logging.New(opts.LogPrefix, "local_state"),
 		ctx:          opts.Ctx,
 	}
 }

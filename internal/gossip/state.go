@@ -12,6 +12,7 @@ import (
 	solana "github.com/gagliardetto/solana-go"
 	solanagorpc "github.com/gagliardetto/solana-go/rpc"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
+	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
 )
 
@@ -76,7 +77,7 @@ type Options struct {
 // NewState creates a new gossip state
 func NewState(opts Options) *State {
 	return &State{
-		logger:                         log.WithPrefix("gossip_state"),
+		logger:                         logging.New(opts.LogPrefix, "gossip_state"),
 		clusterRPC:                     opts.ClusterRPC,
 		activePubkey:                   opts.ActivePubkey,
 		selfIP:                         opts.SelfIP,
@@ -385,7 +386,7 @@ func (p *State) cacheVotePubkey(voteAccount solanagorpc.VoteAccountsResult) {
 // response from ~1500 entries to 1. If a filtered call returns empty (e.g. after a key rotation),
 // the cache entry is cleared and the call falls back to unfiltered for that cycle.
 func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bool {
-	delinquentSlotDistance := uint64(150) // Solana SDK default
+	delinquentSlotDistance := uint64(128) // Solana/Agave default (MAX_DELINQUENT_SLOT_DISTANCE)
 	identityKey := node.Pubkey.String()
 
 	buildOpts := func(votePubkey *solana.PublicKey) solanagorpc.GetVoteAccountsOpts {
