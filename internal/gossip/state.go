@@ -35,6 +35,8 @@ type State struct {
 	configUndeclaredActivePeer     PeerState
 	// peerLastSeenAtByName tracks the last time each peer was seen in gossip, persists even when peer goes missing
 	peerLastSeenAtByName map[string]time.Time
+	// lastLoggedPeersState is the last peersStateString() output that was logged, used to suppress duplicate logs
+	lastLoggedPeersState string
 	// votePubkeyCache maps identity pubkey -> vote account pubkey, populated on first getVoteAccounts call
 	// to allow subsequent calls to use the votePubkey filter and avoid fetching all ~1500 validators
 	votePubkeyCache map[string]solana.PublicKey
@@ -69,7 +71,7 @@ type Options struct {
 // NewState creates a new gossip state
 func NewState(opts Options) *State {
 	return &State{
-		logger:                         log.WithPrefix("[gossip_state]"),
+		logger:                         log.WithPrefix("gossip_state"),
 		clusterRPC:                     opts.ClusterRPC,
 		activePubkey:                   opts.ActivePubkey,
 		selfIP:                         opts.SelfIP,
@@ -185,11 +187,11 @@ func (p *State) Refresh() {
 
 		// log if is change of active peer
 		if peerState.LastSeenActive && p.lastActivePeer.IP != "" && p.lastActivePeer.IP != peerState.IP {
-			p.logger.Warn(fmt.Sprintf("active peer changed: %s (%s) -> %s (%s)",
-				p.lastActivePeer.IP,
+			p.logger.Info(fmt.Sprintf("active peer changed %s %s -> %s %s",
 				p.lastActivePeer.Name,
-				peerState.IP,
+				p.lastActivePeer.IP,
 				peerState.Name,
+				peerState.IP,
 			))
 		}
 
@@ -208,7 +210,7 @@ func (p *State) Refresh() {
 		// tell us what we found
 		// state didn't have this peer last time but now it does - so we need to log that
 		if !p.HasIP(peerState.IP) {
-			p.logger.Info("peer found",
+			p.logger.Debug("peer found",
 				"name", peerState.Name,
 				"ip", peerState.IP,
 				"pubkey", peerState.Pubkey,
@@ -244,13 +246,13 @@ func (p *State) Refresh() {
 			if lastSeen, ok := p.peerLastSeenAtByName[name]; ok {
 				lastSeenAt = lastSeen.Format(time.RFC3339Nano)
 			}
-			p.logger.Warn("peer lost", "name", name, "ip", ip, "last_seen_at", lastSeenAt)
+			p.logger.Debug("peer lost", "name", name, "ip", ip, "last_seen_at", lastSeenAt)
 			continue
 		}
 
 		// warn if it is the first time we've seen this peer missing from gossip
 		if !slices.Contains(p.missingGossipIPs, ip) {
-			p.logger.Warn("peer not found", "name", name, "ip", ip)
+			p.logger.Debug("peer not found", "name", name, "ip", ip)
 			continue
 		}
 
@@ -269,42 +271,33 @@ func (p *State) Refresh() {
 	p.missingGossipIPs = latestMissingGossipIPs
 	p.peerStatesByName = latestPeerStatesByName
 	p.PeerStatesRefreshedAt = time.Now().UTC()
-	p.logger.Info(p.peersStateString())
+	if stateStr := p.peersStateString(); stateStr != p.lastLoggedPeersState {
+		p.logger.Info(stateStr)
+		p.lastLoggedPeersState = stateStr
+	}
 }
 
-// peersStateString returns a string representation of all configured peers for logging
-// format: discovered N/<total_configured_peers> configured peers: [<emoji> <ACTIVE|PASSIVE|MISSING> <peer_name> <peer_ip> rank=<peer_ip_rank>/<total_ip_ranks> last_seen_at=<peer_last_seen_at_utc_with_nanoseconds>] ...
-// where emoji is 🟢 for ACTIVE, 🟡 for PASSIVE, and 🔴 for MISSING
-// displayed in ascending order of ip rank
+// peersStateString returns a compact string representation of all configured peers for logging.
+// format: 🟢 <name> <ip> | 🟡 <name> <ip> | ❓ <name> <ip>
+// where emoji is 🟢 for ACTIVE, 🟡 for PASSIVE, and ❓ for MISSING, sorted by IP ascending
 func (p *State) peersStateString() string {
 	if len(p.configPeers) == 0 {
 		return ""
 	}
 
-	// Collect configured peers and sort by IP
 	type peerInfo struct {
 		name       string
 		ip         string
 		discovered bool
 		active     bool
-		lastSeenAt string
 	}
 
 	peers := make([]peerInfo, 0, len(p.configPeers))
-	discoveredCount := 0
 	for name, configPeer := range p.configPeers {
-		info := peerInfo{
-			name: name,
-			ip:   configPeer.IP,
-		}
+		info := peerInfo{name: name, ip: configPeer.IP}
 		if state, ok := p.peerStatesByName[name]; ok {
 			info.discovered = true
 			info.active = state.LastSeenActive
-			info.lastSeenAt = state.LastSeenAtUTC.Format(time.RFC3339Nano)
-			discoveredCount++
-		} else if lastSeen, ok := p.peerLastSeenAtByName[name]; ok {
-			// peer is missing but we have a record of when it was last seen
-			info.lastSeenAt = lastSeen.Format(time.RFC3339Nano)
 		}
 		peers = append(peers, info)
 	}
@@ -312,34 +305,20 @@ func (p *State) peersStateString() string {
 		return peers[i].ip < peers[j].ip
 	})
 
-	// Build output
-	var sb strings.Builder
-	numPeers := len(peers)
-
-	fmt.Fprintf(&sb, "discovered %d/%d configured peers", discoveredCount, numPeers)
-
-	for rank, peer := range peers {
-		// Determine status and emoji: active (🟢), passive (🟡), or missing (🔴)
-		var emoji, status string
+	parts := make([]string, len(peers))
+	for i, peer := range peers {
+		emoji := "❓"
 		if peer.discovered {
 			if peer.active {
 				emoji = "🟢"
-				status = "ACTIVE"
 			} else {
 				emoji = "🟡"
-				status = "PASSIVE"
 			}
-		} else {
-			emoji = "🔴"
-			status = "MISSING"
 		}
-
-		sb.WriteByte(' ')
-		fmt.Fprintf(&sb, "[%s %s %s %s rank=%d/%d last_seen_at=%s]",
-			emoji, status, peer.name, peer.ip, rank, numPeers-1, peer.lastSeenAt)
+		parts[i] = fmt.Sprintf("%s %s %s", emoji, peer.name, peer.ip)
 	}
 
-	return sb.String()
+	return strings.Join(parts, " | ")
 }
 
 // PeerIPRankMap returns a map of IP addresses to their zero-indexed rank in the sorted list of IPs

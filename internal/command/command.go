@@ -32,7 +32,7 @@ type RunOptions struct {
 // Note: This function never times out - commands can take an indeterminate amount of time
 // (e.g., failover commands that may need to wait for services to start/stop).
 func Run(opts RunOptions) error {
-	logger := log.WithPrefix(fmt.Sprintf("[command %s]", opts.Name))
+	logger := log.WithPrefix(fmt.Sprintf("command %s", opts.Name))
 	envString := ""
 	for key, value := range opts.Env {
 		envString += fmt.Sprintf("%s=%s ", key, value)

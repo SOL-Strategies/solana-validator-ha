@@ -48,8 +48,11 @@ type Manager struct {
 	// selfHealthySince is the time the local validator first became healthy in the current
 	// continuous streak, as tracked by the independent health tracker goroutine.
 	// Zero value means the node is not currently in a healthy streak.
-	selfHealthySince time.Time
-	selfHealthyMutex    sync.RWMutex
+	selfHealthySince             time.Time
+	selfHealthyMutex             sync.RWMutex
+	selfHealthMinDurationReached bool // whether we've fired the "fully healthy" INFO log in this streak
+	selfHealthUnhealthyLogged    bool // whether we've fired the WARN for the current unhealthy streak
+	selfHealthSampledOnce        bool // whether at least one health sample has been taken
 }
 
 // NewManager creates a new HA manager from options
@@ -70,7 +73,7 @@ func NewManager(opts NewManagerOptions) *Manager {
 		cfg:       opts.Cfg,
 		metrics:   metrics,
 		cache:     cache,
-		logger:    log.WithPrefix("[ha_manager]"),
+		logger:    log.WithPrefix("ha_manager"),
 		localRPC:  rpc.NewClient(opts.Cfg.Validator.Name, opts.Cfg.Validator.RPCURL),
 		ctx:       ctx,
 		cancel:    cancel,
@@ -121,7 +124,7 @@ func (m *Manager) initialize() error {
 
 	// set global log prefix to pass everywhere
 	m.logPrefix = m.cfg.Validator.Name
-	m.logger = log.WithPrefix("[ha_manager]")
+	m.logger = log.WithPrefix("ha_manager")
 
 	// peers config file must not declare ourselves
 	if m.cfg.Failover.Peers.HasIP(publicIP) {
@@ -570,21 +573,55 @@ func (m *Manager) startHealthyTracker() {
 }
 
 // sampleSelfHealth samples the local validator health and updates the continuous healthy streak.
+// Logs only on state transitions to avoid log noise during restarts or sustained unhealthy periods.
 // Called by the health tracker goroutine on every tick.
 func (m *Manager) sampleSelfHealth() {
-	healthy := m.isSelfHealthy()
+	healthy, healthErr := m.checkHealth()
 	m.selfHealthyMutex.Lock()
 	defer m.selfHealthyMutex.Unlock()
+
+	firstSample := !m.selfHealthSampledOnce
+	m.selfHealthSampledOnce = true
+
 	if healthy {
 		if m.selfHealthySince.IsZero() {
+			// start streak — only log "recovering" if we've previously seen an unhealthy state
 			m.selfHealthySince = time.Now()
-			m.logger.Debug("self health tracker: node is healthy", "healthy_since", m.selfHealthySince)
+			m.selfHealthMinDurationReached = false
+			m.selfHealthUnhealthyLogged = false
+			if !firstSample {
+				m.logger.Info(fmt.Sprintf("self healthy for %s < %s minimum healthy duration - recovering",
+					time.Since(m.selfHealthySince).Round(time.Second),
+					m.cfg.Failover.SelfHealthy.MinimumDuration,
+				))
+			}
+		}
+		healthyFor := time.Since(m.selfHealthySince).Round(time.Second)
+		minDuration := m.cfg.Failover.SelfHealthy.MinimumDuration
+		// log once when the streak crosses the minimum duration threshold
+		if !m.selfHealthMinDurationReached && healthyFor >= minDuration {
+			m.selfHealthMinDurationReached = true
+			msg := fmt.Sprintf("self healthy for %s >= %s minimum healthy duration", healthyFor, minDuration)
+			if m.isSelfPassive() {
+				msg += " - eligible for failover"
+			}
+			m.logger.Info(msg)
 		}
 	} else {
 		if !m.selfHealthySince.IsZero() {
-			m.logger.Debug("self health tracker: node became unhealthy - resetting healthy streak")
+			// transition: healthy → unhealthy — reset streak and allow one unhealthy log
+			m.selfHealthySince = time.Time{}
+			m.selfHealthMinDurationReached = false
+			m.selfHealthUnhealthyLogged = false
 		}
-		m.selfHealthySince = time.Time{}
+		if !m.selfHealthUnhealthyLogged {
+			if healthErr != nil {
+				m.logger.Error("self unhealthy", "error", healthErr)
+			} else {
+				m.logger.Error("self unhealthy")
+			}
+			m.selfHealthUnhealthyLogged = true
+		}
 	}
 }
 
@@ -612,26 +649,23 @@ func (m *Manager) selfHealthyDuration() time.Duration {
 	return time.Since(since)
 }
 
-// isSelfHealthy checks if the validator is healthy by calling the local RPC client
-func (m *Manager) isSelfHealthy() (isHealthy bool) {
+// checkHealth performs a raw health check against the local RPC and returns the result without logging.
+func (m *Manager) checkHealth() (healthy bool, err error) {
 	healthStatus, err := m.localRPC.GetHealth(m.ctx)
 	if err != nil {
-		m.logger.Error(err.Error())
-		return false
+		return false, err
 	}
-
-	isHealthy = healthStatus == solanagorpc.HealthOk
-	m.logger.Debug("health status", "status", healthStatus, "is_healthy", isHealthy)
-
-	if !isHealthy {
-		m.logger.Warn("this node is unhealthy", "status", healthStatus)
-	}
-
-	return isHealthy
+	return healthStatus == solanagorpc.HealthOk, nil
 }
 
-// isSelfUnhealthy checks if the validator is unhealthy by calling the local RPC client
-func (m *Manager) isSelfUnhealthy() (isUnhealthy bool) {
+// isSelfHealthy checks if the validator is currently healthy.
+func (m *Manager) isSelfHealthy() bool {
+	healthy, _ := m.checkHealth()
+	return healthy
+}
+
+// isSelfUnhealthy checks if the validator is currently unhealthy.
+func (m *Manager) isSelfUnhealthy() bool {
 	return !m.isSelfHealthy()
 }
 
@@ -639,7 +673,7 @@ func (m *Manager) isSelfUnhealthy() (isUnhealthy bool) {
 func (m *Manager) isSelfActive() (isActive bool) {
 	identity, err := m.localRPC.GetIdentity(m.ctx)
 	if err != nil {
-		m.logger.Error(err.Error())
+		m.logger.Debug("GetIdentity failed", "error", err)
 		return false
 	}
 
@@ -650,7 +684,7 @@ func (m *Manager) isSelfActive() (isActive bool) {
 func (m *Manager) isSelfPassive() bool {
 	identity, err := m.localRPC.GetIdentity(m.ctx)
 	if err != nil {
-		m.logger.Error(err.Error())
+		m.logger.Debug("GetIdentity failed", "error", err)
 		return false
 	}
 
