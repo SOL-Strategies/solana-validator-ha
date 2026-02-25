@@ -173,6 +173,13 @@ func (p *State) Refresh() {
 			IsRecentlyInGossip: slices.Contains(p.missingGossipIPs, nodeIP),
 		}
 
+		// Active presence takes precedence: if this peer was already confirmed active in this
+		// refresh cycle (possible when both old and new CRDS identity entries briefly coexist
+		// during a gossip identity transition), don't overwrite it with the stale passive entry.
+		if existing, ok := latestPeerStatesByName[peerName]; ok && existing.LastSeenActive {
+			continue
+		}
+
 		// register the peer state
 		latestPeerStatesByName[peerName] = peerState
 
@@ -219,10 +226,12 @@ func (p *State) Refresh() {
 			)
 		}
 
-		// if all peers from configPeers are in the peerEntries, we can stop looking
-		if len(p.configPeers) == len(latestPeerStatesByName) {
-			break
-		}
+		// Note: no early break here. During a gossip identity transition both the old (passive)
+		// and new (active) CRDS entries for a peer briefly coexist in getClusterNodes. Breaking
+		// after the first (passive) occurrence would prevent the active entry from being processed.
+		// The active-wins guard above handles the reverse ordering (active first, passive second).
+		// With 2-3 configured peers across ~1500 cluster nodes each remaining iteration is a
+		// handful of string comparisons — the performance cost is negligible.
 	}
 
 	// warn if any of the config peers are not in the peerEntries
