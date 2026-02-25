@@ -173,6 +173,16 @@ func (c *Client) GetBalance(ctx context.Context, pubkey solana.PublicKey) (*rpc.
 	})
 }
 
+// GetSlot gets the current slot from the first working RPC client
+func (c *Client) GetSlot(ctx context.Context) (uint64, error) {
+	return executeWithRetry(c, ctx, rpcOperation[uint64]{
+		name: "GetSlot",
+		execute: func(client *rpc.Client, ctx context.Context) (uint64, error) {
+			return client.GetSlot(ctx, rpc.CommitmentProcessed)
+		},
+	})
+}
+
 // GetClusterNodes tries each RPC client in order and returns the first successful response
 func (c *Client) GetClusterNodes(ctx context.Context) ([]*rpc.GetClusterNodesResult, error) {
 	return executeWithRetry(c, ctx, rpcOperation[[]*rpc.GetClusterNodesResult]{

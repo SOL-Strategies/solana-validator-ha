@@ -15,6 +15,11 @@ import (
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
 )
 
+// undeclaredPeerName is the synthetic name used for active peers that appear in gossip but are
+// not declared in the HA cluster config. Used both when registering the peer state and when
+// labelling log lines (e.g. delinquency) where no configured name is available.
+const undeclaredPeerName = "config-undeclared-active-peer"
+
 // State represents the state of the peers as seen by the solana network
 type State struct {
 	// PeerStatesRefreshedAt is the last time the peer states were refreshed
@@ -128,7 +133,7 @@ func (p *State) Refresh() {
 				// node is active and voting so register it as undeclared active peer
 				isLeaderlessSample = false
 				p.configUndeclaredActivePeer = PeerState{
-					Name:           "config-undeclared-active-peer",
+					Name:           undeclaredPeerName,
 					IP:             nodeIP,
 					Pubkey:         node.Pubkey.String(),
 					LastSeenAtUTC:  time.Now().UTC(),
@@ -157,7 +162,7 @@ func (p *State) Refresh() {
 		// a borked active peer might appear in gossip but not actually be voting
 		// so we need to check for that and only proceed to add it to the state if it is not voting still
 		if isActiveNode && !p.isNodeActiveAndVoting(*node) {
-			p.logger.Warn("active peer appears in gossip but is not voting - excluding from state", "ip", nodeIP, "pubkey", node.Pubkey.String())
+			p.logger.Debug("active peer appears in gossip but is not voting - excluding from state", "ip", nodeIP, "pubkey", node.Pubkey.String())
 			continue
 		}
 
@@ -450,9 +455,16 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 		}
 
 		// ohhh shit! we're delinquent - snitch on this guy!
-		p.logger.Error(fmt.Sprintf("‼️ node is delinquent - not voting (behind %d slots or more)", delinquentSlotDistance),
-			"gossip_address", *node.Gossip,
-			"pubkey", node.Pubkey.String(),
+		nodeIP := strings.Split(*node.Gossip, ":")[0]
+		label := undeclaredPeerName + " " + nodeIP
+		if name, ok := p.peerNameFromIP(nodeIP); ok {
+			label = name + " " + nodeIP
+		}
+		distanceStr := fmt.Sprintf("behind %d slots or more", delinquentSlotDistance)
+		if currentSlot, err := p.clusterRPC.GetSlot(context.Background()); err == nil {
+			distanceStr = fmt.Sprintf("behind %d slots >= %d slots allowed", currentSlot-delinquentVoteAccount.LastVote, delinquentSlotDistance)
+		}
+		p.logger.Error(fmt.Sprintf("‼️ %s delinquent (%s)", label, distanceStr),
 			"last_voted_at_slot", delinquentVoteAccount.LastVote,
 		)
 		return false
