@@ -291,10 +291,10 @@ failover:
   # startup before falling behind and going unhealthy again.
   self_healthy:
 
-    # required: false | default: 45s
+    # required: false | default: 30s
     # How long the local validator RPC must continuously report healthy before this
     # node is eligible to become active in a failover.
-    minimum_duration: 45s
+    minimum_duration: 30s
 
     # required: false | default: 2s
     # How often to sample local RPC health. Runs independently of poll_interval_duration

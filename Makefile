@@ -85,22 +85,50 @@ integration-test:
 	cd integration && ./run-tests.sh
 	@echo "Integration tests completed!"
 
-# Generate README demo GIFs using VHS (https://github.com/charmbracelet/vhs)
-# Requires vhs: go install github.com/charmbracelet/vhs@latest
-# Produces: docs/passive-node.gif  docs/active-node.gif
-.PHONY: gif
-gif:
+# Start the integration docker compose environment and wait for services to be ready.
+# Run this before `make integration-test`. For GIF recording use `make demo` instead.
+.PHONY: integration
+integration:
 	@echo "Starting integration environment..."
-	@(cd integration && docker compose up --build -d 2>&1 | grep -E 'Started|Built|error' || true)
-	@echo "Waiting 30 s for services to be ready..."
+	@cd integration && docker compose up --build -d
+	@echo "Waiting 30s for services to be ready..."
 	@sleep 30
+	@echo "Integration environment ready."
+
+# Tear down the integration environment.
+.PHONY: integration-down
+integration-down:
+	@echo "Stopping integration environment..."
+	@cd integration && docker compose down --volumes --remove-orphans
+
+# Start mock-solana for GIF recording (runs the HA binary locally — no validator containers).
+# Run this before `make gifs`.
+.PHONY: demo
+demo:
+	@echo "Starting demo environment (mock-solana only)..."
+	@docker compose -f integration/docker-compose.demo.yml up --build -d
+	@echo "Waiting 5s for mock-solana to be ready..."
+	@sleep 5
+	@echo "Demo environment ready. Run 'make gifs' to record GIFs."
+
+# Tear down the demo environment.
+.PHONY: demo-down
+demo-down:
+	@echo "Stopping demo environment..."
+	@docker compose -f integration/docker-compose.demo.yml down --volumes --remove-orphans
+
+# Record demo GIFs using VHS (https://github.com/charmbracelet/vhs).
+# Requires: vhs (go install github.com/charmbracelet/vhs@latest)
+# Run `make demo` first to start mock-solana, then `make gifs` to record.
+# Produces: docs/passive-node.gif  docs/active-node.gif
+.PHONY: gifs
+gifs: build
 	@mkdir -p docs
 	@echo "Recording passive-node GIF..."
 	@vhs integration/tapes/passive-node.tape
 	@echo "Recording active-node GIF..."
 	@vhs integration/tapes/active-node.tape
-	@echo "GIFs saved: docs/passive-node.gif  docs/active-node.gif"
-	@-(cd integration && docker compose down --volumes --remove-orphans 2>/dev/null)
+	@echo "GIFs saved to docs/"
 
 
 # Clean build artifacts
@@ -189,7 +217,11 @@ help:
 	@echo "  test           - Run tests"
 	@echo "  test-coverage  - Run tests with coverage"
 	@echo "  integration-test - Run integration tests"
-	@echo "  gif              - Generate README demo GIFs (requires vhs)"
+	@echo "  integration      - Start integration docker compose environment"
+	@echo "  integration-down - Stop integration docker compose environment"
+	@echo "  demo             - Start mock-solana for GIF recording (lighter than integration)"
+	@echo "  demo-down        - Stop demo environment"
+	@echo "  gifs             - Record demo GIFs with VHS (run after make demo)"
 	@echo "  deps           - Install dependencies"
 	@echo "  fmt            - Format code"
 	@echo "  lint           - Run linter"

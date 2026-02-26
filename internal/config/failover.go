@@ -154,7 +154,7 @@ func (f *Failover) SetDefaults() {
 		f.LeaderlessSamplesThreshold = 3 //  3 x poll interval = (at least) 15 seconds
 	}
 	if f.SelfHealthy.MinimumDuration == 0 {
-		f.SelfHealthy.MinimumDuration = 45 * time.Second
+		f.SelfHealthy.MinimumDuration = 30 * time.Second
 	}
 	if f.SelfHealthy.PollIntervalDuration == 0 {
 		f.SelfHealthy.PollIntervalDuration = 2 * time.Second

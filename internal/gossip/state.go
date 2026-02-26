@@ -214,7 +214,7 @@ func (p *State) Refresh() {
 			if peerState.IP == p.selfIP {
 				toUsThem = "(us) "
 			}
-			p.logger.Info(fmt.Sprintf("👀 active peer changed %s%s %s ➡️ 🟢 %s%s %s %s",
+			p.logger.Info(fmt.Sprintf("👀 active peer changed - %s%s %s ➡️  %s%s %s %s",
 				fromUsThem,
 				p.lastActivePeer.Name,
 				p.lastActivePeer.IP,

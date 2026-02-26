@@ -1,9 +1,11 @@
 # active-node.tape
-# VHS tape — records the active node (validator-1) detecting it has dropped from gossip
-# and stepping down to passive so a peer can take over. Output: docs/active-node.gif
+# VHS tape — records validator-1 (active) detecting it has dropped from gossip
+# and stepping down to passive so a peer can take over.
+# Output: docs/active-node.gif
 #
-# The integration docker compose environment must be running before VHS starts.
-# The Makefile `gif` target handles this automatically.
+# Prerequisites (run once before recording):
+#   make build          # build the binary
+#   make demo           # start mock-solana on localhost:8899
 
 Output docs/active-node.gif
 
@@ -18,9 +20,13 @@ Sleep 300ms
 Hide
 Type "bash integration/scripts/demo-active-node.sh"
 Enter
+Sleep 1s
 Show
 
-# Real time for the script: ~28 s
-#   3 s settle + 25 s log stream (covering 10 s steady + 12 s failover + 3 s post)
-# Sleep here covers that plus a safety margin; PlaybackSpeed 2 halves the GIF duration.
-Sleep 32s
+# Timeline (real time):
+#   0–5s   binary starts as active, peers visible in gossip
+#   5s     self_healthy minimum_duration reached
+#   12s    validator-1 disconnected from mock gossip (simulates network loss)
+#   12–15s HA manager detects self not in gossip, runs passive (seppuku) command
+# PlaybackSpeed 2 halves the GIF duration.
+Sleep 30s

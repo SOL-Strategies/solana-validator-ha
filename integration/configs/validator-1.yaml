@@ -21,7 +21,7 @@ failover:
   leaderless_samples_threshold: 3  # 3 × 3s = 9s before failover
 
   self_healthy:
-    minimum_duration: "5s"       # short for fast integration tests (default is 45s)
+    minimum_duration: "5s"       # short for fast integration tests (default is 30s)
     poll_interval_duration: "2s"
 
   # When becoming active, tell the mock server so getIdentity returns the active pubkey.
