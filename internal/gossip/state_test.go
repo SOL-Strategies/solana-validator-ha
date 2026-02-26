@@ -297,11 +297,19 @@ func TestLastRefreshHadRPCError(t *testing.T) {
 	})
 
 	t.Run("returns false after successful RPC", func(t *testing.T) {
-		// Use a valid RPC endpoint
-		validRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
+		// Use a mock server that returns a valid empty getClusterNodes response.
+		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result":  []any{},
+			})
+		}))
+		t.Cleanup(mockServer.Close)
 
 		opts := Options{
-			ClusterRPC:   validRPC,
+			ClusterRPC:   rpc.NewClient("test", mockServer.URL),
 			ActivePubkey: "test-active-pubkey",
 			SelfIP:       "192.168.1.1",
 			ConfigPeers: map[string]config.Peer{
