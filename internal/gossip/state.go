@@ -206,11 +206,22 @@ func (p *State) Refresh() {
 
 		// log if is change of active peer
 		if peerState.LastSeenActive && p.lastActivePeer.IP != "" && p.lastActivePeer.IP != peerState.IP {
-			p.logger.Info(fmt.Sprintf("active peer changed %s %s -> %s %s",
+			var fromUsThem string
+			var toUsThem string
+			if p.lastActivePeer.IP == p.selfIP {
+				fromUsThem = "(us) "
+			}
+			if peerState.IP == p.selfIP {
+				toUsThem = "(us) "
+			}
+			p.logger.Info(fmt.Sprintf("👀 active peer changed %s%s %s ➡️ 🟢 %s%s %s %s",
+				fromUsThem,
 				p.lastActivePeer.Name,
 				p.lastActivePeer.IP,
+				toUsThem,
 				peerState.Name,
 				peerState.IP,
+				peerState.Pubkey[:7],
 			))
 		}
 
