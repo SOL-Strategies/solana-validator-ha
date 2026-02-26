@@ -12,8 +12,14 @@ import (
 	solana "github.com/gagliardetto/solana-go"
 	solanagorpc "github.com/gagliardetto/solana-go/rpc"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
+	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
 )
+
+// undeclaredPeerName is the synthetic name used for active peers that appear in gossip but are
+// not declared in the HA cluster config. Used both when registering the peer state and when
+// labelling log lines (e.g. delinquency) where no configured name is available.
+const undeclaredPeerName = "config-undeclared-active-peer"
 
 // State represents the state of the peers as seen by the solana network
 type State struct {
@@ -35,6 +41,10 @@ type State struct {
 	configUndeclaredActivePeer     PeerState
 	// peerLastSeenAtByName tracks the last time each peer was seen in gossip, persists even when peer goes missing
 	peerLastSeenAtByName map[string]time.Time
+	// lastLoggedPeersState is the last peersStateString() output that was logged, used to suppress duplicate logs
+	lastLoggedPeersState string
+	// legendPrinted tracks whether the emoji legend has been printed on the first Refresh call
+	legendPrinted bool
 	// votePubkeyCache maps identity pubkey -> vote account pubkey, populated on first getVoteAccounts call
 	// to allow subsequent calls to use the votePubkey filter and avoid fetching all ~1500 validators
 	votePubkeyCache map[string]solana.PublicKey
@@ -69,7 +79,7 @@ type Options struct {
 // NewState creates a new gossip state
 func NewState(opts Options) *State {
 	return &State{
-		logger:                         log.WithPrefix("[gossip_state]"),
+		logger:                         logging.New(opts.LogPrefix, "gossip_state"),
 		clusterRPC:                     opts.ClusterRPC,
 		activePubkey:                   opts.ActivePubkey,
 		selfIP:                         opts.SelfIP,
@@ -83,6 +93,10 @@ func NewState(opts Options) *State {
 
 // Refresh the state of peers as seen by the solana network
 func (p *State) Refresh() {
+	if !p.legendPrinted {
+		p.printStateEmojiKeyFormat()
+		p.legendPrinted = true
+	}
 	p.logger.Debug("refreshing peers state")
 	latestPeerStatesByName := make(map[string]PeerState)
 	p.configUndeclaredActivePeer = PeerState{} // reset on every refresh
@@ -126,7 +140,7 @@ func (p *State) Refresh() {
 				// node is active and voting so register it as undeclared active peer
 				isLeaderlessSample = false
 				p.configUndeclaredActivePeer = PeerState{
-					Name:           "config-undeclared-active-peer",
+					Name:           undeclaredPeerName,
 					IP:             nodeIP,
 					Pubkey:         node.Pubkey.String(),
 					LastSeenAtUTC:  time.Now().UTC(),
@@ -155,7 +169,7 @@ func (p *State) Refresh() {
 		// a borked active peer might appear in gossip but not actually be voting
 		// so we need to check for that and only proceed to add it to the state if it is not voting still
 		if isActiveNode && !p.isNodeActiveAndVoting(*node) {
-			p.logger.Warn("active peer appears in gossip but is not voting - excluding from state", "ip", nodeIP, "pubkey", node.Pubkey.String())
+			p.logger.Debug("active peer appears in gossip but is not voting - excluding from state", "ip", nodeIP, "pubkey", node.Pubkey.String())
 			continue
 		}
 
@@ -169,6 +183,13 @@ func (p *State) Refresh() {
 			Pubkey:             node.Pubkey.String(),
 			LastSeenActive:     isActiveNode,
 			IsRecentlyInGossip: slices.Contains(p.missingGossipIPs, nodeIP),
+		}
+
+		// Active presence takes precedence: if this peer was already confirmed active in this
+		// refresh cycle (possible when both old and new CRDS identity entries briefly coexist
+		// during a gossip identity transition), don't overwrite it with the stale passive entry.
+		if existing, ok := latestPeerStatesByName[peerName]; ok && existing.LastSeenActive {
+			continue
 		}
 
 		// register the peer state
@@ -185,11 +206,11 @@ func (p *State) Refresh() {
 
 		// log if is change of active peer
 		if peerState.LastSeenActive && p.lastActivePeer.IP != "" && p.lastActivePeer.IP != peerState.IP {
-			p.logger.Warn(fmt.Sprintf("active peer changed: %s (%s) -> %s (%s)",
-				p.lastActivePeer.IP,
+			p.logger.Info(fmt.Sprintf("active peer changed %s %s -> %s %s",
 				p.lastActivePeer.Name,
-				peerState.IP,
+				p.lastActivePeer.IP,
 				peerState.Name,
+				peerState.IP,
 			))
 		}
 
@@ -208,7 +229,7 @@ func (p *State) Refresh() {
 		// tell us what we found
 		// state didn't have this peer last time but now it does - so we need to log that
 		if !p.HasIP(peerState.IP) {
-			p.logger.Info("peer found",
+			p.logger.Debug("peer found",
 				"name", peerState.Name,
 				"ip", peerState.IP,
 				"pubkey", peerState.Pubkey,
@@ -217,10 +238,12 @@ func (p *State) Refresh() {
 			)
 		}
 
-		// if all peers from configPeers are in the peerEntries, we can stop looking
-		if len(p.configPeers) == len(latestPeerStatesByName) {
-			break
-		}
+		// Note: no early break here. During a gossip identity transition both the old (passive)
+		// and new (active) CRDS entries for a peer briefly coexist in getClusterNodes. Breaking
+		// after the first (passive) occurrence would prevent the active entry from being processed.
+		// The active-wins guard above handles the reverse ordering (active first, passive second).
+		// With 2-3 configured peers across ~1500 cluster nodes each remaining iteration is a
+		// handful of string comparisons — the performance cost is negligible.
 	}
 
 	// warn if any of the config peers are not in the peerEntries
@@ -244,13 +267,13 @@ func (p *State) Refresh() {
 			if lastSeen, ok := p.peerLastSeenAtByName[name]; ok {
 				lastSeenAt = lastSeen.Format(time.RFC3339Nano)
 			}
-			p.logger.Warn("peer lost", "name", name, "ip", ip, "last_seen_at", lastSeenAt)
+			p.logger.Debug("peer lost", "name", name, "ip", ip, "last_seen_at", lastSeenAt)
 			continue
 		}
 
 		// warn if it is the first time we've seen this peer missing from gossip
 		if !slices.Contains(p.missingGossipIPs, ip) {
-			p.logger.Warn("peer not found", "name", name, "ip", ip)
+			p.logger.Debug("peer not found", "name", name, "ip", ip)
 			continue
 		}
 
@@ -269,42 +292,41 @@ func (p *State) Refresh() {
 	p.missingGossipIPs = latestMissingGossipIPs
 	p.peerStatesByName = latestPeerStatesByName
 	p.PeerStatesRefreshedAt = time.Now().UTC()
-	p.logger.Info(p.peersStateString())
+	if stateStr := p.peersStateString(); stateStr != p.lastLoggedPeersState {
+		p.logger.Info(stateStr)
+		p.lastLoggedPeersState = stateStr
+	}
 }
 
-// peersStateString returns a string representation of all configured peers for logging
-// format: discovered N/<total_configured_peers> configured peers: [<emoji> <ACTIVE|PASSIVE|MISSING> <peer_name> <peer_ip> rank=<peer_ip_rank>/<total_ip_ranks> last_seen_at=<peer_last_seen_at_utc_with_nanoseconds>] ...
-// where emoji is 🟢 for ACTIVE, 🟡 for PASSIVE, and 🔴 for MISSING
-// displayed in ascending order of ip rank
+// printStateEmojiKeyFormat prints the emoji legend once, called automatically on first Refresh.
+func (p *State) printStateEmojiKeyFormat() {
+	p.logger.Info("🟢=active 🟡=passive ❓=missing")
+}
+
+// peersStateString returns a compact string representation of all configured peers for logging.
+// format: 🟢 [(us)] <name> <ip> <pubkeyshort> | 🟡 [(us)] <name> <ip> <pubkeyshort> | ❓ [(us)] <name> <ip> <pubkeyshort>
+// where emoji is 🟢 for ACTIVE, 🟡 for PASSIVE, and ❓ for MISSING, sorted by IP ascending
 func (p *State) peersStateString() string {
 	if len(p.configPeers) == 0 {
 		return ""
 	}
 
-	// Collect configured peers and sort by IP
 	type peerInfo struct {
-		name       string
-		ip         string
-		discovered bool
-		active     bool
-		lastSeenAt string
+		name        string
+		ip          string
+		discovered  bool
+		active      bool
+		isSelf      bool
+		pubkeyShort string
 	}
 
 	peers := make([]peerInfo, 0, len(p.configPeers))
-	discoveredCount := 0
 	for name, configPeer := range p.configPeers {
-		info := peerInfo{
-			name: name,
-			ip:   configPeer.IP,
-		}
+		info := peerInfo{name: name, ip: configPeer.IP, isSelf: configPeer.IP == p.selfIP, pubkeyShort: "unknown"}
 		if state, ok := p.peerStatesByName[name]; ok {
 			info.discovered = true
 			info.active = state.LastSeenActive
-			info.lastSeenAt = state.LastSeenAtUTC.Format(time.RFC3339Nano)
-			discoveredCount++
-		} else if lastSeen, ok := p.peerLastSeenAtByName[name]; ok {
-			// peer is missing but we have a record of when it was last seen
-			info.lastSeenAt = lastSeen.Format(time.RFC3339Nano)
+			info.pubkeyShort = state.Pubkey[:7] // FN1Yjxx
 		}
 		peers = append(peers, info)
 	}
@@ -312,34 +334,24 @@ func (p *State) peersStateString() string {
 		return peers[i].ip < peers[j].ip
 	})
 
-	// Build output
-	var sb strings.Builder
-	numPeers := len(peers)
-
-	fmt.Fprintf(&sb, "discovered %d/%d configured peers", discoveredCount, numPeers)
-
-	for rank, peer := range peers {
-		// Determine status and emoji: active (🟢), passive (🟡), or missing (🔴)
-		var emoji, status string
+	parts := make([]string, len(peers))
+	for i, peer := range peers {
+		emoji := "❓"
 		if peer.discovered {
 			if peer.active {
 				emoji = "🟢"
-				status = "ACTIVE"
 			} else {
 				emoji = "🟡"
-				status = "PASSIVE"
 			}
-		} else {
-			emoji = "🔴"
-			status = "MISSING"
 		}
-
-		sb.WriteByte(' ')
-		fmt.Fprintf(&sb, "[%s %s %s %s rank=%d/%d last_seen_at=%s]",
-			emoji, status, peer.name, peer.ip, rank, numPeers-1, peer.lastSeenAt)
+		usThem := ""
+		if peer.isSelf {
+			usThem = "(us) "
+		}
+		parts[i] = strings.TrimSpace(fmt.Sprintf("%s %s%s %s %s", emoji, usThem, peer.name, peer.ip, peer.pubkeyShort))
 	}
 
-	return sb.String()
+	return strings.Join(parts, " | ")
 }
 
 // PeerIPRankMap returns a map of IP addresses to their zero-indexed rank in the sorted list of IPs
@@ -383,7 +395,7 @@ func (p *State) cacheVotePubkey(voteAccount solanagorpc.VoteAccountsResult) {
 		return
 	}
 	p.votePubkeyCache[identityKey] = voteAccount.VotePubkey
-	p.logger.Info("cached vote account pubkey", "vote_pubkey", voteAccount.VotePubkey.String(), "identity", identityKey)
+	p.logger.Debug("cached vote account pubkey", "vote_pubkey", voteAccount.VotePubkey.String(), "identity", identityKey)
 }
 
 // isNodeActiveAndVoting returns true if the node is active and voting.
@@ -392,7 +404,13 @@ func (p *State) cacheVotePubkey(voteAccount solanagorpc.VoteAccountsResult) {
 // response from ~1500 entries to 1. If a filtered call returns empty (e.g. after a key rotation),
 // the cache entry is cleared and the call falls back to unfiltered for that cycle.
 func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bool {
-	delinquentSlotDistance := uint64(150) // Solana SDK default
+	// Agave default: DELINQUENT_VALIDATOR_SLOT_DISTANCE = 128 — used by getVoteAccounts when no delinquentSlotDistance is passed.
+	// https://github.com/anza-xyz/agave/blob/master/rpc-client-types/src/request.rs
+	// Since Agave v2.0, --health-check-slot-distance also defaults to 128 via the same constant:
+	// https://github.com/anza-xyz/agave/blob/master/validator/src/commands/run/args/json_rpc_config.rs
+	// Both thresholds agree. This variable is only used for the log line below;
+	// opts.DelinquentSlotDistance is only set when the override is enabled.
+	delinquentSlotDistance := uint64(128)
 	identityKey := node.Pubkey.String()
 
 	buildOpts := func(votePubkey *solana.PublicKey) solanagorpc.GetVoteAccountsOpts {
@@ -462,9 +480,16 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 		}
 
 		// ohhh shit! we're delinquent - snitch on this guy!
-		p.logger.Error(fmt.Sprintf("‼️ node is delinquent - not voting (behind %d slots or more)", delinquentSlotDistance),
-			"gossip_address", *node.Gossip,
-			"pubkey", node.Pubkey.String(),
+		nodeIP := strings.Split(*node.Gossip, ":")[0]
+		label := undeclaredPeerName + " " + nodeIP
+		if name, ok := p.peerNameFromIP(nodeIP); ok {
+			label = name + " " + nodeIP
+		}
+		distanceStr := fmt.Sprintf("behind %d slots or more", delinquentSlotDistance)
+		if currentSlot, err := p.clusterRPC.GetSlot(context.Background()); err == nil {
+			distanceStr = fmt.Sprintf("behind %d slots >= %d slots allowed", currentSlot-delinquentVoteAccount.LastVote, delinquentSlotDistance)
+		}
+		p.logger.Error(fmt.Sprintf("‼️ %s delinquent (%s)", label, distanceStr),
 			"last_voted_at_slot", delinquentVoteAccount.LastVote,
 		)
 		return false

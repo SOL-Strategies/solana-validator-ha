@@ -5,24 +5,18 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/log"
-	solanagorpc "github.com/gagliardetto/solana-go/rpc"
 	"github.com/sol-strategies/solana-validator-ha/internal/cache"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
 	"github.com/sol-strategies/solana-validator-ha/internal/constants"
 	"github.com/sol-strategies/solana-validator-ha/internal/gossip"
+	"github.com/sol-strategies/solana-validator-ha/internal/local"
+	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/sol-strategies/solana-validator-ha/internal/prometheus"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
 )
-
-// RPCClient interface for RPC operations
-type RPCClient interface {
-	GetClusterNodes(ctx context.Context) ([]*solanagorpc.GetClusterNodesResult, error)
-	GetIdentity(ctx context.Context) (*solanagorpc.GetIdentityResult, error)
-}
 
 // NewManagerOptions is a struct that contains the configuration for the manager
 type NewManagerOptions struct {
@@ -40,16 +34,11 @@ type Manager struct {
 	peerSelf        *config.Peer
 	cancel          context.CancelFunc
 	gossipState     *gossip.State
+	localState      *local.State
 	getPublicIPFunc func() (string, error)
-	localRPC        *rpc.Client
 	peerCount       int
 	initialized     bool
 	logPrefix       string
-	// selfHealthySince is the time the local validator first became healthy in the current
-	// continuous streak, as tracked by the independent health tracker goroutine.
-	// Zero value means the node is not currently in a healthy streak.
-	selfHealthySince time.Time
-	selfHealthyMutex    sync.RWMutex
 }
 
 // NewManager creates a new HA manager from options
@@ -62,7 +51,7 @@ func NewManager(opts NewManagerOptions) *Manager {
 	// Create metrics with cache
 	metrics := prometheus.New(prometheus.Options{
 		Config: opts.Cfg,
-		Logger: log.WithPrefix("metrics"),
+		Logger: logging.New(opts.Cfg.Validator.Name, "metrics"),
 		Cache:  cache,
 	})
 
@@ -70,8 +59,7 @@ func NewManager(opts NewManagerOptions) *Manager {
 		cfg:       opts.Cfg,
 		metrics:   metrics,
 		cache:     cache,
-		logger:    log.WithPrefix("[ha_manager]"),
-		localRPC:  rpc.NewClient(opts.Cfg.Validator.Name, opts.Cfg.Validator.RPCURL),
+		logger:    logging.New(opts.Cfg.Validator.Name, "ha_manager"),
 		ctx:       ctx,
 		cancel:    cancel,
 		peerCount: len(opts.Cfg.Failover.Peers),
@@ -121,7 +109,7 @@ func (m *Manager) initialize() error {
 
 	// set global log prefix to pass everywhere
 	m.logPrefix = m.cfg.Validator.Name
-	m.logger = log.WithPrefix("[ha_manager]")
+	m.logger = logging.New(m.logPrefix, "ha_manager")
 
 	// peers config file must not declare ourselves
 	if m.cfg.Failover.Peers.HasIP(publicIP) {
@@ -156,7 +144,18 @@ func (m *Manager) initialize() error {
 		ActivePubkey:                   m.cfg.Validator.Identities.ActivePubkey(),
 		ConfigPeers:                    m.cfg.Failover.Peers,
 		DelinquentSlotDistanceOverride: m.cfg.Failover.DelinquentSlotDistanceOverride,
+		SelfIP:                         m.peerSelf.IP,
 		LogPrefix:                      m.logPrefix,
+	})
+
+	// create local state
+	m.logger.Debug("creating local state")
+	m.localState = local.NewState(local.Options{
+		RPC:          rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL),
+		Cfg:          m.cfg.Failover.SelfHealthy,
+		ActivePubkey: m.cfg.Validator.Identities.ActivePubkey(),
+		Ctx:          m.ctx,
+		LogPrefix:    m.logPrefix,
 	})
 
 	m.logger.Debug("initialized")
@@ -213,9 +212,6 @@ func (m *Manager) haMonitorLoop() error {
 	// initial gossip state population
 	m.gossipState.Refresh()
 
-	// check for active peer in state and log if found
-	m.checkForActivePeer()
-
 	// start the monitor loop with ticker aligned to interval boundaries
 	ticker := time.NewTicker(m.cfg.Failover.PollIntervalDuration)
 	defer ticker.Stop()
@@ -252,32 +248,6 @@ func (m *Manager) haMonitorLoop() error {
 			m.ensureHAState()
 		}
 	}
-}
-
-// checkForActivePeer checks for an active peer in the gossip state
-func (m *Manager) checkForActivePeer() {
-	if m.gossipState.HasConfigUndeclaredActivePeer() {
-		return
-	}
-
-	if m.gossipState.LeaderlessSamplesExceedsThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
-		m.logger.Warn(fmt.Sprintf("leaderless samples exceeds threshold %d > %d",
-			m.gossipState.LeaderlessSamplesCount, m.cfg.Failover.LeaderlessSamplesThreshold))
-		return
-	}
-
-	activePeerState, err := m.gossipState.GetActivePeer()
-	if err != nil {
-		m.logger.Warn("failed to get active peer from state", "error", err)
-		return
-	}
-
-	activePeerFoundMessage := "active peer found"
-	if activePeerState.IPEquals(m.peerSelf.IP) {
-		activePeerFoundMessage += " (us)"
-	}
-
-	m.logger.Info(activePeerFoundMessage, "name", activePeerState.Name, "public_ip", activePeerState.IP, "pubkey", activePeerState.Pubkey)
 }
 
 // ensureHAState implements basic HA logic
@@ -334,22 +304,22 @@ func (m *Manager) ensureHAState() {
 	m.logger.Debug("we are in gossip", "pubkey", m.selfGossipPubkey(), "public_ip", m.peerSelf.IP)
 
 	// to participate in failover we must be healthy
-	if m.isSelfUnhealthy() {
+	if !m.localState.IsSelfHealthy() {
 		m.logger.Error("we are not healthy - unable to become active in failover")
 		return
 	}
 
 	// we must have been healthy for long enough to rule out startup health flaps
-	if !m.isSelfHealthyLongEnough() {
+	if !m.localState.IsSelfHealthyLongEnough() {
 		m.logger.Warn("not healthy for long enough to be a failover candidate - standing by",
-			"healthy_for", m.selfHealthyDuration(),
+			"healthy_for", m.localState.SelfHealthyDuration(),
 			"minimum_duration", m.cfg.Failover.SelfHealthy.MinimumDuration,
 		)
 		return
 	}
 
 	// one last check to ensure we are NOT already active
-	if m.isSelfActive() {
+	if m.localState.IsSelfActive() {
 		m.logger.Warn("we are already active - nothing to do")
 		return
 	}
@@ -452,7 +422,7 @@ func (m *Manager) ensurePassive() {
 	}
 
 	// check to ensure the call to the failover.passive.command was successful
-	if m.isNotSelfPassive() {
+	if !m.localState.IsSelfPassive() {
 		m.logger.Error("we are not passive as reported by local rpc - unable to become active in failover",
 			"passive_pubkey", passivePubkey,
 		)
@@ -471,7 +441,7 @@ func (m *Manager) ensurePassive() {
 	}
 
 	// if we are in gossip but not passive, show error - failover.passive.command has likely fucked up
-	if m.isNotSelfPassive() {
+	if !m.localState.IsSelfPassive() {
 		m.logger.Error("we are in gossip but not passive - this should not happen check failover.passive.command logic", "passive_pubkey", passivePubkey)
 		return
 	}
@@ -537,7 +507,7 @@ func (m *Manager) ensureActive() {
 	}
 
 	// check to ensure the call to the failover.active.command was successful
-	if !m.isSelfActive() {
+	if !m.localState.IsSelfActive() {
 		m.logger.Error("this node is not active as reported by local rpc - unable to become active in failover",
 			"active_pubkey", activePubkey,
 		)
@@ -551,9 +521,9 @@ func (m *Manager) ensureActive() {
 // independent interval. This decouples health streak tracking from the gossip poll loop,
 // ensuring the streak timer is not skewed by the latency of gossip RPC calls.
 func (m *Manager) startHealthyTracker() {
-	m.logger.Info("starting self health tracker",
+	m.logger.Info("monitoring local state",
 		"poll_interval", m.cfg.Failover.SelfHealthy.PollIntervalDuration,
-		"minimum_duration", m.cfg.Failover.SelfHealthy.MinimumDuration,
+		"minimum_healthy_duration", m.cfg.Failover.SelfHealthy.MinimumDuration,
 	)
 	ticker := time.NewTicker(m.cfg.Failover.SelfHealthy.PollIntervalDuration)
 	go func() {
@@ -563,103 +533,10 @@ func (m *Manager) startHealthyTracker() {
 			case <-m.ctx.Done():
 				return
 			case <-ticker.C:
-				m.sampleSelfHealth()
+				m.localState.SampleSelf()
 			}
 		}
 	}()
-}
-
-// sampleSelfHealth samples the local validator health and updates the continuous healthy streak.
-// Called by the health tracker goroutine on every tick.
-func (m *Manager) sampleSelfHealth() {
-	healthy := m.isSelfHealthy()
-	m.selfHealthyMutex.Lock()
-	defer m.selfHealthyMutex.Unlock()
-	if healthy {
-		if m.selfHealthySince.IsZero() {
-			m.selfHealthySince = time.Now()
-			m.logger.Debug("self health tracker: node is healthy", "healthy_since", m.selfHealthySince)
-		}
-	} else {
-		if !m.selfHealthySince.IsZero() {
-			m.logger.Debug("self health tracker: node became unhealthy - resetting healthy streak")
-		}
-		m.selfHealthySince = time.Time{}
-	}
-}
-
-// isSelfHealthyLongEnough returns true if the local validator has been continuously healthy
-// for at least failover.self_healthy.minimum_duration
-func (m *Manager) isSelfHealthyLongEnough() bool {
-	m.selfHealthyMutex.RLock()
-	since := m.selfHealthySince
-	m.selfHealthyMutex.RUnlock()
-	if since.IsZero() {
-		return false
-	}
-	return time.Since(since) >= m.cfg.Failover.SelfHealthy.MinimumDuration
-}
-
-// selfHealthyDuration returns how long the local validator has been continuously healthy.
-// Returns 0 if the node is not currently in a healthy streak.
-func (m *Manager) selfHealthyDuration() time.Duration {
-	m.selfHealthyMutex.RLock()
-	since := m.selfHealthySince
-	m.selfHealthyMutex.RUnlock()
-	if since.IsZero() {
-		return 0
-	}
-	return time.Since(since)
-}
-
-// isSelfHealthy checks if the validator is healthy by calling the local RPC client
-func (m *Manager) isSelfHealthy() (isHealthy bool) {
-	healthStatus, err := m.localRPC.GetHealth(m.ctx)
-	if err != nil {
-		m.logger.Error(err.Error())
-		return false
-	}
-
-	isHealthy = healthStatus == solanagorpc.HealthOk
-	m.logger.Debug("health status", "status", healthStatus, "is_healthy", isHealthy)
-
-	if !isHealthy {
-		m.logger.Warn("this node is unhealthy", "status", healthStatus)
-	}
-
-	return isHealthy
-}
-
-// isSelfUnhealthy checks if the validator is unhealthy by calling the local RPC client
-func (m *Manager) isSelfUnhealthy() (isUnhealthy bool) {
-	return !m.isSelfHealthy()
-}
-
-// isSelfActive checks if the validator is active by checking the local RPC client getIdentity response to confirm it is the active identity
-func (m *Manager) isSelfActive() (isActive bool) {
-	identity, err := m.localRPC.GetIdentity(m.ctx)
-	if err != nil {
-		m.logger.Error(err.Error())
-		return false
-	}
-
-	return identity.Identity.String() == m.cfg.Validator.Identities.ActivePubkey()
-}
-
-// isSelfPassive checks if the validator is passive by checking the local RPC client getIdentity response to confirm it is not the active identity
-func (m *Manager) isSelfPassive() bool {
-	identity, err := m.localRPC.GetIdentity(m.ctx)
-	if err != nil {
-		m.logger.Error(err.Error())
-		return false
-	}
-
-	return identity.Identity.String() != m.cfg.Validator.Identities.ActivePubkey()
-}
-
-// isNotSelfPassive checks if the validator is not passive by checking the local RPC client getIdentity response to confirm it is not the active identity
-func (m *Manager) isNotSelfPassive() (isNotPassive bool) {
-	return !m.isSelfPassive()
 }
 
 // isSelfInGossip checks if the validator is in the gossip state
@@ -688,15 +565,15 @@ func (m *Manager) refreshMetrics() {
 
 	// Determine role and status
 	var role, status string
-	if m.isSelfActive() {
+	if m.localState.IsSelfActive() {
 		role = constants.RoleNameActive
-	} else if m.isSelfPassive() {
+	} else if m.localState.IsSelfPassive() {
 		role = constants.RoleNamePassive
 	} else {
 		role = constants.RoleNameUnknown
 	}
 
-	if m.isSelfHealthy() {
+	if m.localState.IsSelfHealthy() {
 		status = constants.StatusHealthy
 	} else {
 		status = constants.StatusUnhealthy

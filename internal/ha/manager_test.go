@@ -93,7 +93,6 @@ func TestNewManager(t *testing.T) {
 	assert.NotNil(t, manager.ctx)
 	assert.NotNil(t, manager.cancel)
 	assert.NotNil(t, manager.getPublicIPFunc)
-	assert.NotNil(t, manager.localRPC)
 	assert.Equal(t, 2, manager.peerCount)
 }
 
@@ -325,7 +324,7 @@ func TestManager_InitializationFlow(t *testing.T) {
 	assert.NotNil(t, manager.metrics)
 	assert.NotNil(t, manager.cache)
 	assert.NotNil(t, manager.logger)
-	assert.NotNil(t, manager.localRPC)
+	assert.NotNil(t, manager.localState)
 }
 
 func TestManager_PublicIPRetrieval(t *testing.T) {

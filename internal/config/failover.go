@@ -157,7 +157,7 @@ func (f *Failover) SetDefaults() {
 		f.SelfHealthy.MinimumDuration = 45 * time.Second
 	}
 	if f.SelfHealthy.PollIntervalDuration == 0 {
-		f.SelfHealthy.PollIntervalDuration = 5 * time.Second
+		f.SelfHealthy.PollIntervalDuration = 2 * time.Second
 	}
 
 	// Set role names

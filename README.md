@@ -269,16 +269,23 @@ failover:
   leaderless_samples_threshold: 3
 
   # Overrides the number of slots a peer must be behind the tip to be considered delinquent.
-  # ⚠️ Set with caution — too low a value causes false positives on transient network hiccups.
-  # The Solana default is 150 slots (~60s). Values <= 1 are clamped to 2 on startup.
+  # ⚠️ Set with caution — too low a value causes false positives on transient hiccups.
+  # The Agave default is 128 slots (~51s), defined as DELINQUENT_VALIDATOR_SLOT_DISTANCE:
+  #   https://github.com/anza-xyz/agave/blob/master/rpc-client-types/src/request.rs
+  # Since Agave v2.0, --health-check-slot-distance also defaults to 128 via the same constant:
+  #   https://github.com/anza-xyz/agave/blob/master/validator/src/commands/run/args/json_rpc_config.rs
+  # Both thresholds agree — there is no gap between delinquency detection and health status.
+  # If you set value below 128, add --health-check-slot-distance <value> to your validator
+  # startup flags to keep the thresholds aligned — a startup warning will remind you if not.
+  # Values <= 1 are clamped to 2 on startup.
   delinquent_slot_distance_override:
 
     # required: false | default: false
     enabled: false
 
-    # required: false | default: 150
+    # required: false | default: 128
     # Slots behind the tip at which a peer is considered delinquent (when enabled: true).
-    value: 150
+    value: 128
 
   # Guards against startup health flaps: a validator that briefly reports healthy during
   # startup before falling behind and going unhealthy again.
@@ -289,10 +296,10 @@ failover:
     # node is eligible to become active in a failover.
     minimum_duration: 45s
 
-    # required: false | default: 5s
+    # required: false | default: 2s
     # How often to sample local RPC health. Runs independently of poll_interval_duration
     # so the healthy streak timer is not skewed by gossip refresh latency.
-    poll_interval_duration: 5s
+    poll_interval_duration: 2s
 
   # required: true | min: 1
   # Map of HA peers, excluding this node — it is added automatically at startup.
