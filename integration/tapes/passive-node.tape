@@ -19,7 +19,6 @@ Sleep 300ms
 Hide
 Type "bash integration/scripts/demo-passive-node.sh"
 Enter
-Sleep 1s
 Show
 
 # Timeline (real time):

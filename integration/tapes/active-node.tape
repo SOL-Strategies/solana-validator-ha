@@ -20,7 +20,6 @@ Sleep 300ms
 Hide
 Type "bash integration/scripts/demo-active-node.sh"
 Enter
-Sleep 1s
 Show
 
 # Timeline (real time):

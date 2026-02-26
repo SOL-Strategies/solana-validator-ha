@@ -2,6 +2,8 @@
 
 A gossip-based high availability (HA) manager for Solana validators. This tool helps automate *unexpected* failovers due to `<insert one of endless reasons>`. To automate *planned* failovers, see [solana-validator-failover](https://github.com/SOL-Strategies/solana-validator-failover)
 
+![active node handover](docs/active-node.png)
+
 ## Demo
 
 `validator-1` (active) loses network connectivity. A passive peer detects the leaderless cluster and takes over automatically.
