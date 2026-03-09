@@ -1,30 +1,29 @@
 #!/bin/bash
 # demo-active-node.sh
-# Streams validator-1 (active) logs during a failover scenario for VHS recording.
+# Runs validator-1 (active) directly so VHS captures its terminal output.
 # Shows the active node detecting it has dropped from gossip and stepping down to passive.
 #
-# The integration docker compose environment must already be running.
+# Requires: make demo (mock-solana running on localhost:8899) and make build.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-MOCK_URL="http://localhost:8899"
-COMPOSE="docker compose -f $PROJECT_ROOT/integration/docker-compose.yml"
+# Always run from the project root regardless of how this script is invoked.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.."
 
-# Reset: validator-1 active
+MOCK_URL="http://localhost:8899"
+
+# Reset: validator-1 starts as active.
 curl -sf -X POST -H "Content-Type: application/json" \
     -d '{"action":"reset","target":"validator-1"}' \
     "$MOCK_URL/action" >/dev/null
 
-# Disconnect validator-1 after 10 seconds (background — does not block the log stream)
-(sleep 10 && \
+# Disconnect validator-1 after 12s (background — simulates network loss).
+# The HA manager detects it has dropped from gossip and runs the passive (seppuku) command.
+(sleep 12 && \
  curl -sf -X POST -H "Content-Type: application/json" \
      -d '{"action":"disconnect","target":"validator-1"}' \
      "$MOCK_URL/action" >/dev/null) &
 disown $!
 
-# Wait one poll cycle for the reset to be reflected in logs, then start streaming.
-# --tail=3 shows a few steady-state context lines before following live output.
-sleep 3
-timeout 25 $COMPOSE logs --no-log-prefix --tail=3 -f validator-1 2>/dev/null || true
+# Exec the HA binary — replaces this shell so VHS records its output directly.
+exec ./bin/solana-validator-ha run --config integration/configs/demo-validator-1.yaml

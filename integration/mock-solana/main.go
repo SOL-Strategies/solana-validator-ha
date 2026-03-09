@@ -211,7 +211,17 @@ func (s *MockSolanaServer) handleAction(w http.ResponseWriter, r *http.Request) 
 
 // handlePublicIP returns a stable public IP for each validator based on their Docker network IP.
 // This lets HA managers discover their own public IP during initialisation.
+// A ?validator=<name> query param overrides IP-based detection — used for local/demo runs.
 func (s *MockSolanaServer) handlePublicIP(w http.ResponseWriter, r *http.Request) {
+	// Allow demo/local runs to identify themselves by name instead of Docker IP.
+	if v := r.URL.Query().Get("validator"); v != "" {
+		if meta, ok := validatorMeta[v]; ok {
+			w.Header().Set("Content-Type", "text/plain")
+			w.Write([]byte(meta.publicIP))
+			return
+		}
+	}
+
 	clientIP := r.RemoteAddr
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		clientIP = fwd

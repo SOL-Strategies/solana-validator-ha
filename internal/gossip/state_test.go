@@ -297,11 +297,19 @@ func TestLastRefreshHadRPCError(t *testing.T) {
 	})
 
 	t.Run("returns false after successful RPC", func(t *testing.T) {
-		// Use a valid RPC endpoint
-		validRPC := rpc.NewClient("test", "https://api.mainnet-beta.solana.com")
+		// Use a mock server that returns a valid empty getClusterNodes response.
+		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result":  []any{},
+			})
+		}))
+		t.Cleanup(mockServer.Close)
 
 		opts := Options{
-			ClusterRPC:   validRPC,
+			ClusterRPC:   rpc.NewClient("test", mockServer.URL),
 			ActivePubkey: "test-active-pubkey",
 			SelfIP:       "192.168.1.1",
 			ConfigPeers: map[string]config.Peer{
@@ -773,6 +781,69 @@ func TestRefresh_ConfigUndeclaredActivePeer_ResetOnEachRefresh(t *testing.T) {
 	state.Refresh()
 
 	assert.False(t, state.HasConfigUndeclaredActivePeer(), "configUndeclaredActivePeer must be reset on every Refresh()")
+}
+
+func TestRefresh_DualCRDSEntry_ActiveWinsOverStalePassive(t *testing.T) {
+	// During a gossip identity transition the old (passive) and new (active) CRDS entries
+	// for the same peer briefly coexist. getClusterNodes returns both. The active entry
+	// must win: the peer should be recorded as active regardless of which entry appears
+	// second in the list.
+	const passivePubkey = "11111111111111111111111111111112"
+
+	server := newGossipMockRPCServer(t, map[string]interface{}{
+		"getClusterNodes": []interface{}{
+			// active entry first, then stale passive entry for the same IP
+			gossipClusterNode(testActivePubkey, testDeclaredIP),
+			gossipClusterNode(passivePubkey, testDeclaredIP),
+		},
+		"getSlot":         100,
+		"getVoteAccounts": votingVoteAccountsResult([]string{testActivePubkey}),
+	})
+
+	state := NewState(Options{
+		ClusterRPC:   rpc.NewClient("test", server.URL),
+		ActivePubkey: testActivePubkey,
+		SelfIP:       testSelfIP,
+		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
+	})
+
+	state.Refresh()
+
+	activePeer, err := state.GetActivePeer()
+	require.NoError(t, err, "active peer should be found despite dual CRDS entries")
+	assert.Equal(t, testDeclaredIP, activePeer.IP)
+	assert.True(t, activePeer.LastSeenActive, "active entry must win over stale passive entry")
+	assert.Equal(t, 0, state.LeaderlessSamplesCount, "must not count as leaderless when active peer present")
+}
+
+func TestRefresh_DualCRDSEntry_PassiveFirstActiveSecond_ActiveWins(t *testing.T) {
+	// Same as above but passive entry appears first — active must still win.
+	const passivePubkey = "11111111111111111111111111111112"
+
+	server := newGossipMockRPCServer(t, map[string]interface{}{
+		"getClusterNodes": []interface{}{
+			// stale passive entry first, then active entry
+			gossipClusterNode(passivePubkey, testDeclaredIP),
+			gossipClusterNode(testActivePubkey, testDeclaredIP),
+		},
+		"getSlot":         100,
+		"getVoteAccounts": votingVoteAccountsResult([]string{testActivePubkey}),
+	})
+
+	state := NewState(Options{
+		ClusterRPC:   rpc.NewClient("test", server.URL),
+		ActivePubkey: testActivePubkey,
+		SelfIP:       testSelfIP,
+		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
+	})
+
+	state.Refresh()
+
+	activePeer, err := state.GetActivePeer()
+	require.NoError(t, err, "active peer should be found regardless of entry order")
+	assert.Equal(t, testDeclaredIP, activePeer.IP)
+	assert.True(t, activePeer.LastSeenActive)
+	assert.Equal(t, 0, state.LeaderlessSamplesCount)
 }
 
 func TestRefresh_DeclaredActivePeer_NotRecordedAsUndeclared(t *testing.T) {

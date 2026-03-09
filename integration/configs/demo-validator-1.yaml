@@ -1,0 +1,55 @@
+validator:
+  name: "validator-1"
+  rpc_url: "http://localhost:8899?validator=validator-1"
+  public_ip_service_urls: ["http://localhost:8899/public-ip?validator=validator-1"]
+  identities:
+    active: "integration/test-files/active-identity.json"
+    passive: "integration/test-files/passive-identity-1.json"
+
+cluster:
+  name: "mainnet-beta"
+  rpc_urls: ["http://localhost:8899"]
+
+prometheus:
+  port: 9093
+  health_check_port: 9094
+  static_labels:
+    environment: "demo"
+
+failover:
+  poll_interval_duration: "3s"
+  leaderless_samples_threshold: 3  # 3 × 3s = 9s before failover
+
+  self_healthy:
+    minimum_duration: "5s"       # short for demo (default is 30s)
+    poll_interval_duration: "2s"
+
+  active:
+    command: "curl"
+    args:
+      - "-sf"
+      - "-X"
+      - "POST"
+      - "-H"
+      - "Content-Type: application/json"
+      - "-d"
+      - '{"action":"set_active","target":"{{ .SelfName }}"}'
+      - "http://localhost:8899/action"
+
+  passive:
+    command: "curl"
+    args:
+      - "-sf"
+      - "-X"
+      - "POST"
+      - "-H"
+      - "Content-Type: application/json"
+      - "-d"
+      - '{"action":"set_passive","target":"{{ .SelfName }}"}'
+      - "http://localhost:8899/action"
+
+  peers:
+    validator-2:
+      ip: "10.0.0.101"
+    validator-3:
+      ip: "10.0.0.102"

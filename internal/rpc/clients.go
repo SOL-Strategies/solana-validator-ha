@@ -12,6 +12,7 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/gagliardetto/solana-go/rpc/jsonrpc"
+	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 )
 
 // urlCooldownDuration is how long a URL that returned a permanent HTTP error (403/429/503)
@@ -39,7 +40,7 @@ func NewClient(logPrefix string, urls ...string) *Client {
 		clients[url] = rpc.New(url)
 	}
 	return &Client{
-		logger:            log.WithPrefix("[rpc_client]"),
+		logger:            logging.New(logPrefix, "rpc_client"),
 		urls:              urls,
 		clients:           clients,
 		lastSuccessfulURL: "",
@@ -169,6 +170,16 @@ func (c *Client) GetBalance(ctx context.Context, pubkey solana.PublicKey) (*rpc.
 				return nil, err
 			}
 			return result, nil
+		},
+	})
+}
+
+// GetSlot gets the current slot from the first working RPC client
+func (c *Client) GetSlot(ctx context.Context) (uint64, error) {
+	return executeWithRetry(c, ctx, rpcOperation[uint64]{
+		name: "GetSlot",
+		execute: func(client *rpc.Client, ctx context.Context) (uint64, error) {
+			return client.GetSlot(ctx, rpc.CommitmentProcessed)
 		},
 	})
 }

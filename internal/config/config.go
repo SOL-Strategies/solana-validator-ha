@@ -217,6 +217,14 @@ func (c *Config) validate() error {
 		c.Failover.DelinquentSlotDistanceOverride.Value = 2
 	}
 
+	// failover.delinquent_slot_distance_override is below Agave's default of 128 - peers may be declared delinquent before
+	// their own /health endpoint agrees; recommend setting --health-check-slot-distance on the validator to match
+	if c.Failover.DelinquentSlotDistanceOverride.Enabled && c.Failover.DelinquentSlotDistanceOverride.Value < 128 {
+		c.logger.Warnf("failover.delinquent_slot_distance_override value %d is below Agave's default of 128 slots - a peer may be declared delinquent before its /health endpoint agrees; consider adding --health-check-slot-distance %d to your validator startup flags to align the thresholds",
+			c.Failover.DelinquentSlotDistanceOverride.Value,
+			c.Failover.DelinquentSlotDistanceOverride.Value)
+	}
+
 	// failover.deliquent_slot_distance_override is enabled - print warning
 	if c.Failover.DelinquentSlotDistanceOverride.Enabled {
 		// delinquentSlotDistanceDuration estimated duration behind given 400ms slot time

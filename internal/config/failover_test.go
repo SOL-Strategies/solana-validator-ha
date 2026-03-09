@@ -16,8 +16,8 @@ func TestFailover_SetDefaults(t *testing.T) {
 	assert.Equal(t, 3, failover.LeaderlessSamplesThreshold)
 	// TakeoverJitterDuration is no longer set by default - it remains at zero value
 	assert.Equal(t, time.Duration(0), failover.TakeoverJitterDuration)
-	assert.Equal(t, 45*time.Second, failover.SelfHealthy.MinimumDuration)
-	assert.Equal(t, 5*time.Second, failover.SelfHealthy.PollIntervalDuration)
+	assert.Equal(t, 30*time.Second, failover.SelfHealthy.MinimumDuration)
+	assert.Equal(t, 2*time.Second, failover.SelfHealthy.PollIntervalDuration)
 }
 
 func TestFailover_Validate(t *testing.T) {
