@@ -30,6 +30,8 @@ type Config struct {
 	Prometheus Prometheus `koanf:"prometheus"`
 	// Failover is the failover decision parameters
 	Failover Failover `koanf:"failover"`
+	// Update holds update-check settings
+	Update Update `koanf:"update"`
 	// File is the file that the config was loaded from
 	File string `koanf:"-"`
 	// GetPublicIPFunc is a function that returns the public IP address of the current validator
@@ -246,6 +248,7 @@ func (c *Config) setDefaults() {
 	c.Cluster.SetDefaults()
 	c.Prometheus.SetDefaults()
 	c.Failover.SetDefaults()
+	c.Update.SetDefaults()
 }
 
 // urlHost extracts the host:port from a URL

@@ -40,10 +40,11 @@ type Metrics struct {
 	commonLabelNames []string
 
 	// Metrics
-	metadata       *prometheus.GaugeVec
-	peerCount      *prometheus.GaugeVec
-	selfInGossip   *prometheus.GaugeVec
-	failoverStatus *prometheus.GaugeVec
+	metadata        *prometheus.GaugeVec
+	peerCount       *prometheus.GaugeVec
+	selfInGossip    *prometheus.GaugeVec
+	failoverStatus  *prometheus.GaugeVec
+	updateAvailable *prometheus.GaugeVec
 }
 
 // Options for creating a new Metrics instance
@@ -122,11 +123,21 @@ func (m *Metrics) initMetrics() {
 		failoverLabelNames,
 	)
 
+	// Update available metric
+	m.updateAvailable = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: metricsNamespacePrefix + "update_available",
+			Help: "Whether a newer version of solana-validator-ha is available (1 = yes, 0 = no)",
+		},
+		m.commonLabelNames,
+	)
+
 	// Register all metrics
 	m.registry.MustRegister(m.metadata)
 	m.registry.MustRegister(m.peerCount)
 	m.registry.MustRegister(m.selfInGossip)
 	m.registry.MustRegister(m.failoverStatus)
+	m.registry.MustRegister(m.updateAvailable)
 
 	m.logger.Debug("initialized Prometheus metrics")
 }
@@ -172,6 +183,7 @@ func (m *Metrics) RefreshMetrics() {
 	m.exportMetricPeerCount(&state)
 	m.exportMetricSelfInGossip(&state)
 	m.exportMetricFailoverStatus(&state)
+	m.exportMetricUpdateAvailable(&state)
 
 	m.logger.Debug("metrics refreshed",
 		validatorRoleLabelName, state.Role,
@@ -179,6 +191,7 @@ func (m *Metrics) RefreshMetrics() {
 		peerCountLabelName, state.PeerCount,
 		selfInGossipLabelName, state.SelfInGossip,
 		failoverStatusLabelName, state.FailoverStatus,
+		"update_available", state.UpdateAvailable,
 	)
 }
 
@@ -227,6 +240,16 @@ func (m *Metrics) exportMetricFailoverStatus(state *cache.State) {
 			),
 		).
 		Set(1)
+}
+
+func (m *Metrics) exportMetricUpdateAvailable(state *cache.State) {
+	var value float64
+	if state.UpdateAvailable {
+		value = 1
+	}
+	m.updateAvailable.
+		With(m.getCommonLabels(state)).
+		Set(value)
 }
 
 // mergeLabels merges fromLabels into toLabels

@@ -16,17 +16,20 @@ import (
 	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/sol-strategies/solana-validator-ha/internal/prometheus"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
+	"github.com/sol-strategies/solana-validator-ha/internal/updater"
 )
 
 // NewManagerOptions is a struct that contains the configuration for the manager
 type NewManagerOptions struct {
 	Cfg             *config.Config
+	Version         string
 	GetPublicIPFunc func() (string, error)
 }
 
 // Manager handles high availability logic
 type Manager struct {
 	cfg             *config.Config
+	version         string
 	metrics         *prometheus.Metrics
 	cache           *cache.Cache
 	logger          *log.Logger
@@ -57,6 +60,7 @@ func NewManager(opts NewManagerOptions) *Manager {
 
 	manager := &Manager{
 		cfg:       opts.Cfg,
+		version:   opts.Version,
 		metrics:   metrics,
 		cache:     cache,
 		logger:    logging.New(opts.Cfg.Validator.Name, "ha_manager"),
@@ -86,6 +90,11 @@ func (m *Manager) Run() error {
 	// start self health tracker goroutine - runs independently of the main HA monitor loop
 	// so that the healthy streak timer is not affected by gossip refresh latency
 	m.startHealthyTracker()
+
+	// start periodic update checker
+	updater.StartPeriodicCheck(m.ctx, m.version, m.cfg.Update.CheckIntervalDuration, func(latestVersion string) {
+		m.cache.SetUpdateAvailable(latestVersion != "")
+	})
 
 	// start monitoring loop
 	return m.haMonitorLoop()
@@ -126,6 +135,7 @@ func (m *Manager) initialize() error {
 
 	// initialize
 	m.logger.Info("initializing",
+		"version", m.version,
 		"public_ip", publicIP,
 		"cluster_rpc_urls", m.cfg.Cluster.RPCURLs,
 		"validator_rpc_url", m.cfg.Validator.RPCURL,
