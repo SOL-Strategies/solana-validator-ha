@@ -21,6 +21,9 @@ type State struct {
 	// Failover status
 	FailoverStatus string // "idle", "becoming_active", "becoming_passive"
 
+	// Update availability
+	UpdateAvailable bool
+
 	// Timestamps
 	LastUpdated time.Time
 }
@@ -36,13 +39,23 @@ func New() *Cache {
 	return &Cache{}
 }
 
-// UpdateState updates the cached state
+// UpdateState updates the cached state, preserving fields managed outside the
+// main HA loop (e.g. UpdateAvailable which is set by the update checker).
 func (c *Cache) UpdateState(state State) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	state.UpdateAvailable = c.state.UpdateAvailable
 	state.LastUpdated = time.Now()
 	c.state = state
+}
+
+// SetUpdateAvailable records whether a newer version of the application is available.
+func (c *Cache) SetUpdateAvailable(available bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.state.UpdateAvailable = available
 }
 
 // GetState returns a copy of the current state

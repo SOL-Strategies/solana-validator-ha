@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/log"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
+	"github.com/sol-strategies/solana-validator-ha/internal/updater"
 	"github.com/spf13/cobra"
 )
 
@@ -37,6 +38,10 @@ It monitors peers and manages failover decisions to ensure continuous validator 
 		}
 
 		loadedConfig.Log.ConfigureWithLevelString(logLevel)
+
+		// Check for updates on startup
+		ch := updater.StartBackgroundCheck(version)
+		updater.PrintWarningIfAvailable(ch)
 	},
 }
 

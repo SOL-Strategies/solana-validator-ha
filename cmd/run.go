@@ -15,7 +15,8 @@ var runCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Start the HA manager with the loaded config
 		manager := ha.NewManager(ha.NewManagerOptions{
-			Cfg: loadedConfig,
+			Cfg:     loadedConfig,
+			Version: version,
 		})
 		err := manager.Run()
 		if err != nil {

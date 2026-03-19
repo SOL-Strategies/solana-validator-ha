@@ -396,6 +396,17 @@ failover:
           ]
 ```
 
+### Update
+
+```yaml
+update:
+
+  # required: false | default: 24h
+  # How often to check for a new release when running in continuous mode.
+  # On every startup a one-time check is always performed regardless of this value.
+  check_interval_duration: 24h
+```
+
 ## Development and testing
 
 ```bash
@@ -412,6 +423,7 @@ The application exposes Prometheus metrics on the configured port (default: 9090
 - **`solana_validator_ha_peer_count`**: Number of peers visible in gossip
 - **`solana_validator_ha_self_in_gossip`**: Whether this validator appears in gossip (1=yes, 0=no)
 - **`solana_validator_ha_failover_status`**: Current failover status
+- **`solana_validator_ha_update_available`**: Whether a newer release is available (1=yes, 0=no). Updated on startup and periodically per `update.check_interval_duration`
 
 ### Metric Labels
 - `validator_name`: Configured validator name
