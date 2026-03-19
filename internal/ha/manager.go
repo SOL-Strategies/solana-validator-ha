@@ -92,9 +92,11 @@ func (m *Manager) Run() error {
 	m.startHealthyTracker()
 
 	// start periodic update checker
-	updater.StartPeriodicCheck(m.ctx, m.version, m.cfg.Update.CheckIntervalDuration, func(latestVersion string) {
-		m.cache.SetUpdateAvailable(latestVersion != "")
-	})
+	if m.cfg.Update.CheckEnabled {
+		updater.StartPeriodicCheck(m.ctx, m.version, m.cfg.Update.CheckIntervalDuration, func(latestVersion string) {
+			m.cache.SetUpdateAvailable(latestVersion != "")
+		})
+	}
 
 	// start monitoring loop
 	return m.haMonitorLoop()

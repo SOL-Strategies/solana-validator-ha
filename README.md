@@ -1,6 +1,7 @@
 # solana-validator-ha
 
-A gossip-based high availability (HA) manager for Solana validators. This tool helps automate *unexpected* failovers due to `<insert one of endless reasons>`. To automate *planned* failovers, see [solana-validator-failover](https://github.com/SOL-Strategies/solana-validator-failover)
+A gossip-based high availability (HA) manager for Solana validators. This tool helps automate **unexpected** failovers due to `<insert one of endless reasons>`.
+To automate **planned** failovers, see [solana-validator-failover](https://github.com/SOL-Strategies/solana-validator-failover)
 
 ![active node handover](docs/active-node.png)
 
@@ -98,10 +99,6 @@ Download and install the latest [release](https://github.com/SOL-Strategies/sola
 
 ## Configuration
 
-The application uses a `YAML` configuration file with the following root sections:
-
-### Log
-
 ```yaml
 log:
 
@@ -112,11 +109,7 @@ log:
   # required: false | default: text
   # Log format. One of: text, logfmt, json
   format: text
-```
 
-### Validator
-
-```yaml
 validator:
 
   # required: true
@@ -151,11 +144,7 @@ validator:
     # required: true (or set passive)
     # Base58-encoded passive pubkey. Used when the keypair file is not available on this node.
     passive_pubkey: 111111PassivePubkey1111111111111111111111111
-```
 
-### Prometheus
-
-```yaml
 prometheus:
 
   # required: false | default: 9090
@@ -172,11 +161,7 @@ prometheus:
     brand: ha-validators
     cluster: mainnet-beta
     region: ha-region-1
-```
 
-### Cluster
-
-```yaml
 cluster:
 
   # required: true
@@ -192,69 +177,7 @@ cluster:
   # one remote URL and configure HA peers as mutual --entrypoint flags in agave.
   # See "Using Local RPC as a Failsafe Fallback" below for details.
   rpc_urls: []
-```
 
-### Using Local RPC as a Failsafe Fallback
-
-Public RPC endpoints can rate-limit or block requests (`403 Forbidden`, `429 Too Many Requests`), which prevents `getClusterNodes` from returning gossip data and causes log noise like:
-
-```
-ERRO [gossip_state]: failed to get cluster nodes
-  error= method call failed on all RPC endpoints method: GetClusterNodes,
-         attempted_urls: [https://api.mainnet-beta.solana.com],
-         errors: [403 "Access forbidden"]
-```
-
-Adding the local validator RPC alongside your remote URLs provides a fallback that is always available and never rate-limited:
-
-```yaml
-cluster:
-  name: "mainnet-beta"
-  rpc_urls:
-    - "https://api.mainnet-beta.solana.com"  # remote — may rate-limit
-    - "http://localhost:8899"                  # local — immune to rate limits
-```
-
-A warning is logged at startup to remind you of the trade-off:
-
-```
-WARN config: cluster.rpc_urls contains the local validator RPC URL (http://localhost:8899)
-     — ensure HA peers are configured as mutual --entrypoint flags for direct gossip,
-       otherwise peer state may be stale
-```
-
-#### When the local RPC is ideal: mutual `--entrypoint` flags
-
-When each HA peer is listed as an `--entrypoint` in the other peers' agave config, they exchange gossip directly over UDP (CRDS). The local RPC then has sub-second fresh data for every peer — better than remote RPCs that see gossip after network propagation.
-
-```
-# On validator-1 (185.26.11.91)
---entrypoint validator-2.example.com:8001
-
-# On validator-2
---entrypoint validator-1.example.com:8001
-```
-
-#### When the local RPC is a last-resort fallback
-
-Without mutual `--entrypoint` flags, the local validator learns about peers through the wider gossip network. Peer data may be 30–60 s stale. This is still better than a complete `getClusterNodes` failure: the system keeps working with slightly older data rather than losing all visibility. The multi-URL retry logic means the remote URLs are always tried first; the local RPC is only reached if all remote calls fail.
-
-#### Automatic URL cooldown
-
-When any URL (local or remote) returns a `403`, `429`, or `503` response, `solana-validator-ha` automatically deprioritises that URL for 60 s and logs a warning:
-
-```
-WARN [rpc_client]: RPC endpoint rate-limited or access forbidden, cooling down
-     method=GetClusterNodes url=https://api.mainnet-beta.solana.com cooldown=1m0s
-```
-
-During the cooldown the URL is still retried as a last resort, but healthy URLs are always attempted first.
-
-### Failover
-
-See [example-scripts/ha-set-role.sh](example-scripts/ha-set-role.sh) for an example failover script.
-
-```yaml
 failover:
 
   # required: false | default: false
@@ -394,18 +317,73 @@ failover:
             "--channel", "#postmortem-shelf",
             "--message", "solana-validator-ha demoted {{ .SelfName }} to passive with identity {{ .PassiveIdentityPubkey }}"
           ]
-```
 
-### Update
-
-```yaml
 update:
+
+  # required: false | default: true
+  # Set to false to disable all update checks (startup and periodic).
+  check_enabled: true
 
   # required: false | default: 24h
   # How often to check for a new release when running in continuous mode.
-  # On every startup a one-time check is always performed regardless of this value.
   check_interval_duration: 24h
 ```
+
+### Using Local RPC as a Failsafe Fallback
+
+Public RPC endpoints can rate-limit or block requests (`403 Forbidden`, `429 Too Many Requests`), which prevents `getClusterNodes` from returning gossip data and causes log noise like:
+
+```
+ERRO [gossip_state]: failed to get cluster nodes
+  error= method call failed on all RPC endpoints method: GetClusterNodes,
+         attempted_urls: [https://api.mainnet-beta.solana.com],
+         errors: [403 "Access forbidden"]
+```
+
+Adding the local validator RPC alongside your remote URLs provides a fallback that is always available and never rate-limited:
+
+```yaml
+cluster:
+  name: "mainnet-beta"
+  rpc_urls:
+    - "https://api.mainnet-beta.solana.com"  # remote — may rate-limit
+    - "http://localhost:8899"                # local — immune to rate limits
+```
+
+A warning is logged at startup to remind you of the trade-off:
+
+```
+WARN config: cluster.rpc_urls contains the local validator RPC URL (http://localhost:8899)
+     — ensure HA peers are configured as mutual --entrypoint flags for direct gossip,
+       otherwise peer state may be stale
+```
+
+#### When the local RPC is ideal: mutual `--entrypoint` flags
+
+When each HA peer is listed as an `--entrypoint` in the other peers' agave config, they exchange gossip directly over UDP (CRDS). The local RPC then has sub-second fresh data for every peer — better than remote RPCs that see gossip after network propagation.
+
+```
+# On validator-1 (185.26.11.91)
+--entrypoint validator-2.example.com:8001
+
+# On validator-2
+--entrypoint validator-1.example.com:8001
+```
+
+#### When the local RPC is a last-resort fallback
+
+Without mutual `--entrypoint` flags, the local validator learns about peers through the wider gossip network. Peer data may be 30–60 s stale. This is still better than a complete `getClusterNodes` failure: the system keeps working with slightly older data rather than losing all visibility. The multi-URL retry logic means the remote URLs are always tried first; the local RPC is only reached if all remote calls fail.
+
+#### Automatic URL cooldown
+
+When any URL (local or remote) returns a `403`, `429`, or `503` response, `solana-validator-ha` automatically deprioritises that URL for 60 s and logs a warning:
+
+```
+WARN [rpc_client]: RPC endpoint rate-limited or access forbidden, cooling down
+     method=GetClusterNodes url=https://api.mainnet-beta.solana.com cooldown=1m0s
+```
+
+During the cooldown the URL is still retried as a last resort, but healthy URLs are always attempted first.
 
 ## Development and testing
 

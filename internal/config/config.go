@@ -113,6 +113,10 @@ func (c *Config) LoadFromFile(filePath string) error {
 	k := koanf.New(".")
 	c.File = resolvedPath
 
+	// Set bool defaults that cannot be expressed as Go zero values.
+	// k.Set must be called before k.Load so the file can override them.
+	k.Set("update.check_enabled", true) //nolint:errcheck
+
 	// Load YAML config file
 	if err := k.Load(file.Provider(c.File), yaml.Parser()); err != nil {
 		return fmt.Errorf("error loading config file: %w", err)
