@@ -40,8 +40,10 @@ It monitors peers and manages failover decisions to ensure continuous validator 
 		loadedConfig.Log.ConfigureWithLevelString(logLevel)
 
 		// Check for updates on startup
-		ch := updater.StartBackgroundCheck(version)
-		updater.PrintWarningIfAvailable(ch)
+		if loadedConfig.Update.CheckEnabled {
+			ch := updater.StartBackgroundCheck(version)
+			updater.PrintWarningIfAvailable(ch)
+		}
 	},
 }
 
