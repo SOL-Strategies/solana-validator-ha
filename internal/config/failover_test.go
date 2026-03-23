@@ -141,6 +141,170 @@ func TestFailover_Validate(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func intPtr(v int) *int { return &v }
+
+func validFailoverBase() *Failover {
+	return &Failover{
+		PollIntervalDuration:       30 * time.Second,
+		LeaderlessSamplesThreshold: 10,
+		SelfHealthy: SelfHealthy{
+			MinimumDuration:      45 * time.Second,
+			PollIntervalDuration: 5 * time.Second,
+		},
+		Active:  Role{Command: "systemctl start solana"},
+		Passive: Role{Command: "systemctl stop solana"},
+		Peers: Peers{
+			"validator-2": {IP: "192.168.1.11"},
+			"validator-3": {IP: "192.168.1.12"},
+		},
+	}
+}
+
+func TestFailover_ValidatePriority(t *testing.T) {
+	t.Run("no priorities is valid (backward compat)", func(t *testing.T) {
+		f := validFailoverBase()
+		assert.NoError(t, f.Validate())
+	})
+
+	t.Run("all priorities set is valid", func(t *testing.T) {
+		f := validFailoverBase()
+		f.Priority = intPtr(0)
+		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(1)}
+		f.Peers["validator-3"] = Peer{IP: "192.168.1.12", Priority: intPtr(2)}
+		assert.NoError(t, f.Validate())
+	})
+
+	t.Run("partial priorities is an error", func(t *testing.T) {
+		f := validFailoverBase()
+		f.Priority = intPtr(0)
+		// peers have no priority
+		err := f.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "either all nodes")
+	})
+
+	t.Run("peer has priority but self does not", func(t *testing.T) {
+		f := validFailoverBase()
+		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(1)}
+		err := f.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "either all nodes")
+	})
+
+	t.Run("duplicate priority between peers is an error", func(t *testing.T) {
+		f := validFailoverBase()
+		f.Priority = intPtr(0)
+		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(1)}
+		f.Peers["validator-3"] = Peer{IP: "192.168.1.12", Priority: intPtr(1)} // duplicate
+		err := f.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "already used by")
+	})
+
+	t.Run("duplicate priority between self and peer is an error", func(t *testing.T) {
+		f := validFailoverBase()
+		f.Priority = intPtr(0)
+		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(0)} // same as self
+		f.Peers["validator-3"] = Peer{IP: "192.168.1.12", Priority: intPtr(2)}
+		err := f.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "already used by self")
+	})
+
+	t.Run("negative self priority is an error", func(t *testing.T) {
+		f := validFailoverBase()
+		f.Priority = intPtr(-1)
+		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(1)}
+		f.Peers["validator-3"] = Peer{IP: "192.168.1.12", Priority: intPtr(2)}
+		err := f.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failover.priority must be non-negative")
+	})
+
+	t.Run("negative peer priority is an error", func(t *testing.T) {
+		f := validFailoverBase()
+		f.Priority = intPtr(0)
+		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(-1)}
+		f.Peers["validator-3"] = Peer{IP: "192.168.1.12", Priority: intPtr(2)}
+		err := f.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "priority must be non-negative")
+	})
+}
+
+func TestFailover_PeerIPPriorityRankMap(t *testing.T) {
+	const selfIP = "192.168.1.10"
+
+	t.Run("returns nil when no priorities configured", func(t *testing.T) {
+		f := &Failover{
+			Peers: Peers{
+				"validator-2": {IP: "192.168.1.11"},
+				"validator-3": {IP: "192.168.1.12"},
+			},
+		}
+		assert.Nil(t, f.PeerIPPriorityRankMap(selfIP))
+	})
+
+	t.Run("self is rank 0 when priority 0", func(t *testing.T) {
+		f := &Failover{
+			Priority: intPtr(0),
+			Peers: Peers{
+				"validator-2": {IP: "192.168.1.11", Priority: intPtr(1)},
+				"validator-3": {IP: "192.168.1.12", Priority: intPtr(2)},
+			},
+		}
+		rankMap := f.PeerIPPriorityRankMap(selfIP)
+		assert.NotNil(t, rankMap)
+		assert.Equal(t, 0, rankMap[selfIP])
+		assert.Equal(t, 1, rankMap["192.168.1.11"])
+		assert.Equal(t, 2, rankMap["192.168.1.12"])
+	})
+
+	t.Run("self is rank 2 when priority 2", func(t *testing.T) {
+		f := &Failover{
+			Priority: intPtr(2),
+			Peers: Peers{
+				"validator-2": {IP: "192.168.1.11", Priority: intPtr(0)},
+				"validator-3": {IP: "192.168.1.12", Priority: intPtr(1)},
+			},
+		}
+		rankMap := f.PeerIPPriorityRankMap(selfIP)
+		assert.NotNil(t, rankMap)
+		assert.Equal(t, 2, rankMap[selfIP])
+		assert.Equal(t, 0, rankMap["192.168.1.11"])
+		assert.Equal(t, 1, rankMap["192.168.1.12"])
+	})
+
+	t.Run("non-contiguous priorities are ranked by value order", func(t *testing.T) {
+		f := &Failover{
+			Priority: intPtr(10),
+			Peers: Peers{
+				"validator-2": {IP: "192.168.1.11", Priority: intPtr(5)},
+				"validator-3": {IP: "192.168.1.12", Priority: intPtr(99)},
+			},
+		}
+		rankMap := f.PeerIPPriorityRankMap(selfIP)
+		assert.NotNil(t, rankMap)
+		// 5 < 10 < 99 → ranks 0, 1, 2
+		assert.Equal(t, 1, rankMap[selfIP])
+		assert.Equal(t, 0, rankMap["192.168.1.11"])
+		assert.Equal(t, 2, rankMap["192.168.1.12"])
+	})
+
+	t.Run("single peer cluster", func(t *testing.T) {
+		f := &Failover{
+			Priority: intPtr(0),
+			Peers: Peers{
+				"validator-2": {IP: "192.168.1.11", Priority: intPtr(1)},
+			},
+		}
+		rankMap := f.PeerIPPriorityRankMap(selfIP)
+		assert.NotNil(t, rankMap)
+		assert.Equal(t, 0, rankMap[selfIP])
+		assert.Equal(t, 1, rankMap["192.168.1.11"])
+	})
+}
+
 func TestFailover_ValidateWithHooks(t *testing.T) {
 	failover := &Failover{
 		PollIntervalDuration:       30 * time.Second,

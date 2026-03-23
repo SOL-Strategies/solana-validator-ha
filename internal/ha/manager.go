@@ -339,7 +339,7 @@ func (m *Manager) ensureHAState() {
 	// at this point we know we are in gossip, healthy, and passive
 	// so we begin checks to make sure none of our peers have already taken over as active
 
-	// introduce a delay based on IP to safeguard against multiple nodes trying to become active at the same time
+	// introduce a rank-based delay to safeguard against multiple nodes trying to become active at the same time
 	err := m.delayTakeoverAsActive()
 	if err != nil {
 		m.logger.Error(err.Error())
@@ -628,24 +628,30 @@ func (m *Manager) delayTakeoverAsActive() (err error) {
 		return fmt.Errorf("no peers found - unable to delay takeover")
 	}
 
-	// get self peer rank in the ranked list (zero indexed), not being in this list shouldn't
-	// happen but we check anyway to be safe
-	rankedPeerIPs := m.gossipState.PeerIPRankMap()
+	// Determine self rank: prefer explicit config priorities, fall back to IP-based ordering.
+	// Config-based ranking is stable and does not shift when a peer briefly drops from gossip.
+	rankedPeerIPs := m.cfg.Failover.PeerIPPriorityRankMap(m.peerSelf.IP)
+	rankingSource := "config priority"
+	if rankedPeerIPs == nil {
+		rankedPeerIPs = m.gossipState.PeerIPRankMap()
+		rankingSource = "IP address"
+	}
+
 	selfPeerRank, selfInRankedPeerIPs := rankedPeerIPs[m.peerSelf.IP]
 
 	if !selfInRankedPeerIPs {
-		return fmt.Errorf("unable to find this node's IP %s in the IP-ranked list of peers in gossip state: %v", m.peerSelf.IP, rankedPeerIPs)
+		return fmt.Errorf("unable to find this node's IP %s in the %s-ranked list of peers: %v", m.peerSelf.IP, rankingSource, rankedPeerIPs)
 	}
 
 	if selfPeerRank == 0 {
-		m.logger.Info(fmt.Sprintf("this node is peer IP ranked 0/%d in gossip state - no takeover delay", peerCount))
+		m.logger.Info(fmt.Sprintf("this node is ranked 0/%d by %s - no takeover delay", peerCount, rankingSource))
 		return nil
 	}
 
 	// peers with ranks 1 and over have a deterministic delay of rank*poll_interval_duration
 	delay := time.Duration(selfPeerRank) * m.cfg.Failover.PollIntervalDuration
 
-	m.logger.Warn(fmt.Sprintf("delaying takeover by %s (<rank %d (of %d peers)> * <%s poll_interval_duration>) to avoid race condition with higher ranked peer in gossip state", delay, selfPeerRank, peerCount, m.cfg.Failover.PollIntervalDuration))
+	m.logger.Warn(fmt.Sprintf("delaying takeover by %s (<rank %d (of %d peers) by %s> * <%s poll_interval_duration>) to avoid race condition with higher ranked peer", delay, selfPeerRank, peerCount, rankingSource, m.cfg.Failover.PollIntervalDuration))
 	time.Sleep(delay)
 	m.logger.Warn("takeover delay complete")
 	return nil

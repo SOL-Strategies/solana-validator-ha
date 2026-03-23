@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"sort"
 	"time"
 )
 
@@ -22,6 +23,7 @@ type Failover struct {
 	PollIntervalDuration           time.Duration                  `koanf:"poll_interval_duration"`
 	LeaderlessSamplesThreshold     int                            `koanf:"leaderless_samples_threshold"`
 	TakeoverJitterDuration         time.Duration                  `koanf:"takeover_jitter_duration"`
+	Priority                       *int                           `koanf:"priority"`
 	Active                         Role                           `koanf:"active"`
 	Passive                        Role                           `koanf:"passive"`
 	Peers                          Peers                          `koanf:"peers"`
@@ -126,6 +128,42 @@ func (f *Failover) Validate() error {
 	// Note: DelinquentSlotDistanceOverride.Value is uint64, so it cannot be negative
 	// No validation needed for negative values since uint64 cannot hold negative numbers
 
+	// Validate explicit failover priorities (all-or-nothing across self + all peers)
+	selfHasPriority := f.Priority != nil
+	peersWithPriority := 0
+	for _, peer := range f.Peers {
+		if peer.Priority != nil {
+			peersWithPriority++
+		}
+	}
+	totalWithPriority := peersWithPriority
+	if selfHasPriority {
+		totalWithPriority++
+	}
+	totalNodes := 1 + len(f.Peers) // self + peers
+	if totalWithPriority > 0 && totalWithPriority < totalNodes {
+		return fmt.Errorf("failover.priority - either all nodes (self + all peers) must declare a priority, or none should; %d of %d have one", totalWithPriority, totalNodes)
+	}
+	if selfHasPriority {
+		if *f.Priority < 0 {
+			return fmt.Errorf("failover.priority must be non-negative")
+		}
+		// priority value -> owner name, for duplicate detection
+		seen := map[int]string{*f.Priority: "self"}
+		for name, peer := range f.Peers {
+			if peer.Priority == nil {
+				continue
+			}
+			if *peer.Priority < 0 {
+				return fmt.Errorf("failover.peers.%s.priority must be non-negative", name)
+			}
+			if owner, exists := seen[*peer.Priority]; exists {
+				return fmt.Errorf("failover.peers.%s.priority %d is already used by %s", name, *peer.Priority, owner)
+			}
+			seen[*peer.Priority] = name
+		}
+	}
+
 	return nil
 }
 
@@ -142,6 +180,35 @@ func (f *Failover) RenderRoleCommands(data RoleCommandTemplateData) (err error) 
 	}
 
 	return nil
+}
+
+// PeerIPPriorityRankMap returns an IP-to-rank map derived from explicit priorities configured
+// for self (selfIP) and all peers. Rank 0 is highest priority (no takeover delay).
+// Returns nil when no priorities are configured, signalling callers to fall back to IP-based ranking.
+func (f *Failover) PeerIPPriorityRankMap(selfIP string) map[string]int {
+	if f.Priority == nil {
+		return nil
+	}
+	type entry struct {
+		ip       string
+		priority int
+	}
+	entries := make([]entry, 0, 1+len(f.Peers))
+	entries = append(entries, entry{ip: selfIP, priority: *f.Priority})
+	for _, peer := range f.Peers {
+		if peer.Priority == nil {
+			continue
+		}
+		entries = append(entries, entry{ip: peer.IP, priority: *peer.Priority})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].priority < entries[j].priority
+	})
+	rankMap := make(map[string]int, len(entries))
+	for rank, e := range entries {
+		rankMap[e.ip] = rank
+	}
+	return rankMap
 }
 
 // SetDefaults sets default values for the failover configuration
