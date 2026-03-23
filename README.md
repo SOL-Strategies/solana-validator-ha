@@ -69,7 +69,7 @@ failover:
 - **🛡️ Startup Health Protection**: Requires a configurable minimum continuous healthy streak before a node can become a failover candidate
 - **🪝 Hooks**: Pre/Post failover hook support for role transitions
 - **📊 Prometheus Metrics**: Rich metrics collection for monitoring and alerting
-- **🏁 First-Responder Failover**: Race-based failover with IP-rank delay so the fastest eligible passive validator assumes the active role
+- **🏁 First-Responder Failover**: Race-based failover with deterministic rank-based delay so the highest-priority eligible passive validator assumes the active role. Default ordering is ascending IP sort; operators can override with explicit `failover.priority` per node
 
 ## Installation
 
@@ -235,6 +235,14 @@ failover:
     backup-validator-2:
       ip: 192.168.1.12
 
+  # required: false
+  # Explicit failover priority for this node. Lower value = higher priority (takes over first).
+  # When set, every peer in failover.peers must also declare a priority, and all values must be
+  # unique and non-negative. If omitted (default), peers are ranked by ascending IP address.
+  # All nodes in the HA cluster should declare the same priority ordering to avoid races.
+  # See "Failover Priority" below for details.
+  priority: 0
+
   # required: true
   # Commands and hooks to run when this node should become active.
   # command, args, and env values support Go template strings:
@@ -384,6 +392,43 @@ WARN [rpc_client]: RPC endpoint rate-limited or access forbidden, cooling down
 ```
 
 During the cooldown the URL is still retried as a last resort, but healthy URLs are always attempted first.
+
+## Failover Priority
+
+By default, when multiple passive nodes are all eligible to take over, they use their public IP addresses (ascending sort) to break the tie. The node with the lowest IP gets rank 0 and takes over immediately; higher-ranked nodes wait `rank × poll_interval_duration` before attempting takeover.
+
+Operators can override this ordering with explicit priorities:
+
+```yaml
+# On the node that should take over first (highest priority):
+failover:
+  priority: 0
+  peers:
+    backup-validator-1:
+      ip: 192.168.1.11
+      priority: 1
+    backup-validator-2:
+      ip: 192.168.1.12
+      priority: 2
+
+# On backup-validator-1:
+failover:
+  priority: 1
+  peers:
+    primary-validator:
+      ip: 192.168.1.10
+      priority: 0
+    backup-validator-2:
+      ip: 192.168.1.12
+      priority: 2
+```
+
+**Rules:**
+
+- Lower `priority` value = higher priority (rank 0 = takes over immediately).
+- If any node declares a `priority`, **all** nodes (self + every entry in `failover.peers`) must declare one. A partially-configured cluster is rejected at startup.
+- Priority values must be unique across self and all peers. Duplicates are rejected at startup.
+- All nodes in the cluster should agree on the same priority ordering to avoid races. `solana-validator-ha` cannot enforce cross-node consistency, but logs the effective rank and ranking source (`config priority` vs `IP address`) at takeover time so mismatches are easy to spot.
 
 ## Development and testing
 

@@ -10,8 +10,9 @@ type Peers map[string]Peer
 
 // Peer represents a peer validator
 type Peer struct {
-	IP   string `koanf:"ip"`
-	Name string `koanf:"-"`
+	IP       string `koanf:"ip"`
+	Priority *int   `koanf:"priority"`
+	Name     string `koanf:"-"`
 }
 
 // Add adds a peer to the peers map
