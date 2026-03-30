@@ -219,7 +219,17 @@ func (m *Manager) startMetricsServer() {
 
 // haMonitorLoop runs the main ha monitoring loop
 func (m *Manager) haMonitorLoop() error {
-	m.logger.Info("monitoring HA state", "poll_interval", m.cfg.Failover.PollIntervalDuration)
+	confirmationPoll := m.cfg.Failover.LeaderlessConfirmationPollDuration
+	fastPolling := confirmationPoll < m.cfg.Failover.PollIntervalDuration
+
+	if fastPolling {
+		m.logger.Info("monitoring HA state",
+			"poll_interval", m.cfg.Failover.PollIntervalDuration,
+			"leaderless_confirmation_poll", confirmationPoll,
+		)
+	} else {
+		m.logger.Info("monitoring HA state", "poll_interval", m.cfg.Failover.PollIntervalDuration)
+	}
 
 	// initial gossip state population
 	m.gossipState.Refresh()
@@ -237,8 +247,9 @@ func (m *Manager) haMonitorLoop() error {
 			m.logger.Info("HA monitor loop done")
 			return nil
 		case <-ticker.C:
-			// Wait until the next aligned interval before running
-			// This ensures all nodes run at the same synchronized times
+			// Wait until the next aligned interval before running.
+			// This ensures all nodes run at the same synchronized times so that leaderless
+			// sample counts stay in step across the cluster, keeping rank-based coordination safe.
 			// For example, with 5s interval: all nodes run at 12:01:05, 12:01:10, etc.
 			now := time.Now()
 			nanosSinceEpoch := now.UnixNano()
@@ -256,8 +267,45 @@ func (m *Manager) haMonitorLoop() error {
 					// Now we're at the aligned time
 				}
 			}
+
 			// Run at the aligned interval
 			m.ensureHAState()
+
+			// If fast-polling is configured and we are one sample below the threshold
+			// (i.e. the slow-poll phase has already built enough confidence), switch to
+			// the shorter confirmation poll interval for the final sample only.
+			// We do NOT fast-poll on the first leaderless sample to avoid reacting to
+			// transient gossip blips that resolve within a normal poll cycle.
+			if fastPolling && m.gossipState.LeaderlessSamplesCount == m.cfg.Failover.LeaderlessSamplesThreshold-1 {
+				m.logger.Warn("leaderless samples approaching threshold - switching to confirmation poll interval",
+					"leaderless_samples_count", m.gossipState.LeaderlessSamplesCount,
+					"leaderless_samples_threshold", m.cfg.Failover.LeaderlessSamplesThreshold,
+					"confirmation_poll_interval", confirmationPoll,
+				)
+				if err := m.runConfirmationPollLoop(confirmationPoll); err != nil {
+					return err
+				}
+			}
+		}
+	}
+}
+
+// runConfirmationPollLoop polls at the faster confirmation interval until either the leaderless
+// threshold is reached (triggering ensureHAState) or a peer reappears (resetting to the normal loop).
+func (m *Manager) runConfirmationPollLoop(interval time.Duration) error {
+	for {
+		select {
+		case <-m.ctx.Done():
+			m.logger.Info("HA monitor loop done")
+			return nil
+		case <-time.After(interval):
+			m.ensureHAState()
+			// Exit the fast-poll loop once the leaderless count is no longer in the
+			// "one below threshold" window — either it crossed threshold (failover fired
+			// or was aborted) or a peer reappeared and the count reset.
+			if m.gossipState.LeaderlessSamplesCount != m.cfg.Failover.LeaderlessSamplesThreshold-1 {
+				return nil
+			}
 		}
 	}
 }

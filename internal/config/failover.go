@@ -19,17 +19,23 @@ type SelfHealthy struct {
 
 // Failover represents failover decision parameters
 type Failover struct {
-	DryRun                         bool                           `koanf:"dry_run"`
-	PollIntervalDuration           time.Duration                  `koanf:"poll_interval_duration"`
-	LeaderlessSamplesThreshold     int                            `koanf:"leaderless_samples_threshold"`
-	TakeoverJitterDuration         time.Duration                  `koanf:"takeover_jitter_duration"`
-	Priority                       *int                           `koanf:"priority"`
-	Active                         Role                           `koanf:"active"`
-	Passive                        Role                           `koanf:"passive"`
-	Peers                          Peers                          `koanf:"peers"`
-	DelinquentSlotDistanceOverride DelinquentSlotDistanceOverride `koanf:"delinquent_slot_distance_override"`
-	SelfHealthy                    SelfHealthy                    `koanf:"self_healthy"`
+	DryRun                             bool                           `koanf:"dry_run"`
+	PollIntervalDuration               time.Duration                  `koanf:"poll_interval_duration"`
+	LeaderlessSamplesThreshold         int                            `koanf:"leaderless_samples_threshold"`
+	LeaderlessConfirmationPollDuration time.Duration                  `koanf:"leaderless_confirmation_poll_duration"`
+	TakeoverJitterDuration             time.Duration                  `koanf:"takeover_jitter_duration"`
+	Priority                           *int                           `koanf:"priority"`
+	Active                             Role                           `koanf:"active"`
+	Passive                            Role                           `koanf:"passive"`
+	Peers                              Peers                          `koanf:"peers"`
+	DelinquentSlotDistanceOverride     DelinquentSlotDistanceOverride `koanf:"delinquent_slot_distance_override"`
+	SelfHealthy                        SelfHealthy                    `koanf:"self_healthy"`
 }
+
+// leaderlessConfirmationPollFloor is the minimum allowed value for
+// LeaderlessConfirmationPollDuration. Values below this are clamped and a warning is logged,
+// because sub-second polling sits inside gossip propagation jitter and increases false-positive risk.
+const leaderlessConfirmationPollFloor = 1 * time.Second
 
 // DelinquentSlotDistanceOverride represents an sdk override for the delinquent slot distance
 type DelinquentSlotDistanceOverride struct {
@@ -46,6 +52,14 @@ func (f *Failover) Validate() error {
 	// failover.leaderless_samples_threshold must be greater than zero
 	if f.LeaderlessSamplesThreshold <= 0 {
 		return fmt.Errorf("failover.leaderless_samples_threshold must be positive and non-zero")
+	}
+
+	// failover.leaderless_confirmation_poll_duration must not exceed poll_interval_duration
+	if f.LeaderlessConfirmationPollDuration > f.PollIntervalDuration {
+		return fmt.Errorf(
+			"failover.leaderless_confirmation_poll_duration (%s) must not exceed failover.poll_interval_duration (%s)",
+			f.LeaderlessConfirmationPollDuration, f.PollIntervalDuration,
+		)
 	}
 
 	// failover.self_healthy.minimum_duration must be greater than zero
@@ -213,7 +227,6 @@ func (f *Failover) PeerIPPriorityRankMap(selfIP string) map[string]int {
 
 // SetDefaults sets default values for the failover configuration
 func (f *Failover) SetDefaults() {
-	// Set defaults for failover config
 	if f.PollIntervalDuration == 0 {
 		f.PollIntervalDuration = 5 * time.Second
 	}
@@ -225,6 +238,12 @@ func (f *Failover) SetDefaults() {
 	}
 	if f.SelfHealthy.PollIntervalDuration == 0 {
 		f.SelfHealthy.PollIntervalDuration = 2 * time.Second
+	}
+
+	// Default to poll_interval_duration so existing deployments that omit this field
+	// behave identically to before — fast-polling only activates when explicitly configured.
+	if f.LeaderlessConfirmationPollDuration == 0 {
+		f.LeaderlessConfirmationPollDuration = f.PollIntervalDuration
 	}
 
 	// Set role names
