@@ -340,15 +340,19 @@ func (m *Manager) ensureHAState() {
 	// so we begin checks to make sure none of our peers have already taken over as active
 
 	// introduce a rank-based delay to safeguard against multiple nodes trying to become active at the same time
-	err := m.delayTakeoverAsActive()
+	delayApplied, err := m.delayTakeoverAsActive()
 	if err != nil {
 		m.logger.Error(err.Error())
 		return
 	}
 
 	// refresh the peers state to ensure no one else has taken over already - this will reset the leaderless samples count
-	// if a new leader is found
-	m.gossipState.Refresh()
+	// if a new leader is found.
+	// rank-0 nodes skip this re-validation because zero time elapsed during their "delay", so no peer could have
+	// taken over in the interim - avoiding an unnecessary RPC round trip on the hot path.
+	if delayApplied {
+		m.gossipState.Refresh()
+	}
 
 	// an undeclared active peer may have appeared during the delay - treat the same as the pre-delay check
 	if m.gossipState.HasConfigUndeclaredActivePeer() {
@@ -620,12 +624,15 @@ func (m *Manager) refreshMetrics() {
 }
 
 // delayTakeoverAsActive introduces a delay when there are multiple peers
-// to safeguard against multiple nodes trying to become active at the same time
-func (m *Manager) delayTakeoverAsActive() (err error) {
+// to safeguard against multiple nodes trying to become active at the same time.
+// Returns (delayApplied, error): delayApplied is true only when the node actually slept
+// (i.e. rank > 0). Rank-0 nodes return false so the caller can skip the post-delay
+// re-validation gossip refresh - no time elapsed, so no peer could have taken over.
+func (m *Manager) delayTakeoverAsActive() (delayApplied bool, err error) {
 	// peerCount includes ourselves, so if we are the only peer, we don't need to delay
 	peerCount := m.gossipState.PeerCount()
 	if peerCount == 0 {
-		return fmt.Errorf("no peers found - unable to delay takeover")
+		return false, fmt.Errorf("no peers found - unable to delay takeover")
 	}
 
 	// Determine self rank: prefer explicit config priorities, fall back to IP-based ordering.
@@ -640,12 +647,12 @@ func (m *Manager) delayTakeoverAsActive() (err error) {
 	selfPeerRank, selfInRankedPeerIPs := rankedPeerIPs[m.peerSelf.IP]
 
 	if !selfInRankedPeerIPs {
-		return fmt.Errorf("unable to find this node's IP %s in the %s-ranked list of peers: %v", m.peerSelf.IP, rankingSource, rankedPeerIPs)
+		return false, fmt.Errorf("unable to find this node's IP %s in the %s-ranked list of peers: %v", m.peerSelf.IP, rankingSource, rankedPeerIPs)
 	}
 
 	if selfPeerRank == 0 {
 		m.logger.Info(fmt.Sprintf("this node is ranked 0/%d by %s - no takeover delay", peerCount, rankingSource))
-		return nil
+		return false, nil
 	}
 
 	// peers with ranks 1 and over have a deterministic delay of rank*poll_interval_duration
@@ -654,5 +661,5 @@ func (m *Manager) delayTakeoverAsActive() (err error) {
 	m.logger.Warn(fmt.Sprintf("delaying takeover by %s (<rank %d (of %d peers) by %s> * <%s poll_interval_duration>) to avoid race condition with higher ranked peer", delay, selfPeerRank, peerCount, rankingSource, m.cfg.Failover.PollIntervalDuration))
 	time.Sleep(delay)
 	m.logger.Warn("takeover delay complete")
-	return nil
+	return true, nil
 }
