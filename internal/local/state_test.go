@@ -341,3 +341,93 @@ func TestSampleSelf_ConcurrentAccess(t *testing.T) {
 	}
 	close(stop)
 }
+
+// newTestStateWithGrace creates a State with an explicit UnhealthyGraceCount.
+func newTestStateWithGrace(rpcClient *rpc.Client, minDuration time.Duration, graceCount int) *State {
+	return NewState(Options{
+		RPC:          rpcClient,
+		ActivePubkey: testActivePubkey,
+		Cfg: config.SelfHealthy{
+			MinimumDuration:      minDuration,
+			PollIntervalDuration: time.Second,
+			UnhealthyGraceCount:  graceCount,
+		},
+		Ctx: context.Background(),
+	})
+}
+
+func TestSampleSelf_GraceCount_SingleBlipPreservesStreak(t *testing.T) {
+	// A single unhealthy sample within the grace window must not reset the streak.
+	healthyServer := newMockRPCServer(t, map[string]interface{}{"getHealth": "ok"})
+	unhealthyServer := newMockRPCServer(t, map[string]interface{}{}) // no getHealth → error
+
+	s := newTestStateWithGrace(rpc.NewClient("test", healthyServer.URL), 30*time.Second, 1)
+
+	// Establish a healthy streak.
+	s.SampleSelf()
+	require.False(t, s.healthySince.IsZero(), "streak should have started")
+	streakStart := s.healthySince
+
+	// One unhealthy sample — within grace, streak must be preserved.
+	s.rpc = rpc.NewClient("test", unhealthyServer.URL)
+	s.SampleSelf()
+	assert.Equal(t, streakStart, s.healthySince, "streak start should be unchanged after single blip within grace")
+	assert.Equal(t, 1, s.consecutiveUnhealthyCount)
+}
+
+func TestSampleSelf_GraceCount_ConsecutiveFailuresResetStreak(t *testing.T) {
+	// Two consecutive unhealthy samples exceed grace=1 and must reset the streak.
+	healthyServer := newMockRPCServer(t, map[string]interface{}{"getHealth": "ok"})
+	unhealthyServer := newMockRPCServer(t, map[string]interface{}{})
+
+	s := newTestStateWithGrace(rpc.NewClient("test", healthyServer.URL), 30*time.Second, 1)
+
+	s.SampleSelf()
+	require.False(t, s.healthySince.IsZero())
+
+	s.rpc = rpc.NewClient("test", unhealthyServer.URL)
+	s.SampleSelf() // count=1, within grace — streak preserved
+	assert.False(t, s.healthySince.IsZero(), "streak should still be alive after first failure")
+
+	s.SampleSelf() // count=2, exceeds grace=1 — streak reset
+	assert.True(t, s.healthySince.IsZero(), "streak should be reset after consecutive failures exceed grace")
+}
+
+func TestSampleSelf_GraceCount_RecoveryResetsCounter(t *testing.T) {
+	// A healthy sample after a within-grace blip resets the consecutive counter,
+	// so a subsequent single blip is forgiven again.
+	healthyServer := newMockRPCServer(t, map[string]interface{}{"getHealth": "ok"})
+	unhealthyServer := newMockRPCServer(t, map[string]interface{}{})
+
+	s := newTestStateWithGrace(rpc.NewClient("test", healthyServer.URL), 30*time.Second, 1)
+
+	s.SampleSelf() // healthy — streak starts
+	require.False(t, s.healthySince.IsZero())
+
+	s.rpc = rpc.NewClient("test", unhealthyServer.URL)
+	s.SampleSelf() // count=1, within grace
+	assert.Equal(t, 1, s.consecutiveUnhealthyCount)
+
+	s.rpc = rpc.NewClient("test", healthyServer.URL)
+	s.SampleSelf() // healthy — counter must reset to 0
+	assert.Equal(t, 0, s.consecutiveUnhealthyCount, "consecutive counter must reset on healthy sample")
+
+	s.rpc = rpc.NewClient("test", unhealthyServer.URL)
+	s.SampleSelf() // count=1 again — within grace, streak still alive
+	assert.False(t, s.healthySince.IsZero(), "streak should survive a second isolated blip after counter was reset")
+}
+
+func TestSampleSelf_GraceCount_Zero_ResetsImmediately(t *testing.T) {
+	// Grace=0 means the first unhealthy sample resets the streak (original behaviour).
+	healthyServer := newMockRPCServer(t, map[string]interface{}{"getHealth": "ok"})
+	unhealthyServer := newMockRPCServer(t, map[string]interface{}{})
+
+	s := newTestStateWithGrace(rpc.NewClient("test", healthyServer.URL), 30*time.Second, 0)
+
+	s.SampleSelf()
+	require.False(t, s.healthySince.IsZero())
+
+	s.rpc = rpc.NewClient("test", unhealthyServer.URL)
+	s.SampleSelf()
+	assert.True(t, s.healthySince.IsZero(), "grace=0 should reset streak on first unhealthy sample")
+}
