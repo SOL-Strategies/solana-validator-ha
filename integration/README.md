@@ -35,7 +35,7 @@ The integration test validates the following scenarios:
 
 The current system uses a **first-responder wins** approach:
 
-1. **Leaderless Detection**: If no active peer is found for `leaderless_threshold_duration`
+1. **Leaderless Detection**: If no active peer is found for `leaderless_samples_threshold` consecutive samples
 2. **Race Condition**: The first healthy, passive validator to detect the leaderless state becomes active
 3. **No Priority System**: It's a race condition where the fastest validator wins
 
