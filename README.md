@@ -271,6 +271,13 @@ failover:
     # so the healthy streak timer is not skewed by gossip refresh latency.
     poll_interval_duration: 2s
 
+    # required: false | default: 1
+    # How many consecutive unhealthy samples are tolerated before the healthy streak is reset.
+    # Default 1 means a single transient RPC timeout or blip does not destroy an established
+    # streak — the streak is only reset if unhealthiness persists across back-to-back samples.
+    # Set to 0 to disable grace (any failure resets immediately — original behaviour).
+    unhealthy_grace_count: 1
+
   # required: true | min: 1
   # Map of HA peers, excluding this node — it is added automatically at startup.
   # Keys are vanity names used in logging and metrics. IPs must be valid, unique IPv4 addresses.

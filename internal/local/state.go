@@ -15,15 +15,16 @@ import (
 
 // State tracks the local validator node's health and identity state.
 type State struct {
-	healthySince       time.Time
-	mu                 sync.RWMutex
-	minDurationReached bool
-	unhealthyLogged    bool
-	rpc                *rpc.Client
-	cfg                config.SelfHealthy
-	activePubkey       string
-	logger             *log.Logger
-	ctx                context.Context
+	healthySince              time.Time
+	mu                        sync.RWMutex
+	minDurationReached        bool
+	unhealthyLogged           bool
+	consecutiveUnhealthyCount int
+	rpc                       *rpc.Client
+	cfg                       config.SelfHealthy
+	activePubkey              string
+	logger                    *log.Logger
+	ctx                       context.Context
 }
 
 // Options are the options for creating a new local State.
@@ -54,6 +55,7 @@ func (s *State) SampleSelf() {
 	defer s.mu.Unlock()
 
 	if healthy {
+		s.consecutiveUnhealthyCount = 0
 		if s.healthySince.IsZero() {
 			s.healthySince = time.Now()
 			s.minDurationReached = false
@@ -73,6 +75,25 @@ func (s *State) SampleSelf() {
 			s.logger.Info(msg)
 		}
 	} else {
+		s.consecutiveUnhealthyCount++
+		if s.consecutiveUnhealthyCount <= s.cfg.UnhealthyGraceCount {
+			// Within grace — log a warning but preserve the streak so a single transient
+			// RPC timeout or blip does not destroy an established healthy window.
+			if healthErr != nil {
+				s.logger.Warn("unhealthy sample within grace count - streak preserved",
+					"consecutive_unhealthy", s.consecutiveUnhealthyCount,
+					"grace_count", s.cfg.UnhealthyGraceCount,
+					"error", healthErr,
+				)
+			} else {
+				s.logger.Warn("unhealthy sample within grace count - streak preserved",
+					"consecutive_unhealthy", s.consecutiveUnhealthyCount,
+					"grace_count", s.cfg.UnhealthyGraceCount,
+				)
+			}
+			return
+		}
+		// Grace exhausted — reset the streak.
 		if !s.healthySince.IsZero() {
 			s.healthySince = time.Time{}
 			s.minDurationReached = false

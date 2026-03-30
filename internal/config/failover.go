@@ -15,6 +15,10 @@ type SelfHealthy struct {
 	// PollIntervalDuration is how often to sample the local validator RPC health,
 	// independent of the main failover poll_interval_duration
 	PollIntervalDuration time.Duration `koanf:"poll_interval_duration"`
+	// UnhealthyGraceCount is how many consecutive unhealthy samples are tolerated before
+	// the healthy streak is reset. Default 1 — a single transient RPC timeout or blip does
+	// not destroy an established streak. Set to 0 to disable (any failure resets immediately).
+	UnhealthyGraceCount int `koanf:"unhealthy_grace_count"`
 }
 
 // Failover represents failover decision parameters
@@ -242,6 +246,9 @@ func (f *Failover) SetDefaults() {
 	}
 	if f.SelfHealthy.PollIntervalDuration == 0 {
 		f.SelfHealthy.PollIntervalDuration = 2 * time.Second
+	}
+	if f.SelfHealthy.UnhealthyGraceCount == 0 {
+		f.SelfHealthy.UnhealthyGraceCount = 1
 	}
 
 	// Default to poll_interval_duration so existing deployments that omit this field
