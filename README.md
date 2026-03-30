@@ -171,12 +171,26 @@ cluster:
   # required: false | default: cluster default RPC URL for cluster.name
   # RPC URLs used to query gossip state. Supplying multiple URLs provides resilience
   # against individual RPC drop-outs. URLs that return 403/429/503 are automatically
-  # deprioritised for 60 s before being retried.
+  # deprioritised for rpc_url_cooldown_duration before being retried.
   # The local validator RPC URL may be included here (logs a warning) and acts as a
   # rate-limit-immune fallback. For sub-second peer detection add it alongside at least
   # one remote URL and configure HA peers as mutual --entrypoint flags in agave.
   # See "Using Local RPC as a Failsafe Fallback" below for details.
   rpc_urls: []
+
+  # required: false | default: 5s
+  # Per-call timeout for cluster RPC requests. A hanging call is abandoned after this
+  # duration and the next URL in the list is tried. Lower values detect slow endpoints
+  # faster at the cost of spurious failures on genuinely loaded RPCs.
+  # Public Solana RPC endpoints can take 1–2s under normal load — the 5s default leaves
+  # comfortable headroom. Only lower this if you are using fast private/local RPCs.
+  rpc_timeout_duration: 5s
+
+  # required: false | default: 60s
+  # How long a URL that returns 403/429/503 is deprioritised before being retried.
+  # The public Solana RPC throttles on a per-minute basis, so 60s aligns with that
+  # recovery window. Lower if your RPC provider recovers faster.
+  rpc_url_cooldown_duration: 60s
 
 failover:
 

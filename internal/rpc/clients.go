@@ -15,9 +15,12 @@ import (
 	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 )
 
-// urlCooldownDuration is how long a URL that returned a permanent HTTP error (403/429/503)
-// is deprioritised before being retried again.
-const urlCooldownDuration = 60 * time.Second
+// defaultTimeout is the default per-call RPC timeout.
+const defaultTimeout = 5 * time.Second
+
+// defaultURLCooldown is the default duration a URL that returned a permanent HTTP error
+// (403/429/503) is deprioritised before being retried again.
+const defaultURLCooldown = 60 * time.Second
 
 // Client represents an RPC client that can handle multiple URLs
 type Client struct {
@@ -30,6 +33,7 @@ type Client struct {
 	// urlCooldowns tracks when rate-limited / access-forbidden URLs may be retried again
 	urlCooldowns map[string]time.Time
 	timeout      time.Duration
+	urlCooldown  time.Duration
 	logger       *log.Logger
 }
 
@@ -45,8 +49,21 @@ func NewClient(logPrefix string, urls ...string) *Client {
 		clients:           clients,
 		lastSuccessfulURL: "",
 		urlCooldowns:      make(map[string]time.Time),
-		timeout:           5 * time.Second, // Default timeout
+		timeout:           defaultTimeout,
+		urlCooldown:       defaultURLCooldown,
 	}
+}
+
+// WithTimeout sets the per-call RPC timeout and returns the client for chaining.
+func (c *Client) WithTimeout(d time.Duration) *Client {
+	c.timeout = d
+	return c
+}
+
+// WithCooldown sets how long a throttled/forbidden URL is deprioritised and returns the client for chaining.
+func (c *Client) WithCooldown(d time.Duration) *Client {
+	c.urlCooldown = d
+	return c
 }
 
 // withTimeout executes a function with the client's timeout
@@ -126,12 +143,12 @@ func executeWithRetry[T any](c *Client, ctx context.Context, op rpcOperation[T])
 			if isPermanentHTTPError(err) {
 				now := time.Now()
 				alreadyCooling := c.urlCooldowns[url].After(now)
-				c.urlCooldowns[url] = now.Add(urlCooldownDuration)
+				c.urlCooldowns[url] = now.Add(c.urlCooldown)
 				if !alreadyCooling {
 					c.logger.Warn("RPC endpoint rate-limited or access forbidden, cooling down",
 						"method", op.name,
 						"url", url,
-						"cooldown", urlCooldownDuration,
+						"cooldown", c.urlCooldown,
 					)
 				}
 			}
