@@ -331,12 +331,22 @@ func (m *Manager) ensureHAState() {
 	// if there is an active peer found in the last failover.leaderless_samples_threshold - we are good
 	// having a lookback grace period is important to allow for RPC glitches and other issues
 	if !m.gossipState.LeaderlessSamplesExceedsThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
-		m.logger.Debug("active peer found - no failover required")
-		return
+		// delinquency fast-path (opt-in): if failover.delinquency_bypass is enabled and the network
+		// has authoritatively declared the active peer delinquent via getVoteAccounts — cluster-wide
+		// consensus that the peer has not voted for at least delinquent_slot_distance slots, and not
+		// due to a low balance — skip the leaderless sample threshold and trigger failover immediately.
+		// ⚠️ Risk: a validator on a minority fork can appear delinquent but later recover. If it does,
+		// this bypass may trigger an unnecessary failover. Only enable if your validator can enter a
+		// "ghost" state (alive in gossip, not voting) that it cannot recover from on its own.
+		if m.cfg.Failover.DelinquencyBypass && m.gossipState.ActivePeerIsDelinquent() {
+			m.logger.Error("active peer declared delinquent by network - bypassing leaderless sample threshold and triggering failover (delinquency_bypass enabled)")
+		} else {
+			m.logger.Debug("active peer found - no failover required")
+			return
+		}
+	} else {
+		m.logger.Error(fmt.Sprintf("no active peer found in the last %d samples - failover required", m.gossipState.LeaderlessSamplesCount))
 	}
-
-	// we see no active peer in the last failover.leaderless_samples_threshold, so we need to failover
-	m.logger.Error(fmt.Sprintf("no active peer found in the last %d samples - failover required", m.gossipState.LeaderlessSamplesCount))
 
 	// if we don't see ourselves in gossip - evaluate whether to become passive
 	if m.isSelfNotInGossip() {

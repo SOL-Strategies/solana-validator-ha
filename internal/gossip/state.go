@@ -39,6 +39,10 @@ type State struct {
 	delinquentSlotDistanceOverride config.DelinquentSlotDistanceOverride
 	lastRefreshHadRPCError         bool
 	configUndeclaredActivePeer     PeerState
+	// activePeerDelinquent is set to true during Refresh when the active peer is found in gossip
+	// but is declared delinquent by the network (via getVoteAccounts) and the delinquency is NOT
+	// due to low balance. It is reset to false at the start of every Refresh.
+	activePeerDelinquent bool
 	// peerLastSeenAtByName tracks the last time each peer was seen in gossip, persists even when peer goes missing
 	peerLastSeenAtByName map[string]time.Time
 	// lastLoggedPeersState is the last peersStateString() output that was logged, used to suppress duplicate logs
@@ -48,6 +52,8 @@ type State struct {
 	// votePubkeyCache maps identity pubkey -> vote account pubkey, populated on first getVoteAccounts call
 	// to allow subsequent calls to use the votePubkey filter and avoid fetching all ~1500 validators
 	votePubkeyCache map[string]solana.PublicKey
+	// skipRefreshForTest, when true, makes Refresh a no-op so tests can seed state manually.
+	skipRefreshForTest bool
 }
 
 // PeerState represents the state of a peer as seen by the solana network
@@ -93,6 +99,9 @@ func NewState(opts Options) *State {
 
 // Refresh the state of peers as seen by the solana network
 func (p *State) Refresh() {
+	if p.skipRefreshForTest {
+		return
+	}
 	if !p.legendPrinted {
 		p.printStateEmojiKeyFormat()
 		p.legendPrinted = true
@@ -100,6 +109,7 @@ func (p *State) Refresh() {
 	p.logger.Debug("refreshing peers state")
 	latestPeerStatesByName := make(map[string]PeerState)
 	p.configUndeclaredActivePeer = PeerState{} // reset on every refresh
+	p.activePeerDelinquent = false             // reset on every refresh
 
 	// get cluster nodes - if this fails we return an empty state, which should cause its consumer
 	// to check for failovers
@@ -379,6 +389,13 @@ func (p *State) PeerCount() int {
 	return len(p.peerStatesByName)
 }
 
+// ActivePeerIsDelinquent returns true when the most recent Refresh found the active peer in gossip
+// but the network (via getVoteAccounts) has declared it delinquent for a reason other than low
+// balance. This is a strong, cluster-wide signal that the active validator is non-functional.
+func (p *State) ActivePeerIsDelinquent() bool {
+	return p.activePeerDelinquent
+}
+
 // HasConfigUndeclaredActivePeer returns true if any of the peers are the active validator
 func (p *State) HasConfigUndeclaredActivePeer() bool {
 	return p.configUndeclaredActivePeer.IP != ""
@@ -503,6 +520,9 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 		p.logger.Error(fmt.Sprintf("‼️ %s delinquent (%s)", label, distanceStr),
 			"last_voted_at_slot", delinquentVoteAccount.LastVote,
 		)
+		// signal to ensureHAState that the network has authoritatively confirmed this peer is
+		// delinquent — failover can bypass the leaderless sample threshold
+		p.activePeerDelinquent = true
 		return false
 	}
 

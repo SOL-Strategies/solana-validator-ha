@@ -215,6 +215,15 @@ failover:
   #     sits inside gossip propagation jitter and increases false-positive failover risk)
   leaderless_confirmation_poll_duration: 1s
 
+  # required: false | default: false
+  # When true, skips the leaderless sample threshold if the active peer is declared delinquent
+  # by the network (and not due to a sub-rent-exempt vote account balance), triggering failover
+  # immediately on the current gossip refresh.
+  # ⚠️ Risk: a validator on a minority fork appears delinquent but may recover. Enabling this
+  # removes the leaderless threshold recovery window and can cause unnecessary failovers.
+  # See "Delinquency Fast-Path" below for the full trade-off analysis before enabling.
+  delinquency_bypass: false
+
   # Overrides the number of slots a peer must be behind the tip to be considered delinquent.
   # ⚠️ Set with caution — too low a value causes false positives on transient hiccups.
   # The Agave default is 128 slots (~51s), defined as DELINQUENT_VALIDATOR_SLOT_DISTANCE:
@@ -414,6 +423,27 @@ WARN [rpc_client]: RPC endpoint rate-limited or access forbidden, cooling down
 ```
 
 During the cooldown the URL is still retried as a last resort, but healthy URLs are always attempted first.
+
+## Delinquency Fast-Path
+
+`solana-validator-ha` can optionally bypass the leaderless sample threshold when the Solana network itself declares the active peer delinquent via `getVoteAccounts`. Enable it with:
+
+```yaml
+failover:
+  delinquency_bypass: true  # default: false
+```
+
+**What it does**: when the active peer is visible in gossip but declared delinquent (not due to a low vote account balance), failover is triggered immediately on the current gossip refresh — no further confirmation samples are needed.
+
+**Why it can help — the "ghost validator" scenario**: the active validator is running and reachable in gossip but has stopped voting. Without the bypass, detection requires the full `leaderless_samples_threshold × poll_interval_duration` (~15 s at defaults) _on top of_ the delinquency detection time (~30–51 s). With the bypass, failover triggers as soon as delinquency is declared by the cluster.
+
+**Why it is disabled by default — fork recovery risk**: a validator that lands on a minority fork will appear delinquent from the canonical chain's perspective, but may recover on its own once the fork dies. If the bypass fires during that window and the validator subsequently recovers, you risk two nodes briefly holding the active identity simultaneously — a double-signing scenario. The leaderless sample threshold provides a natural recovery window: if the validator comes back and votes again, the next gossip refresh clears the delinquency flag and the failover is aborted.
+
+**When it is safe to enable**: if your validator can enter a "ghost" state — running, in gossip, but permanently stopped voting — that it cannot self-recover from, and your network conditions make prolonged minority forks very unlikely. Most operators running on well-connected infrastructure with stable peers do not need this.
+
+**Low-balance exemption**: validators delinquent due to a sub-rent-exempt vote account balance (~0.00089 SOL) are explicitly excluded from the bypass. This is a funding issue, not a validator failure, and should not trigger a failover.
+
+The delinquency threshold used for detection is `failover.delinquent_slot_distance_override` (if configured) or the Agave default of 128 slots (~51 s).
 
 ## Failover Priority
 
