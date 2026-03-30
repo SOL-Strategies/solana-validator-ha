@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	solanagorpc "github.com/gagliardetto/solana-go/rpc"
 )
@@ -13,6 +14,12 @@ import (
 type Cluster struct {
 	Name    string   `koanf:"name"`
 	RPCURLs []string `koanf:"rpc_urls"`
+	// RPCTimeoutDuration is the per-call timeout for cluster RPC requests.
+	// Default: 2s. Lower values detect hanging endpoints faster; set higher if your RPC is slow.
+	RPCTimeoutDuration time.Duration `koanf:"rpc_timeout_duration"`
+	// RPCURLCooldownDuration is how long a URL that returns 403/429/503 is deprioritised.
+	// Default: 15s. Lower values retry throttled URLs sooner.
+	RPCURLCooldownDuration time.Duration `koanf:"rpc_url_cooldown_duration"`
 }
 
 // Validate validates the cluster configuration
@@ -45,6 +52,13 @@ func (c *Cluster) Validate() error {
 		}
 	}
 
+	if c.RPCTimeoutDuration <= 0 {
+		return fmt.Errorf("cluster.rpc_timeout_duration must be greater than zero")
+	}
+	if c.RPCURLCooldownDuration <= 0 {
+		return fmt.Errorf("cluster.rpc_url_cooldown_duration must be greater than zero")
+	}
+
 	return nil
 }
 
@@ -60,5 +74,11 @@ func (c *Cluster) SetDefaults() {
 		case solanagorpc.DevNet.Name:
 			c.RPCURLs = []string{solanagorpc.DevNet.RPC}
 		}
+	}
+	if c.RPCTimeoutDuration == 0 {
+		c.RPCTimeoutDuration = 5 * time.Second
+	}
+	if c.RPCURLCooldownDuration == 0 {
+		c.RPCURLCooldownDuration = 60 * time.Second
 	}
 }
