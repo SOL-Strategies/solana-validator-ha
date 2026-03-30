@@ -421,17 +421,22 @@ func (m *Manager) ensureHAState() {
 		return
 	}
 
-	// if someone has already taken over as active - say so
-	// TODO: refactor logic, it works but the situation is a little confusing
-	if m.gossipState.LeaderlessSamplesBelowThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
+	// If we delayed (rank > 0) and the post-delay re-validation refresh found an active peer
+	// (LeaderlessSamplesCount reset to 0), a peer took over during our delay window — abort.
+	// We do NOT check this for rank-0 nodes (delayApplied == false): no time elapsed, no
+	// refresh was done, so the count simply reflects accumulated samples from this cycle.
+	// Checking count < threshold here would falsely abort delinquency-bypass takeovers on
+	// rank-0 (count=1) and on rank-1 when no peer took over during the delay (count still < threshold).
+	if delayApplied && m.gossipState.LeaderlessSamplesCount == 0 {
 		activePeerState, err := m.gossipState.GetActivePeer()
 		if err != nil {
-			m.logger.Warn("failed to get active peer from state, but we know someone else already assumed active role", "error", err)
+			m.logger.Warn("active peer appeared during takeover delay but could not be identified in state - aborting takeover", "error", err)
 			return
 		}
-		m.logger.Warn(fmt.Sprintf("peer %s is active, seen at %s - nothing to do", activePeerState.Name, activePeerState.LastSeenAtString()),
+		m.logger.Warn(fmt.Sprintf("peer %s became active during takeover delay - aborting takeover", activePeerState.Name),
 			"ip", activePeerState.IP,
 			"pubkey", activePeerState.Pubkey,
+			"seen_at", activePeerState.LastSeenAtString(),
 		)
 		return
 	}
