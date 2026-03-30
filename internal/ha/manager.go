@@ -716,7 +716,7 @@ func (m *Manager) delayTakeoverAsActive() (delayApplied bool, err error) {
 	}
 
 	if selfPeerRank == 0 {
-		m.logger.Info(fmt.Sprintf("this node is ranked 0/%d by %s - no takeover delay", peerCount, rankingSource))
+		m.logger.Debug(fmt.Sprintf("this node is ranked 0/%d by %s - no takeover delay", peerCount, rankingSource))
 		return false, nil
 	}
 

@@ -71,7 +71,7 @@ func (s *State) SampleSelf() {
 		minDuration := s.cfg.MinimumDuration
 		if !s.minDurationReached && healthyFor >= minDuration {
 			s.minDurationReached = true
-			msg := fmt.Sprintf("we are continulously healthy for at least %s", minDuration)
+			msg := fmt.Sprintf("we are continuously healthy for at least %s", minDuration)
 			if s.IsSelfPassive() {
 				msg += " - eligible for failover"
 			}
