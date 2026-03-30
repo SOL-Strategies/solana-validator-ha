@@ -18,6 +18,72 @@ func TestFailover_SetDefaults(t *testing.T) {
 	assert.Equal(t, time.Duration(0), failover.TakeoverJitterDuration)
 	assert.Equal(t, 30*time.Second, failover.SelfHealthy.MinimumDuration)
 	assert.Equal(t, 2*time.Second, failover.SelfHealthy.PollIntervalDuration)
+	// leaderless_confirmation_poll_duration defaults to poll_interval_duration (no behaviour change)
+	assert.Equal(t, failover.PollIntervalDuration, failover.LeaderlessConfirmationPollDuration)
+}
+
+func TestFailover_SetDefaults_ConfirmationPollDefaultsToPollInterval(t *testing.T) {
+	failover := &Failover{PollIntervalDuration: 10 * time.Second}
+	failover.SetDefaults()
+	assert.Equal(t, 10*time.Second, failover.LeaderlessConfirmationPollDuration,
+		"confirmation poll should default to poll_interval_duration when not set")
+}
+
+func TestFailover_SetDefaults_ConfirmationPollPreservedWhenSet(t *testing.T) {
+	failover := &Failover{
+		PollIntervalDuration:               10 * time.Second,
+		LeaderlessConfirmationPollDuration: 2 * time.Second,
+	}
+	failover.SetDefaults()
+	assert.Equal(t, 2*time.Second, failover.LeaderlessConfirmationPollDuration,
+		"explicitly set confirmation poll should not be overwritten by SetDefaults")
+}
+
+func TestFailover_Validate_ConfirmationPollCeiling(t *testing.T) {
+	base := &Failover{
+		PollIntervalDuration:               5 * time.Second,
+		LeaderlessSamplesThreshold:         3,
+		LeaderlessConfirmationPollDuration: 10 * time.Second, // exceeds poll_interval
+		SelfHealthy:                        SelfHealthy{MinimumDuration: 30 * time.Second, PollIntervalDuration: 2 * time.Second},
+		Active:                             Role{Command: "echo active"},
+		Passive:                            Role{Command: "echo passive"},
+		Peers:                              Peers{"v1": {IP: "1.2.3.4"}},
+	}
+
+	err := base.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failover.leaderless_confirmation_poll_duration")
+	assert.Contains(t, err.Error(), "must not exceed")
+}
+
+func TestFailover_Validate_ConfirmationPollAtCeiling(t *testing.T) {
+	base := &Failover{
+		PollIntervalDuration:               5 * time.Second,
+		LeaderlessSamplesThreshold:         3,
+		LeaderlessConfirmationPollDuration: 5 * time.Second, // equal to poll_interval — valid
+		SelfHealthy:                        SelfHealthy{MinimumDuration: 30 * time.Second, PollIntervalDuration: 2 * time.Second},
+		Active:                             Role{Command: "echo active"},
+		Passive:                            Role{Command: "echo passive"},
+		Peers:                              Peers{"v1": {IP: "1.2.3.4"}},
+	}
+
+	err := base.Validate()
+	assert.NoError(t, err)
+}
+
+func TestFailover_Validate_ConfirmationPollBelowCeiling(t *testing.T) {
+	base := &Failover{
+		PollIntervalDuration:               5 * time.Second,
+		LeaderlessSamplesThreshold:         3,
+		LeaderlessConfirmationPollDuration: 2 * time.Second, // below poll_interval — valid
+		SelfHealthy:                        SelfHealthy{MinimumDuration: 30 * time.Second, PollIntervalDuration: 2 * time.Second},
+		Active:                             Role{Command: "echo active"},
+		Passive:                            Role{Command: "echo passive"},
+		Peers:                              Peers{"v1": {IP: "1.2.3.4"}},
+	}
+
+	err := base.Validate()
+	assert.NoError(t, err)
 }
 
 func TestFailover_Validate(t *testing.T) {

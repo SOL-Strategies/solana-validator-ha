@@ -193,6 +193,28 @@ failover:
   # before the cluster is considered leaderless and a failover is triggered.
   leaderless_samples_threshold: 3
 
+  # required: false | default: poll_interval_duration (no behaviour change)
+  # How often to poll gossip for the final confirmatory sample once leaderless_samples_threshold-1
+  # consecutive slow-poll misses have already been observed.
+  #
+  # The slow polls (poll_interval_duration) build confidence that the peer is genuinely down —
+  # gossip can transiently drop a node for a single cycle and recover on the next. Fast-polling
+  # only kicks in after threshold-1 independent slow-poll confirmations, so the risk of reacting
+  # to a transient blip is very low by that point.
+  #
+  # Example with poll_interval_duration: 5s, leaderless_samples_threshold: 3,
+  # leaderless_confirmation_poll_duration: 1s:
+  #   T+5s   sample 1 (slow) → leaderless_count=1
+  #   T+10s  sample 2 (slow) → leaderless_count=2  ← two independent slow confirmations
+  #   T+11s  sample 3 (fast) → leaderless_count=3  → failover triggered
+  #   Total: ~11s vs ~15s without this setting
+  #
+  # Constraints:
+  #   - Must not exceed poll_interval_duration (ceiling — a slower confirmation poll is nonsensical)
+  #   - Values below 1s are clamped to 1s on startup with a warning (floor — sub-second polling
+  #     sits inside gossip propagation jitter and increases false-positive failover risk)
+  leaderless_confirmation_poll_duration: 1s
+
   # Overrides the number of slots a peer must be behind the tip to be considered delinquent.
   # ⚠️ Set with caution — too low a value causes false positives on transient hiccups.
   # The Agave default is 128 slots (~51s), defined as DELINQUENT_VALIDATOR_SLOT_DISTANCE:

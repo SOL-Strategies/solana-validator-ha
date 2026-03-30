@@ -206,6 +206,15 @@ func (c *Config) validate() error {
 		}
 	}
 
+	// failover.leaderless_confirmation_poll_duration below the 1s floor - clamp and warn
+	if c.Failover.LeaderlessConfirmationPollDuration < leaderlessConfirmationPollFloor {
+		c.logger.Warnf(
+			"failover.leaderless_confirmation_poll_duration %s is below the minimum of %s - clamped to %s; sub-second polling sits inside gossip propagation jitter and increases false-positive failover risk",
+			c.Failover.LeaderlessConfirmationPollDuration, leaderlessConfirmationPollFloor, leaderlessConfirmationPollFloor,
+		)
+		c.Failover.LeaderlessConfirmationPollDuration = leaderlessConfirmationPollFloor
+	}
+
 	// failover.dry_run if true print warning
 	if c.Failover.DryRun {
 		c.logger.Warn("failover.dry_run is true - failovers will dry-run commands only and be no-op")
