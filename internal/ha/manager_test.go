@@ -7,6 +7,7 @@ import (
 
 	solanago "github.com/gagliardetto/solana-go"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
+	"github.com/sol-strategies/solana-validator-ha/internal/gossip"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -961,4 +962,108 @@ func TestManager_EnsurePassive_WithDryRun(t *testing.T) {
 	// Verify that cache was updated with becoming_passive status
 	state := manager.cache.GetState()
 	assert.Equal(t, "becoming_passive", state.FailoverStatus)
+}
+
+// seedGossipPeers adds synthetic peer states to the manager's gossip state without
+// requiring a real RPC call, enabling unit tests for rank-based takeover logic.
+func seedGossipPeers(m *Manager, peers map[string]gossip.PeerState) {
+	m.gossipState.SetPeerStatesForTest(peers)
+}
+
+func intPtr(i int) *int {
+	return &i
+}
+
+func TestDelayTakeoverAsActive_NoPeers(t *testing.T) {
+	cfg := createTestConfig()
+	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+	require.NoError(t, manager.initialize())
+	// gossipState has no peers after init (no Refresh called)
+
+	delayApplied, err := manager.delayTakeoverAsActive()
+
+	assert.Error(t, err)
+	assert.False(t, delayApplied)
+}
+
+func TestDelayTakeoverAsActive_Rank0_ConfigPriority(t *testing.T) {
+	cfg := createTestConfig()
+	selfIP := "192.168.1.100"
+	peerIP := "192.168.1.101"
+
+	// self has priority 0 (highest), peer has priority 1
+	cfg.Failover.Priority = intPtr(0)
+	cfg.Failover.Peers = map[string]config.Peer{
+		"peer1": {IP: peerIP, Name: "peer1", Priority: intPtr(1)},
+	}
+
+	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+	require.NoError(t, manager.initialize())
+	manager.peerSelf.IP = selfIP
+
+	// seed gossip with one peer so PeerCount() > 0
+	seedGossipPeers(manager, map[string]gossip.PeerState{
+		"peer1": {IP: peerIP, Name: "peer1"},
+	})
+
+	delayApplied, err := manager.delayTakeoverAsActive()
+
+	assert.NoError(t, err)
+	assert.False(t, delayApplied, "rank-0 node should not apply a delay")
+}
+
+func TestDelayTakeoverAsActive_Rank1_ConfigPriority(t *testing.T) {
+	cfg := createTestConfig()
+	selfIP := "192.168.1.100"
+	peerIP := "192.168.1.101"
+
+	// self has priority 1, peer has priority 0 (highest)
+	cfg.Failover.Priority = intPtr(1)
+	cfg.Failover.PollIntervalDuration = 10 * time.Millisecond // keep test fast
+	cfg.Failover.Peers = map[string]config.Peer{
+		"peer1": {IP: peerIP, Name: "peer1", Priority: intPtr(0)},
+	}
+
+	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+	require.NoError(t, manager.initialize())
+	manager.peerSelf.IP = selfIP
+
+	seedGossipPeers(manager, map[string]gossip.PeerState{
+		"peer1": {IP: peerIP, Name: "peer1"},
+	})
+
+	start := time.Now()
+	delayApplied, err := manager.delayTakeoverAsActive()
+	elapsed := time.Since(start)
+
+	assert.NoError(t, err)
+	assert.True(t, delayApplied, "rank-1 node should report delay applied")
+	assert.GreaterOrEqual(t, elapsed, cfg.Failover.PollIntervalDuration, "rank-1 node should have slept at least one poll interval")
+}
+
+func TestDelayTakeoverAsActive_SelfNotInRankMap(t *testing.T) {
+	cfg := createTestConfig()
+
+	// No config priorities — falls back to IP-based ranking from gossip state.
+	// Self's IP is set to one that is NOT present in gossip, so it won't appear
+	// in the IP rank map, triggering the "not found" error path.
+	cfg.Failover.Priority = nil
+	cfg.Failover.Peers = map[string]config.Peer{
+		"peer1": {IP: "192.168.1.101", Name: "peer1"},
+	}
+
+	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+	require.NoError(t, manager.initialize())
+	// self IP that won't appear in the gossip peer seed below
+	manager.peerSelf.IP = "10.0.0.99"
+
+	// Only peer1 is in gossip — self ("10.0.0.99") is absent from the IP rank map
+	seedGossipPeers(manager, map[string]gossip.PeerState{
+		"peer1": {IP: "192.168.1.101", Name: "peer1"},
+	})
+
+	delayApplied, err := manager.delayTakeoverAsActive()
+
+	assert.Error(t, err)
+	assert.False(t, delayApplied)
 }
