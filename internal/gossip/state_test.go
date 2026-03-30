@@ -873,3 +873,146 @@ func TestRefresh_DeclaredActivePeer_NotRecordedAsUndeclared(t *testing.T) {
 	assert.Equal(t, testDeclaredIP, activePeer.IP)
 	assert.True(t, activePeer.LastSeenActive)
 }
+
+// ---- tests for active peer delinquency detection ----
+
+// delinquentVoteAccountsResult returns a mock getVoteAccounts result with the given node pubkeys
+// in the delinquent list at the given lastVote slot.
+func delinquentVoteAccountsResult(delinquentNodePubkeys []string, lastVote uint64) map[string]interface{} {
+	delinquent := []map[string]interface{}{}
+	for _, pk := range delinquentNodePubkeys {
+		delinquent = append(delinquent, map[string]interface{}{
+			"nodePubkey":       pk,
+			"votePubkey":       "11111111111111111111111111111111",
+			"activatedStake":   1000000,
+			"epochVoteAccount": true,
+			"epochCredits":     []interface{}{},
+			"commission":       0,
+			"lastVote":         lastVote,
+			"rootSlot":         lastVote - 10,
+		})
+	}
+	return map[string]interface{}{
+		"current":    []interface{}{},
+		"delinquent": delinquent,
+	}
+}
+
+// balanceResult returns a mock getBalance result for the given lamport balance.
+func balanceResult(lamports uint64) map[string]interface{} {
+	return map[string]interface{}{
+		"context": map[string]interface{}{"slot": 500},
+		"value":   lamports,
+	}
+}
+
+func TestActivePeerIsDelinquent_FalseByDefault(t *testing.T) {
+	state := NewState(Options{
+		ClusterRPC:   rpc.NewClient("test", "https://api.mainnet-beta.solana.com"),
+		ActivePubkey: testActivePubkey,
+		SelfIP:       testSelfIP,
+		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
+	})
+	assert.False(t, state.ActivePeerIsDelinquent())
+}
+
+func TestActivePeerIsDelinquent_SetOnGenuineDelinquency(t *testing.T) {
+	// Active peer is in gossip with the active pubkey, in the delinquent vote accounts list,
+	// with a balance above rent-exempt minimum → genuine delinquency, flag should be set.
+	server := newGossipMockRPCServer(t, map[string]interface{}{
+		"getClusterNodes": []interface{}{
+			gossipClusterNode(testActivePubkey, testDeclaredIP),
+		},
+		"getVoteAccounts": delinquentVoteAccountsResult([]string{testActivePubkey}, 100),
+		"getBalance":      balanceResult(10_000_000), // well above 890880 rent-exempt minimum
+		"getSlot":         500,
+	})
+
+	state := NewState(Options{
+		ClusterRPC:   rpc.NewClient("test", server.URL),
+		ActivePubkey: testActivePubkey,
+		SelfIP:       testSelfIP,
+		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
+	})
+
+	state.Refresh()
+
+	assert.True(t, state.ActivePeerIsDelinquent(), "delinquency flag should be set when network confirms peer is delinquent")
+	assert.Equal(t, 1, state.LeaderlessSamplesCount, "leaderless counter should increment for a delinquent peer")
+}
+
+func TestActivePeerIsDelinquent_NotSetForLowBalance(t *testing.T) {
+	// Active peer is delinquent but balance is below rent-exempt minimum → forgiven, flag NOT set.
+	server := newGossipMockRPCServer(t, map[string]interface{}{
+		"getClusterNodes": []interface{}{
+			gossipClusterNode(testActivePubkey, testDeclaredIP),
+		},
+		"getVoteAccounts": delinquentVoteAccountsResult([]string{testActivePubkey}, 100),
+		"getBalance":      balanceResult(500_000), // below 890880 rent-exempt minimum
+		"getSlot":         500,
+	})
+
+	state := NewState(Options{
+		ClusterRPC:   rpc.NewClient("test", server.URL),
+		ActivePubkey: testActivePubkey,
+		SelfIP:       testSelfIP,
+		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
+	})
+
+	state.Refresh()
+
+	assert.False(t, state.ActivePeerIsDelinquent(), "delinquency flag must not be set when peer is forgiven due to low balance")
+}
+
+func TestActivePeerIsDelinquent_NotSetWhenVoting(t *testing.T) {
+	// Active peer is in gossip and in the current (voting) list → healthy, flag NOT set.
+	server := newGossipMockRPCServer(t, map[string]interface{}{
+		"getClusterNodes": []interface{}{
+			gossipClusterNode(testActivePubkey, testDeclaredIP),
+		},
+		"getVoteAccounts": votingVoteAccountsResult([]string{testActivePubkey}),
+	})
+
+	state := NewState(Options{
+		ClusterRPC:   rpc.NewClient("test", server.URL),
+		ActivePubkey: testActivePubkey,
+		SelfIP:       testSelfIP,
+		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
+	})
+
+	state.Refresh()
+
+	assert.False(t, state.ActivePeerIsDelinquent(), "delinquency flag must not be set when peer is actively voting")
+	assert.Equal(t, 0, state.LeaderlessSamplesCount)
+}
+
+func TestActivePeerIsDelinquent_ResetOnNextRefresh(t *testing.T) {
+	// First Refresh: peer delinquent → flag set.
+	// Second Refresh: peer back to voting → flag cleared.
+	delinquentServer := newGossipMockRPCServer(t, map[string]interface{}{
+		"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+		"getVoteAccounts": delinquentVoteAccountsResult([]string{testActivePubkey}, 100),
+		"getBalance":      balanceResult(10_000_000),
+		"getSlot":         500,
+	})
+	votingServer := newGossipMockRPCServer(t, map[string]interface{}{
+		"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+		"getVoteAccounts": votingVoteAccountsResult([]string{testActivePubkey}),
+	})
+
+	state := NewState(Options{
+		ClusterRPC:   rpc.NewClient("test", delinquentServer.URL),
+		ActivePubkey: testActivePubkey,
+		SelfIP:       testSelfIP,
+		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
+	})
+
+	state.Refresh()
+	assert.True(t, state.ActivePeerIsDelinquent(), "flag should be set after delinquent refresh")
+
+	// switch to the voting server and refresh again; clear cache so it re-discovers the vote account
+	state.clusterRPC = rpc.NewClient("test", votingServer.URL)
+	clear(state.votePubkeyCache)
+	state.Refresh()
+	assert.False(t, state.ActivePeerIsDelinquent(), "flag should be cleared after peer resumes voting")
+}

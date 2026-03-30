@@ -23,6 +23,10 @@ type Failover struct {
 	PollIntervalDuration               time.Duration                  `koanf:"poll_interval_duration"`
 	LeaderlessSamplesThreshold         int                            `koanf:"leaderless_samples_threshold"`
 	LeaderlessConfirmationPollDuration time.Duration                  `koanf:"leaderless_confirmation_poll_duration"`
+	// DelinquencyBypass, when true, skips the leaderless sample threshold if the active peer is
+	// declared delinquent by the network (and not due to low balance). Default false.
+	// ⚠️ See "Delinquency Fast-Path" in the README for the fork-recovery risk before enabling.
+	DelinquencyBypass                  bool                           `koanf:"delinquency_bypass"`
 	TakeoverJitterDuration             time.Duration                  `koanf:"takeover_jitter_duration"`
 	Priority                           *int                           `koanf:"priority"`
 	Active                             Role                           `koanf:"active"`

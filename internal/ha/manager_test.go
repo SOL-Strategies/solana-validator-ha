@@ -1067,3 +1067,88 @@ func TestDelayTakeoverAsActive_SelfNotInRankMap(t *testing.T) {
 	assert.Error(t, err)
 	assert.False(t, delayApplied)
 }
+
+// TestEnsureHAState_DelinquencyBypass_Enabled verifies that when failover.delinquency_bypass
+// is true and the active peer is declared delinquent, ensureHAState proceeds past the
+// leaderless-sample threshold check even when LeaderlessSamplesCount is below threshold.
+//
+// Observable evidence of bypass: ensureHAState reaches the ensurePassive path
+// (self not in gossip, other peers visible) and updates cache to "becoming_passive",
+// rather than returning early with "no failover required".
+func TestEnsureHAState_DelinquencyBypass_Enabled(t *testing.T) {
+	cfg := createTestConfig()
+	cfg.Failover.LeaderlessSamplesThreshold = 3
+	cfg.Failover.DelinquencyBypass = true
+
+	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+	require.NoError(t, manager.initialize())
+
+	// Freeze gossip state so Refresh() doesn't reset our seeded values.
+	manager.gossipState.SetRefreshNoOpForTest(true)
+
+	// Seed one peer that is NOT self — self (192.168.1.100) will be absent from gossip,
+	// causing isSelfNotInGossip()=true; HasPeers(selfIP)=true so ensurePassive() is reached.
+	seedGossipPeers(manager, map[string]gossip.PeerState{
+		"peer1": {IP: "192.168.1.101", Name: "peer1"},
+	})
+
+	// Network has declared the active peer delinquent.
+	manager.gossipState.SetActivePeerDelinquentForTest(true)
+
+	manager.ensureHAState()
+
+	// If the delinquency bypass fired, ensurePassive was called and cache reflects it.
+	state := manager.cache.GetState()
+	assert.Equal(t, "becoming_passive", state.FailoverStatus,
+		"delinquency bypass should trigger ensurePassive path, not return 'no failover required'")
+}
+
+// TestEnsureHAState_DelinquencyBypass_Disabled verifies that when failover.delinquency_bypass
+// is false (the default), a delinquent peer below the leaderless threshold does NOT trigger
+// a failover — the bypass is ignored and the normal threshold check governs.
+func TestEnsureHAState_DelinquencyBypass_Disabled(t *testing.T) {
+	cfg := createTestConfig()
+	cfg.Failover.LeaderlessSamplesThreshold = 3
+	cfg.Failover.DelinquencyBypass = false // explicit default
+
+	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+	require.NoError(t, manager.initialize())
+
+	manager.gossipState.SetRefreshNoOpForTest(true)
+	seedGossipPeers(manager, map[string]gossip.PeerState{
+		"peer1": {IP: "192.168.1.101", Name: "peer1"},
+	})
+	// Peer is delinquent, but bypass is disabled — should be treated as "active peer found".
+	manager.gossipState.SetActivePeerDelinquentForTest(true)
+
+	manager.ensureHAState()
+
+	state := manager.cache.GetState()
+	assert.Equal(t, "idle", state.FailoverStatus,
+		"delinquency bypass should not fire when failover.delinquency_bypass is false")
+}
+
+// TestEnsureHAState_BelowThreshold_NoDelinquency_NoFailover verifies that when
+// LeaderlessSamplesCount is below the threshold AND the active peer is NOT delinquent,
+// ensureHAState returns early without triggering any failover action.
+func TestEnsureHAState_BelowThreshold_NoDelinquency_NoFailover(t *testing.T) {
+	cfg := createTestConfig()
+	cfg.Failover.LeaderlessSamplesThreshold = 3
+
+	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+	require.NoError(t, manager.initialize())
+
+	manager.gossipState.SetRefreshNoOpForTest(true)
+	seedGossipPeers(manager, map[string]gossip.PeerState{
+		"peer1": {IP: "192.168.1.101", Name: "peer1"},
+	})
+
+	manager.ensureHAState()
+
+	// refreshMetrics() always sets FailoverStatus="idle"; ensurePassive/ensureActive would
+	// overwrite it with "becoming_passive"/"becoming_active". Staying at "idle" confirms the
+	// function returned early without triggering a failover.
+	state := manager.cache.GetState()
+	assert.Equal(t, "idle", state.FailoverStatus,
+		"no failover should be triggered when below threshold and peer is not delinquent")
+}
