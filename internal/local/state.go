@@ -25,6 +25,9 @@ type State struct {
 	activePubkey              string
 	logger                    *log.Logger
 	ctx                       context.Context
+	// forceHealthyForTest, when true, makes checkHealth() return (true, nil) without an RPC call.
+	// Set via SetForceHealthyForTest; intended for unit tests only.
+	forceHealthyForTest bool
 }
 
 // Options are the options for creating a new local State.
@@ -162,6 +165,9 @@ func (s *State) IsSelfPassive() bool {
 
 // checkHealth performs a raw health check against the local RPC.
 func (s *State) checkHealth() (bool, error) {
+	if s.forceHealthyForTest {
+		return true, nil
+	}
 	healthStatus, err := s.rpc.GetHealth(s.ctx)
 	if err != nil {
 		return false, err

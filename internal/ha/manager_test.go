@@ -1152,3 +1152,48 @@ func TestEnsureHAState_BelowThreshold_NoDelinquency_NoFailover(t *testing.T) {
 	assert.Equal(t, "idle", state.FailoverStatus,
 		"no failover should be triggered when below threshold and peer is not delinquent")
 }
+
+// TestEnsureHAState_DelinquencyBypass_Rank0_ProceedsToEnsureActive verifies the regression:
+// before the fix, a rank-0 node with delinquency_bypass=true and LeaderlessSamplesCount=1
+// (below threshold=3) was blocked by the LeaderlessSamplesBelowThreshold check —
+// GetActivePeer() would error and ensureHAState() returned without calling ensureActive().
+// After the fix (gate on delayApplied && count==0), rank-0 with no delay/no refresh skips
+// the check and proceeds all the way to ensureActive(), setting cache to "becoming_active".
+func TestEnsureHAState_DelinquencyBypass_Rank0_ProceedsToEnsureActive(t *testing.T) {
+	cfg := createTestConfig()
+	cfg.Failover.LeaderlessSamplesThreshold = 3
+	cfg.Failover.DelinquencyBypass = true
+	// rank-0 by IP: self (185.0.0.1) < peer (186.0.0.1)
+	selfIP := "185.0.0.1"
+	peerIP := "186.0.0.1"
+	cfg.Failover.Peers = map[string]config.Peer{
+		"peer1": {IP: peerIP, Name: "peer1"},
+	}
+
+	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: func() (string, error) { return selfIP, nil }})
+	require.NoError(t, manager.initialize())
+
+	// Freeze gossip so seeded state persists across the ensureHAState call.
+	manager.gossipState.SetRefreshNoOpForTest(true)
+
+	// Self is in gossip (passive), peer is also in gossip (no one active).
+	// LeaderlessSamplesCount is 1 — below threshold=3 — simulating the first delinquency sample.
+	seedGossipPeers(manager, map[string]gossip.PeerState{
+		"test-validator": {IP: selfIP, Name: "test-validator", LastSeenActive: false},
+		"peer1":          {IP: peerIP, Name: "peer1", LastSeenActive: false},
+	})
+	manager.gossipState.LeaderlessSamplesCount = 1
+	manager.gossipState.SetActivePeerDelinquentForTest(true)
+
+	// Local state: healthy and healthy long enough to be a failover candidate.
+	manager.localState.SetForceHealthyForTest(true)
+	manager.localState.SetHealthySinceForTest(time.Now().Add(-time.Hour))
+
+	manager.ensureHAState()
+
+	// ensureActive() sets cache to "becoming_active". Reaching it proves the fix works:
+	// the old LeaderlessSamplesBelowThreshold check no longer aborts rank-0 takeovers.
+	state := manager.cache.GetState()
+	assert.Equal(t, "becoming_active", state.FailoverStatus,
+		"rank-0 delinquency bypass should proceed to ensureActive() regardless of leaderless count")
+}
