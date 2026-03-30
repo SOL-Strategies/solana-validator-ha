@@ -178,7 +178,7 @@ prometheus:
 failover:
   dry_run: true
   poll_interval_duration: "30s"
-  leaderless_threshold_duration: "5m"
+  leaderless_samples_threshold: 10
   takeover_jitter_duration: "10s"
   active:
     command: "systemctl start solana"
@@ -235,7 +235,7 @@ prometheus:
 failover:
   dry_run: true
   poll_interval_duration: "30s"
-  leaderless_threshold_duration: "5m"
+  leaderless_samples_threshold: 10
   takeover_jitter_duration: "10s"
   active:
     command: "systemctl start solana"
