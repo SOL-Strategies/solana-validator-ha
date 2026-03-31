@@ -523,18 +523,16 @@ When `failover.recording.enabled: true`, `solana-validator-ha` writes a JSON fil
 ### File naming
 
 ```
-svha-<pubkey>-<timestamp>-<producer>-<from>-to-<to>-recording.json
+svha-<pubkey>-<timestamp>-<producer-ip>-recording.json
 ```
 
 | Segment | Description |
 |---------|-------------|
 | `<pubkey>` | Active identity pubkey — shared across all HA peers, so files from different nodes for the same failover event share this prefix |
 | `<timestamp>` | UTC time the failover was detected, formatted as `20060102T150405Z` |
-| `<producer>` | `validator.name` of the node that wrote the file |
-| `<from>` | Name of the last known active peer before the failover, or `unknown` |
-| `<to>` | `validator.name` of the node that became active (always a real node name, never `"self"`) |
+| `<producer-ip>` | Public IP of the node that wrote the file, with dots replaced by underscores (e.g. `185_26_11_91`) |
 
-Example: `svha-VotePubkey1111111111111111111111111111111111-20260331T143022Z-london-chicago-to-london-recording.json`
+Example: `svha-VotePubkey1111111111111111111111111111111111-20260331T143022Z-185_26_11_91-recording.json`
 
 Because the timestamp is derived from each node's independent poll cycle, files from two nodes for the same failover event will have slightly different timestamps (up to one poll interval apart). Sort by `<pubkey>` first, then `<timestamp>` to find the matching pair.
 
@@ -567,8 +565,8 @@ The `solana-validator-ha replay` command accepts one or more recording files and
 
 ```bash
 solana-validator-ha replay \
-  svha-VotePubkey111111111111111111111111111111111-20260331T143022Z-london-chicago-to-london-recording.json \
-  svha-VotePubkey111111111111111111111111111111111-20260331T143025Z-chicago-chicago-to-london-recording.json
+  svha-VotePubkey111111111111111111111111111111111-20260331T143022Z-185_26_11_91-recording.json \
+  svha-VotePubkey111111111111111111111111111111111-20260331T143025Z-186_233_187_141-recording.json
 ```
 
 To find the matching file from the other node, filter by the shared `<pubkey>` prefix — all recordings for the same HA cluster carry the same pubkey. The timestamps will differ by a few seconds (each node detects the failover at a different point in its own poll cycle), so sort chronologically within that prefix to find the pair.

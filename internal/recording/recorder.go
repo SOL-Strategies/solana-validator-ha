@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -51,8 +52,9 @@ func (r *Recorder) WriteAsync(outputDir string, outcome Outcome) {
 	snapshot := r.event // copy before spawning goroutine
 	go func() {
 		ts := snapshot.DetectedAt.UTC().Format("20060102T150405Z")
-		filename := fmt.Sprintf("svha-%s-%s-%s-%s-to-%s-recording.json",
-			snapshot.Node.ActivePubkey, ts, snapshot.Node.Name, outcome.FromNode, outcome.ToNode)
+		producerIP := strings.ReplaceAll(snapshot.Node.IP, ".", "_")
+		filename := fmt.Sprintf("svha-%s-%s-%s-recording.json",
+			snapshot.Node.ActivePubkey, ts, producerIP)
 		path := filepath.Join(outputDir, filename)
 
 		data, err := json.MarshalIndent(snapshot, "", "  ")
