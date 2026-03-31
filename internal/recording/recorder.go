@@ -57,7 +57,7 @@ func (r *Recorder) WriteAsync(outputDir string, outcome Outcome) {
 			snapshot.Node.ActivePubkey, ts, producerIP)
 		path := filepath.Join(outputDir, filename)
 
-		data, err := json.MarshalIndent(snapshot, "", "  ")
+		data, err := json.Marshal(snapshot)
 		if err != nil {
 			return
 		}
