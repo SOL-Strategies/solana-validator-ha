@@ -16,6 +16,15 @@ import (
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
 )
 
+// DelinquencyDetail holds the slot-distance data captured when the active peer is declared
+// delinquent during a Refresh. It is reset to nil at the start of every Refresh.
+type DelinquencyDetail struct {
+	LastVoteSlot    uint64
+	CurrentSlot     uint64
+	SlotDistance    uint64
+	AllowedDistance uint64
+}
+
 // undeclaredPeerName is the synthetic name used for active peers that appear in gossip but are
 // not declared in the HA cluster config. Used both when registering the peer state and when
 // labelling log lines (e.g. delinquency) where no configured name is available.
@@ -43,6 +52,9 @@ type State struct {
 	// but is declared delinquent by the network (via getVoteAccounts) and the delinquency is NOT
 	// due to low balance. It is reset to false at the start of every Refresh.
 	activePeerDelinquent bool
+	// lastDelinquencyDetail holds slot-distance info from the most recent delinquency detection.
+	// Reset to nil at the start of every Refresh.
+	lastDelinquencyDetail *DelinquencyDetail
 	// peerLastSeenAtByName tracks the last time each peer was seen in gossip, persists even when peer goes missing
 	peerLastSeenAtByName map[string]time.Time
 	// lastLoggedPeersState is the last peersStateString() output that was logged, used to suppress duplicate logs
@@ -110,6 +122,7 @@ func (p *State) Refresh() {
 	latestPeerStatesByName := make(map[string]PeerState)
 	p.configUndeclaredActivePeer = PeerState{} // reset on every refresh
 	p.activePeerDelinquent = false             // reset on every refresh
+	p.lastDelinquencyDetail = nil              // reset on every refresh
 
 	// get cluster nodes - if this fails we return an empty state, which should cause its consumer
 	// to check for failovers
@@ -396,6 +409,20 @@ func (p *State) ActivePeerIsDelinquent() bool {
 	return p.activePeerDelinquent
 }
 
+// GetDelinquencyDetail returns the slot-distance detail from the most recent delinquency
+// detection, or nil if the last Refresh found no delinquency.
+func (p *State) GetDelinquencyDetail() *DelinquencyDetail {
+	return p.lastDelinquencyDetail
+}
+
+// GetLastActivePeer returns the most recently observed active peer across all Refresh calls.
+// This persists even when the peer goes missing or becomes delinquent, making it useful
+// for determining the "from" node in a failover recording. Returns a zero-value PeerState
+// if no active peer has ever been observed.
+func (p *State) GetLastActivePeer() PeerState {
+	return p.lastActivePeer
+}
+
 // HasConfigUndeclaredActivePeer returns true if any of the peers are the active validator
 func (p *State) HasConfigUndeclaredActivePeer() bool {
 	return p.configUndeclaredActivePeer.IP != ""
@@ -515,7 +542,14 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 		}
 		distanceStr := fmt.Sprintf("behind %d slots or more", delinquentSlotDistance)
 		if currentSlot, err := p.clusterRPC.GetSlot(context.Background()); err == nil {
-			distanceStr = fmt.Sprintf("behind %d slots >= %d slots allowed", currentSlot-delinquentVoteAccount.LastVote, delinquentSlotDistance)
+			distance := currentSlot - delinquentVoteAccount.LastVote
+			distanceStr = fmt.Sprintf("behind %d slots >= %d slots allowed", distance, delinquentSlotDistance)
+			p.lastDelinquencyDetail = &DelinquencyDetail{
+				LastVoteSlot:    delinquentVoteAccount.LastVote,
+				CurrentSlot:     currentSlot,
+				SlotDistance:    distance,
+				AllowedDistance: delinquentSlotDistance,
+			}
 		}
 		p.logger.Error(fmt.Sprintf("‼️ %s delinquent (%s)", label, distanceStr),
 			"last_voted_at_slot", delinquentVoteAccount.LastVote,

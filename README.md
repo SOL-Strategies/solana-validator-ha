@@ -70,6 +70,7 @@ failover:
 - **🪝 Hooks**: Pre/Post failover hook support for role transitions
 - **📊 Prometheus Metrics**: Rich metrics collection for monitoring and alerting
 - **🏁 First-Responder Failover**: Race-based failover with deterministic rank-based delay so the highest-priority eligible passive validator assumes the active role. Default ordering is ascending IP sort; operators can override with explicit `failover.priority` per node
+- **📼 Failover Recording**: Optionally writes a timestamped JSON file per failover with pre-failover gossip context, decision timeline, and outcome — for post-incident diagnosis and replay
 
 ## Installation
 
@@ -277,6 +278,18 @@ failover:
     # streak — the streak is only reset if unhealthiness persists across back-to-back samples.
     # Set to 0 to disable grace (any failure resets immediately — original behaviour).
     unhealthy_grace_count: 1
+
+  # Failover recording: writes a JSON file per failover for post-incident diagnosis.
+  recording:
+
+    # required: false | default: false
+    # When true, a JSON recording file is written to output_dir after every failover.
+    enabled: false
+
+    # required: false | default: directory of the loaded config file
+    # Directory where recording files are written. Must exist and be writable — validated at startup.
+    # If omitted, files land next to the config file.
+    output_dir: "/var/log/solana-validator-ha/recordings"
 
   # required: true | min: 1
   # Map of HA peers, excluding this node — it is added automatically at startup.
@@ -502,6 +515,63 @@ failover:
 - If any node declares a `priority`, **all** nodes (self + every entry in `failover.peers`) must declare one. A partially-configured cluster is rejected at startup.
 - Priority values must be unique across self and all peers. Duplicates are rejected at startup.
 - All nodes in the cluster should agree on the same priority ordering to avoid races. `solana-validator-ha` cannot enforce cross-node consistency, but logs the effective rank and ranking source (`config priority` vs `IP address`) at takeover time so mismatches are easy to spot.
+
+## Failover Recording
+
+When `failover.recording.enabled: true`, `solana-validator-ha` writes a JSON file to disk after every failover. The file captures everything needed for post-incident diagnosis: the gossip samples leading up to the failover, the full decision timeline, and the outcome.
+
+### File naming
+
+```
+svha-<pubkey>-<timestamp>-<producer>-<from>-to-<to>-recording.json
+```
+
+| Segment | Description |
+|---------|-------------|
+| `<pubkey>` | Active identity pubkey — shared across all HA peers, so files from different nodes for the same failover event share this prefix |
+| `<timestamp>` | UTC time the failover was detected, formatted as `20060102T150405Z` |
+| `<producer>` | `validator.name` of the node that wrote the file |
+| `<from>` | Name of the last known active peer before the failover, or `unknown` |
+| `<to>` | `validator.name` of the node that became active (always a real node name, never `"self"`) |
+
+Example: `svha-VotePubkey1111111111111111111111111111111111-20260331T143022Z-london-chicago-to-london-recording.json`
+
+Because the timestamp is derived from each node's independent poll cycle, files from two nodes for the same failover event will have slightly different timestamps (up to one poll interval apart). Sort by `<pubkey>` first, then `<timestamp>` to find the matching pair.
+
+### What is captured
+
+Each recording file contains a single JSON object with:
+
+- **`schema_version`** — format version for forward-compatible parsing
+- **`node`** — identity of the node that wrote the file (name, public IP, passive pubkey)
+- **`config`** — relevant configuration snapshot (poll interval, leaderless threshold, delinquency bypass, etc.)
+- **`detected_at`** — UTC timestamp when the leaderless condition was first detected
+- **`gossip_samples`** — up to the last 20 gossip samples collected before the failover, each with a timestamp, active/passive peer snapshots (IP, pubkey, vote slot), and the leaderless count at that point
+- **`timeline`** — ordered list of decision events with timestamps and details (e.g. "delinquency bypass triggered", "takeover delay rank=1", "peer took over during delay — aborting")
+- **`outcome`** — what happened: `became_active`, `aborted_peer_took_over`, `aborted_self_not_healthy`, or `aborted_other`
+
+### Configuration
+
+```yaml
+failover:
+  recording:
+    enabled: true
+    output_dir: "/var/log/solana-validator-ha/recordings"  # default: config file directory
+```
+
+The output directory is validated at startup — `solana-validator-ha` will refuse to start if it does not exist or is not writable.
+
+### Replay
+
+The `solana-validator-ha replay` command accepts one or more recording files and prints a merged, chronological timeline across all nodes — useful for correlating what each node observed during the same failover event.
+
+```bash
+solana-validator-ha replay \
+  svha-VotePubkey111111111111111111111111111111111-20260331T143022Z-london-chicago-to-london-recording.json \
+  svha-VotePubkey111111111111111111111111111111111-20260331T143025Z-chicago-chicago-to-london-recording.json
+```
+
+To find the matching file from the other node, filter by the shared `<pubkey>` prefix — all recordings for the same HA cluster carry the same pubkey. The timestamps will differ by a few seconds (each node detects the failover at a different point in its own poll cycle), so sort chronologically within that prefix to find the pair.
 
 ## Development and testing
 

@@ -38,6 +38,7 @@ type Failover struct {
 	Peers                              Peers                          `koanf:"peers"`
 	DelinquentSlotDistanceOverride     DelinquentSlotDistanceOverride `koanf:"delinquent_slot_distance_override"`
 	SelfHealthy                        SelfHealthy                    `koanf:"self_healthy"`
+	Recording                          Recording                      `koanf:"recording"`
 }
 
 // leaderlessConfirmationPollFloor is the minimum allowed value for

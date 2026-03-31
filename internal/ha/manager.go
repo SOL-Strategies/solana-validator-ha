@@ -15,6 +15,7 @@ import (
 	"github.com/sol-strategies/solana-validator-ha/internal/local"
 	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/sol-strategies/solana-validator-ha/internal/prometheus"
+	"github.com/sol-strategies/solana-validator-ha/internal/recording"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
 	"github.com/sol-strategies/solana-validator-ha/internal/updater"
 )
@@ -42,6 +43,10 @@ type Manager struct {
 	peerCount       int
 	initialized     bool
 	logPrefix       string
+	// ring holds the last N gossip samples for pre-failover context in recordings.
+	ring            *recording.Ring
+	// recordingOutputDir is the resolved output directory for failover recordings (empty if disabled).
+	recordingOutputDir string
 }
 
 // NewManager creates a new HA manager from options
@@ -171,6 +176,14 @@ func (m *Manager) initialize() error {
 		Ctx:          m.ctx,
 		LogPrefix:    m.logPrefix,
 	})
+
+	// initialize gossip sample ring buffer (always, regardless of recording setting)
+	m.ring = &recording.Ring{}
+
+	// resolve recording output dir once so it is ready when a failover fires
+	if m.cfg.Failover.Recording.Enabled {
+		m.recordingOutputDir = m.cfg.Failover.Recording.ResolvedOutputDir(m.cfg.File)
+	}
 
 	m.logger.Debug("initialized")
 	m.initialized = true
@@ -312,12 +325,76 @@ func (m *Manager) runConfirmationPollLoop(interval time.Duration) error {
 	}
 }
 
+// buildGossipSample converts the current gossip state into a recording.GossipSample.
+// It must be called immediately after a gossipState.Refresh() while the state is fresh.
+func (m *Manager) buildGossipSample() recording.GossipSample {
+	peerStates := m.gossipState.GetPeerStates()
+	peers := make([]recording.PeerSnapshot, 0, len(m.cfg.Failover.Peers))
+
+	for name, cfgPeer := range m.cfg.Failover.Peers {
+		snap := recording.PeerSnapshot{Name: name, IP: cfgPeer.IP}
+		if ps, ok := peerStates[name]; ok {
+			snap.Pubkey = ps.Pubkey
+			if ps.LastSeenActive {
+				snap.Role = "active"
+			} else {
+				snap.Role = "passive"
+			}
+			// attach slot-distance detail to the peer that triggered delinquency
+			if m.gossipState.ActivePeerIsDelinquent() && ps.LastSeenActive {
+				if d := m.gossipState.GetDelinquencyDetail(); d != nil {
+					snap.LastVoteSlot = &d.LastVoteSlot
+					snap.CurrentSlot = &d.CurrentSlot
+					snap.SlotDistance = &d.SlotDistance
+				}
+			}
+		} else {
+			snap.Role = "missing"
+		}
+		peers = append(peers, snap)
+	}
+
+	return recording.GossipSample{
+		SampledAt:              m.gossipState.PeerStatesRefreshedAt,
+		Peers:                  peers,
+		LeaderlessSamplesCount: m.gossipState.LeaderlessSamplesCount,
+		ActivePeerDelinquent:   m.gossipState.ActivePeerIsDelinquent(),
+		RPCError:               m.gossipState.LastRefreshHadRPCError(),
+	}
+}
+
+// newRecorder creates a Recorder seeded with node/config context and the current ring snapshot.
+func (m *Manager) newRecorder() *recording.Recorder {
+	node := recording.NodeInfo{
+		Name:          m.cfg.Validator.Name,
+		IP:            m.peerSelf.IP,
+		ActivePubkey:  m.cfg.Validator.Identities.ActivePubkey(),
+		PassivePubkey: m.cfg.Validator.Identities.PassivePubkey(),
+	}
+
+	cfg := recording.ConfigSnapshot{
+		PollIntervalDuration:               m.cfg.Failover.PollIntervalDuration.String(),
+		LeaderlessSamplesThreshold:         m.cfg.Failover.LeaderlessSamplesThreshold,
+		LeaderlessConfirmationPollDuration: m.cfg.Failover.LeaderlessConfirmationPollDuration.String(),
+		DelinquencyBypass:                  m.cfg.Failover.DelinquencyBypass,
+	}
+	if m.cfg.Failover.DelinquentSlotDistanceOverride.Enabled {
+		v := m.cfg.Failover.DelinquentSlotDistanceOverride.Value
+		cfg.DelinquentSlotDistanceOverride = &v
+	}
+
+	return recording.New(node, cfg, time.Now().UTC(), m.ring.Snapshot())
+}
+
 // ensureHAState implements basic HA logic
 func (m *Manager) ensureHAState() {
 	m.logger.Debug("ensuring HA")
 
 	// refresh gossip state
 	m.gossipState.Refresh()
+
+	// capture gossip sample into ring buffer on every poll tick (pre-failover context window)
+	m.ring.Add(m.buildGossipSample())
 
 	// refresh metrics
 	m.refreshMetrics()
@@ -332,6 +409,7 @@ func (m *Manager) ensureHAState() {
 
 	// if there is an active peer found in the last failover.leaderless_samples_threshold - we are good
 	// having a lookback grace period is important to allow for RPC glitches and other issues
+	var rec *recording.Recorder
 	if !m.gossipState.LeaderlessSamplesExceedsThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
 		// delinquency fast-path (opt-in): if failover.delinquency_bypass is enabled and the network
 		// has authoritatively declared the active peer delinquent via getVoteAccounts — cluster-wide
@@ -342,12 +420,28 @@ func (m *Manager) ensureHAState() {
 		// "ghost" state (alive in gossip, not voting) that it cannot recover from on its own.
 		if m.cfg.Failover.DelinquencyBypass && m.gossipState.ActivePeerIsDelinquent() {
 			m.logger.Error("active peer declared delinquent by network - bypassing leaderless sample threshold and triggering failover (delinquency_bypass enabled)")
+			if m.cfg.Failover.Recording.Enabled {
+				rec = m.newRecorder()
+				rec.AddEvent("bypass_triggered", fmt.Sprintf("leaderless_count=%d threshold=%d",
+					m.gossipState.LeaderlessSamplesCount, m.cfg.Failover.LeaderlessSamplesThreshold))
+			}
 		} else {
 			m.logger.Debug("active peer found - no failover required")
 			return
 		}
 	} else {
 		m.logger.Error(fmt.Sprintf("no active peer found in the last %d samples - failover required", m.gossipState.LeaderlessSamplesCount))
+		if m.cfg.Failover.Recording.Enabled {
+			rec = m.newRecorder()
+			rec.AddEvent("threshold_reached", fmt.Sprintf("leaderless_count=%d threshold=%d",
+				m.gossipState.LeaderlessSamplesCount, m.cfg.Failover.LeaderlessSamplesThreshold))
+		}
+	}
+
+	// fromNode is the peer that was active before this failover; used in the recording filename.
+	fromNode := m.gossipState.GetLastActivePeer().Name
+	if fromNode == "" {
+		fromNode = "unknown"
 	}
 
 	// if we don't see ourselves in gossip - evaluate whether to become passive
@@ -378,6 +472,11 @@ func (m *Manager) ensureHAState() {
 	// to participate in failover we must be healthy
 	if !m.localState.IsSelfHealthy() {
 		m.logger.Error("we are not healthy - unable to become active in failover")
+		if rec != nil {
+			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+				Result: "aborted_not_healthy", FromNode: fromNode, ToNode: "unknown",
+			})
+		}
 		return
 	}
 
@@ -387,6 +486,11 @@ func (m *Manager) ensureHAState() {
 			"healthy_for", m.localState.SelfHealthyDuration(),
 			"minimum_duration", m.cfg.Failover.SelfHealthy.MinimumDuration,
 		)
+		if rec != nil {
+			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+				Result: "aborted_not_healthy_long_enough", FromNode: fromNode, ToNode: "unknown",
+			})
+		}
 		return
 	}
 
@@ -400,10 +504,23 @@ func (m *Manager) ensureHAState() {
 	// so we begin checks to make sure none of our peers have already taken over as active
 
 	// introduce a rank-based delay to safeguard against multiple nodes trying to become active at the same time
+	delayStart := time.Now()
 	delayApplied, err := m.delayTakeoverAsActive()
 	if err != nil {
 		m.logger.Error(err.Error())
+		if rec != nil {
+			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+				Result: "aborted_delay_error", FromNode: fromNode, ToNode: "unknown",
+			})
+		}
 		return
+	}
+	if rec != nil {
+		if delayApplied {
+			rec.AddEvent("delay_applied", fmt.Sprintf("duration=%s", time.Since(delayStart).Round(time.Millisecond)))
+		} else {
+			rec.AddEvent("rank_0_no_delay", "")
+		}
 	}
 
 	// refresh the peers state to ensure no one else has taken over already - this will reset the leaderless samples count
@@ -412,6 +529,10 @@ func (m *Manager) ensureHAState() {
 	// taken over in the interim - avoiding an unnecessary RPC round trip on the hot path.
 	if delayApplied {
 		m.gossipState.Refresh()
+		if rec != nil {
+			rec.AddSample(m.buildGossipSample())
+			rec.AddEvent("revalidation_refresh", "")
+		}
 	}
 
 	// an undeclared active peer may have appeared during the delay - treat the same as the pre-delay check
@@ -431,6 +552,11 @@ func (m *Manager) ensureHAState() {
 		activePeerState, err := m.gossipState.GetActivePeer()
 		if err != nil {
 			m.logger.Warn("active peer appeared during takeover delay but could not be identified in state - aborting takeover", "error", err)
+			if rec != nil {
+				rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+					Result: "aborted_peer_took_over", FromNode: fromNode, ToNode: "unknown",
+				})
+			}
 			return
 		}
 		m.logger.Warn(fmt.Sprintf("peer %s became active during takeover delay - aborting takeover", activePeerState.Name),
@@ -438,12 +564,35 @@ func (m *Manager) ensureHAState() {
 			"pubkey", activePeerState.Pubkey,
 			"seen_at", activePeerState.LastSeenAtString(),
 		)
+		if rec != nil {
+			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+				Result: "aborted_peer_took_over", FromNode: fromNode, ToNode: activePeerState.Name,
+			})
+		}
 		return
 	}
 
 	// now we know we are healthy, passive, and none of our peers have assumed active role
 	// we can take over as active - this should be idempotent in setting the active role
+	if rec != nil {
+		rec.AddEvent("ensure_active_start", "")
+	}
+	ensureActiveStart := time.Now()
 	m.ensureActive()
+	if rec != nil {
+		duration := time.Since(ensureActiveStart).Round(time.Millisecond)
+		if m.localState.IsSelfActive() {
+			rec.AddEvent("confirmed_active", fmt.Sprintf("duration=%s", duration))
+			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+				Result: "became_active", FromNode: fromNode, ToNode: m.cfg.Validator.Name,
+			})
+		} else {
+			rec.AddEvent("ensure_active_failed", fmt.Sprintf("duration=%s", duration))
+			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+				Result: "became_active_unconfirmed", FromNode: fromNode, ToNode: m.cfg.Validator.Name,
+			})
+		}
+	}
 }
 
 // ensurePassive calls a user-specified command that should be idempotent in setting the passive role
