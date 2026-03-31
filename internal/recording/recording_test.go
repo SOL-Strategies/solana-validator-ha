@@ -164,8 +164,8 @@ func TestRecorder_WriteAsync_FileCreated(t *testing.T) {
 	if !strings.Contains(name, "20260331T143022Z") {
 		t.Errorf("filename should contain timestamp 20260331T143022Z, got %s", name)
 	}
-	if !strings.Contains(name, "london-chicago-to-london") {
-		t.Errorf("filename should contain producer-from-to segment, got %s", name)
+	if !strings.Contains(name, "185_26_11_91") {
+		t.Errorf("filename should contain producer IP (dots as underscores), got %s", name)
 	}
 }
 

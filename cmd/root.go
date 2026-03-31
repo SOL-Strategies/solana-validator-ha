@@ -59,4 +59,5 @@ func init() {
 
 	// Add subcommands here
 	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(replayCmd)
 }
