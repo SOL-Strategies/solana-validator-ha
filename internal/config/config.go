@@ -251,6 +251,15 @@ func (c *Config) validate() error {
 		)
 	}
 
+	// failover.recording: validate output dir is reachable and writable at startup
+	if c.Failover.Recording.Enabled {
+		resolvedDir := c.Failover.Recording.ResolvedOutputDir(c.File)
+		if err := c.Failover.Recording.ValidateOutputDir(resolvedDir); err != nil {
+			return err
+		}
+		c.logger.Infof("failover recording enabled - writing to %s", resolvedDir)
+	}
+
 	return nil
 }
 
