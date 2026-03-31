@@ -256,8 +256,11 @@ func RenderReplay(data *ReplayData) (string, error) {
 		return t.UTC().Format("15:04:05.000Z")
 	}
 	formatPeers := func(peers []PeerSnapshot) string {
-		parts := make([]string, 0, len(peers))
-		for _, p := range peers {
+		sorted := make([]PeerSnapshot, len(peers))
+		copy(sorted, peers)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+		parts := make([]string, 0, len(sorted))
+		for _, p := range sorted {
 			var roleStyled string
 			switch p.Role {
 			case "active":
