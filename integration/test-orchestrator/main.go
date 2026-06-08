@@ -29,7 +29,8 @@ type Scenario struct {
 
 // InitialState describes the cluster state to establish before the scenario runs.
 type InitialState struct {
-	ActiveValidator string `yaml:"active_validator"`
+	ActiveValidator string            `yaml:"active_validator"`
+	ActiveProfiles  map[string]string `yaml:"active_profiles"`
 }
 
 // Step is a single action or assertion within a scenario.
@@ -42,7 +43,8 @@ type Step struct {
 
 	// used by: set_active, disconnect, reconnect, set_unhealthy, set_healthy, set_vote_lag,
 	// set_local_genesis, assert_metric
-	Target string `yaml:"target,omitempty"`
+	Target  string `yaml:"target,omitempty"`
+	Profile string `yaml:"profile,omitempty"`
 
 	// used by: set_phase (tower, migrating or alpenglow)
 	Phase string `yaml:"phase,omitempty"`
@@ -51,9 +53,10 @@ type Step struct {
 	Value uint64 `yaml:"value,omitempty"`
 
 	// used by: assert, assert_metric
-	Timeout     string                       `yaml:"timeout,omitempty"`
-	State       map[string]ValidatorExpected `yaml:"state,omitempty"`
-	ActiveCount *int                         `yaml:"active_count,omitempty"`
+	Timeout        string                       `yaml:"timeout,omitempty"`
+	State          map[string]ValidatorExpected `yaml:"state,omitempty"`
+	ActiveCount    *int                         `yaml:"active_count,omitempty"`
+	ActiveProfiles map[string]string            `yaml:"active_profiles,omitempty"`
 
 	// used by: assert_metric. Passes once Target exports a series of Metric whose labels include
 	// Labels with a value of at least MinValue.
@@ -121,10 +124,12 @@ func loadScenarios(dir string) ([]Scenario, error) {
 
 // mockAction is the control request accepted by the mock's /action endpoint.
 type mockAction struct {
-	Action string `json:"action"`
-	Target string `json:"target"`
-	Phase  string `json:"phase,omitempty"`
-	Value  uint64 `json:"value,omitempty"`
+	Action         string            `json:"action"`
+	Target         string            `json:"target"`
+	Phase          string            `json:"phase,omitempty"`
+	Value          uint64            `json:"value,omitempty"`
+	Profile        string            `json:"profile,omitempty"`
+	ActiveProfiles map[string]string `json:"active_profiles,omitempty"`
 }
 
 func (o *Orchestrator) callAction(action mockAction) error {
@@ -141,12 +146,24 @@ func (o *Orchestrator) callAction(action mockAction) error {
 }
 
 // resetState brings the cluster to a clean initial state before each scenario.
-func (o *Orchestrator) resetState(initialActive string) error {
-	if err := o.callAction(mockAction{Action: "reset", Target: initialActive}); err != nil {
-		return fmt.Errorf("reset: %w", err)
+func (o *Orchestrator) resetState(initial InitialState) error {
+	return o.callAction(mockAction{Action: "reset", Target: initial.ActiveValidator, ActiveProfiles: initial.ActiveProfiles})
+}
+
+func (o *Orchestrator) getActiveProfiles() (map[string]string, error) {
+	resp, err := http.Get(o.mockURL + "/state")
+	if err != nil {
+		return nil, err
 	}
-	log.Printf("[reset] cluster reset: active_validator=%q", initialActive)
-	return nil
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET /state: status %d", resp.StatusCode)
+	}
+	var body struct {
+		ActiveProfiles map[string]string `json:"active_profiles"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&body)
+	return body.ActiveProfiles, err
 }
 
 // ── Metrics polling ───────────────────────────────────────────────────────────
@@ -171,16 +188,21 @@ func (o *Orchestrator) getValidatorStatus(name string) (*ValidatorStatus, error)
 	if err != nil {
 		return &ValidatorStatus{Online: false}, nil
 	}
-	metrics := string(body)
+	return &ValidatorStatus{Role: validatorRoleFromMetrics(string(body)), Online: true}, nil
+}
 
-	role := "unknown"
-	if strings.Contains(metrics, `validator_role="active"`) {
-		role = "active"
-	} else if strings.Contains(metrics, `validator_role="passive"`) {
-		role = "passive"
+func validatorRoleFromMetrics(metrics string) string {
+	for _, line := range strings.Split(metrics, "\n") {
+		if !strings.HasPrefix(line, "solana_validator_ha_metadata{") {
+			continue
+		}
+		for _, role := range []string{"active", "passive"} {
+			if strings.Contains(line, "validator_role="+strconv.Quote(role)) {
+				return role
+			}
+		}
 	}
-
-	return &ValidatorStatus{Role: role, Online: true}, nil
+	return "unknown"
 }
 
 func (o *Orchestrator) getAllStatuses() map[string]*ValidatorStatus {
@@ -211,7 +233,7 @@ func (o *Orchestrator) executeStep(step Step) error {
 		"set_phase", "set_vote_lag", "stall_finalization", "resume_finalization",
 		"set_local_genesis", "exclude_vote_account", "include_vote_account",
 		"remove_bls_key", "restore_bls_key", "fail_cluster_rpc", "isolate", "restore_network":
-		return o.callAction(mockAction{Action: step.Action, Target: step.Target, Phase: step.Phase, Value: step.Value})
+		return o.callAction(mockAction{Action: step.Action, Target: step.Target, Profile: step.Profile, Phase: step.Phase, Value: step.Value})
 
 	case "assert":
 		return o.executeAssert(step)
@@ -260,7 +282,20 @@ func (o *Orchestrator) executeAssert(step Step) error {
 			}
 		}
 
-		if activeCountOK && stateOK {
+		profilesOK := true
+		var activeProfiles map[string]string
+		if len(step.ActiveProfiles) > 0 {
+			var err error
+			activeProfiles, err = o.getActiveProfiles()
+			if err != nil {
+				return fmt.Errorf("reading active profiles: %w", err)
+			}
+			for profile, holder := range step.ActiveProfiles {
+				profilesOK = profilesOK && activeProfiles[profile] == holder
+			}
+		}
+
+		if activeCountOK && stateOK && profilesOK {
 			// Log final passing state
 			var parts []string
 			for name, s := range statuses {
@@ -289,6 +324,9 @@ func (o *Orchestrator) executeAssert(step Step) error {
 				}
 			}
 			parts = append(parts, fmt.Sprintf("active_count=%d(want %d)", count, *step.ActiveCount))
+		}
+		if len(step.ActiveProfiles) > 0 {
+			parts = append(parts, fmt.Sprintf("active_profiles=%v(want %v)", activeProfiles, step.ActiveProfiles))
 		}
 		log.Printf("  waiting... %s", strings.Join(parts, " "))
 		time.Sleep(2 * time.Second)
@@ -382,7 +420,7 @@ func (o *Orchestrator) runScenario(s Scenario) error {
 	}
 
 	// Reset cluster to a clean initial state before the scenario starts.
-	if err := o.resetState(s.InitialState.ActiveValidator); err != nil {
+	if err := o.resetState(s.InitialState); err != nil {
 		return fmt.Errorf("initial reset failed: %w", err)
 	}
 

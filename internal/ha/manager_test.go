@@ -38,16 +38,16 @@ func TestObserveRecording_CapturesTransientRPCIncident(t *testing.T) {
 		SampledAt: detectedAt, RPCError: true, LocalRole: "active",
 		LocalHealthy: true, SelfInGossip: false,
 	}
-	manager.ring.Add(anomaly)
-	assert.True(t, manager.observeRecording(anomaly, false))
-	require.NotNil(t, manager.activeRecorder)
+	manager.profiles[0].ring.Add(anomaly)
+	assert.True(t, manager.observeRecording(manager.profiles[0], anomaly, false))
+	require.NotNil(t, manager.profiles[0].activeRecorder)
 
 	recovered := recording.GossipSample{
 		SampledAt: detectedAt.Add(5 * time.Second), LocalRole: "active",
 		LocalHealthy: true, SelfInGossip: true,
 	}
-	assert.False(t, manager.observeRecording(recovered, false))
-	assert.Nil(t, manager.activeRecorder)
+	assert.False(t, manager.observeRecording(manager.profiles[0], recovered, false))
+	assert.Nil(t, manager.profiles[0].activeRecorder)
 
 	var path string
 	deadline := time.Now().Add(2 * time.Second)
@@ -148,7 +148,6 @@ func TestNewManager(t *testing.T) {
 	assert.NotNil(t, manager.ctx)
 	assert.NotNil(t, manager.cancel)
 	assert.NotNil(t, manager.getPublicIPFunc)
-	assert.Equal(t, 2, manager.peerCount)
 }
 
 func TestNewManager_WithoutPublicIPFunc(t *testing.T) {
@@ -180,12 +179,12 @@ func TestManager_Initialize(t *testing.T) {
 
 	assert.NotNil(t, manager.peerSelf)
 	assert.Equal(t, "192.168.1.100", manager.peerSelf.IP)
-	assert.NotNil(t, manager.gossipState)
+	assert.NotNil(t, manager.profiles[0].gossipState)
 
 	// Check that self was added to peers
-	_, exists := cfg.Failover.Peers["test-validator"]
+	_, exists := manager.profiles[0].Peers["test-validator"]
 	assert.True(t, exists)
-	assert.Equal(t, "192.168.1.100", cfg.Failover.Peers["test-validator"].IP)
+	assert.Equal(t, "192.168.1.100", manager.profiles[0].Peers["test-validator"].IP)
 }
 
 func TestManager_Initialize_WithPublicIPError(t *testing.T) {
@@ -267,7 +266,6 @@ func TestManager_EdgeCases(t *testing.T) {
 
 	// Test with empty peers
 	cfg.Failover.Peers = map[string]config.Peer{}
-	manager.peerCount = 0
 
 	// Initialize should still work
 	err := manager.initialize()
@@ -277,7 +275,6 @@ func TestManager_EdgeCases(t *testing.T) {
 	cfg.Failover.Peers = map[string]config.Peer{
 		"other": {IP: "192.168.1.103", Name: "other-validator"},
 	}
-	manager.peerCount = 1
 
 	err = manager.initialize()
 	assert.NoError(t, err)
@@ -308,7 +305,6 @@ func TestManager_ConcurrentAccess(t *testing.T) {
 			_ = manager.cache
 			_ = manager.logger
 			_ = manager.ctx
-			_ = manager.peerCount
 			done <- true
 		}()
 	}
@@ -366,12 +362,12 @@ func TestManager_InitializationFlow(t *testing.T) {
 	// Verify that all components are properly initialized
 	assert.NotNil(t, manager.peerSelf)
 	assert.Equal(t, "192.168.1.100", manager.peerSelf.IP)
-	assert.NotNil(t, manager.gossipState)
+	assert.NotNil(t, manager.profiles[0].gossipState)
 
 	// Verify that self was added to peers
-	_, exists := cfg.Failover.Peers["test-validator"]
+	_, exists := manager.profiles[0].Peers["test-validator"]
 	assert.True(t, exists)
-	assert.Equal(t, "192.168.1.100", cfg.Failover.Peers["test-validator"].IP)
+	assert.Equal(t, "192.168.1.100", manager.profiles[0].Peers["test-validator"].IP)
 
 	// Verify that the manager is ready to run
 	assert.NotNil(t, manager.ctx)
@@ -466,9 +462,9 @@ func TestManager_ConfigurationEdgeCases(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify that self was added to peers even with empty initial peers
-	_, exists := cfg.Failover.Peers["minimal-validator"]
+	_, exists := manager.profiles[0].Peers["minimal-validator"]
 	assert.True(t, exists)
-	assert.Equal(t, "192.168.1.100", cfg.Failover.Peers["minimal-validator"].IP)
+	assert.Equal(t, "192.168.1.100", manager.profiles[0].Peers["minimal-validator"].IP)
 }
 
 func TestManager_Run_Success(t *testing.T) {
@@ -673,7 +669,7 @@ func TestManager_Run_WithGossipStateIntegration(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify that the manager was properly initialized
-	assert.NotNil(t, manager.gossipState)
+	assert.NotNil(t, manager.profiles[0].gossipState)
 	assert.NotNil(t, manager.peerSelf)
 	assert.Equal(t, "192.168.1.100", manager.peerSelf.IP)
 
@@ -733,7 +729,7 @@ func TestManager_EnsurePassive_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensurePassive - this will use the real RPC client but with dry run
-	manager.ensurePassive()
+	manager.ensurePassive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_passive status
 	state := manager.cache.GetState()
@@ -759,7 +755,7 @@ func TestManager_EnsurePassive_WithPreHookError(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensurePassive - should handle pre hook error gracefully
-	manager.ensurePassive()
+	manager.ensurePassive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_passive status
 	state := manager.cache.GetState()
@@ -783,7 +779,7 @@ func TestManager_EnsurePassive_WithCommandError(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensurePassive - should handle command error gracefully
-	manager.ensurePassive()
+	manager.ensurePassive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_passive status
 	state := manager.cache.GetState()
@@ -805,7 +801,7 @@ func TestManager_EnsurePassive_WithRPCError(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensurePassive - will fail due to RPC errors but should handle gracefully
-	manager.ensurePassive()
+	manager.ensurePassive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_passive status
 	state := manager.cache.GetState()
@@ -827,7 +823,7 @@ func TestManager_EnsurePassive_WithNotPassiveAfterCommand(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensurePassive - will fail due to RPC errors but should handle gracefully
-	manager.ensurePassive()
+	manager.ensurePassive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_passive status
 	state := manager.cache.GetState()
@@ -849,7 +845,7 @@ func TestManager_EnsurePassive_WithNotInGossip(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensurePassive - will fail due to RPC errors but should handle gracefully
-	manager.ensurePassive()
+	manager.ensurePassive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_passive status
 	state := manager.cache.GetState()
@@ -871,7 +867,7 @@ func TestManager_EnsureActive_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensureActive - this will use the real RPC client but with dry run
-	manager.ensureActive()
+	manager.ensureActive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_active status
 	state := manager.cache.GetState()
@@ -897,7 +893,7 @@ func TestManager_EnsureActive_WithPreHookError(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensureActive - should handle pre hook error gracefully
-	manager.ensureActive()
+	manager.ensureActive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_active status
 	state := manager.cache.GetState()
@@ -921,7 +917,7 @@ func TestManager_EnsureActive_WithCommandError(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensureActive - should handle command error gracefully
-	manager.ensureActive()
+	manager.ensureActive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_active status
 	state := manager.cache.GetState()
@@ -943,7 +939,7 @@ func TestManager_EnsureActive_WithRPCError(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensureActive - will fail due to RPC errors but should handle gracefully
-	manager.ensureActive()
+	manager.ensureActive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_active status
 	state := manager.cache.GetState()
@@ -965,7 +961,7 @@ func TestManager_EnsureActive_WithNotActiveAfterCommand(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensureActive - will fail due to RPC errors but should handle gracefully
-	manager.ensureActive()
+	manager.ensureActive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_active status
 	state := manager.cache.GetState()
@@ -988,7 +984,7 @@ func TestManager_EnsureActive_WithDryRun(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensureActive
-	manager.ensureActive()
+	manager.ensureActive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_active status
 	state := manager.cache.GetState()
@@ -1011,7 +1007,7 @@ func TestManager_EnsurePassive_WithDryRun(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call ensurePassive
-	manager.ensurePassive()
+	manager.ensurePassive(manager.profiles[0])
 
 	// Verify that cache was updated with becoming_passive status
 	state := manager.cache.GetState()
@@ -1021,7 +1017,7 @@ func TestManager_EnsurePassive_WithDryRun(t *testing.T) {
 // seedGossipPeers adds synthetic peer states to the manager's gossip state without
 // requiring a real RPC call, enabling unit tests for rank-based takeover logic.
 func seedGossipPeers(m *Manager, peers map[string]gossip.PeerState) {
-	m.gossipState.SetPeerStatesForTest(peers)
+	m.profiles[0].gossipState.SetPeerStatesForTest(peers)
 }
 
 func intPtr(i int) *int {
@@ -1034,7 +1030,7 @@ func TestDelayTakeoverAsActive_NoPeers(t *testing.T) {
 	require.NoError(t, manager.initialize())
 	// gossipState has no peers after init (no Refresh called)
 
-	delayApplied, err := manager.delayTakeoverAsActive()
+	delayApplied, err := manager.delayTakeoverAsActive(manager.profiles[0])
 
 	assert.Error(t, err)
 	assert.False(t, delayApplied)
@@ -1060,7 +1056,7 @@ func TestDelayTakeoverAsActive_Rank0_ConfigPriority(t *testing.T) {
 		"peer1": {IP: peerIP, Name: "peer1"},
 	})
 
-	delayApplied, err := manager.delayTakeoverAsActive()
+	delayApplied, err := manager.delayTakeoverAsActive(manager.profiles[0])
 
 	assert.NoError(t, err)
 	assert.False(t, delayApplied, "rank-0 node should not apply a delay")
@@ -1087,7 +1083,7 @@ func TestDelayTakeoverAsActive_Rank1_ConfigPriority(t *testing.T) {
 	})
 
 	start := time.Now()
-	delayApplied, err := manager.delayTakeoverAsActive()
+	delayApplied, err := manager.delayTakeoverAsActive(manager.profiles[0])
 	elapsed := time.Since(start)
 
 	assert.NoError(t, err)
@@ -1116,7 +1112,7 @@ func TestDelayTakeoverAsActive_SelfNotInRankMap(t *testing.T) {
 		"peer1": {IP: "192.168.1.101", Name: "peer1"},
 	})
 
-	delayApplied, err := manager.delayTakeoverAsActive()
+	delayApplied, err := manager.delayTakeoverAsActive(manager.profiles[0])
 
 	assert.Error(t, err)
 	assert.False(t, delayApplied)
@@ -1138,7 +1134,7 @@ func TestEnsureHAState_DelinquencyBypass_Enabled(t *testing.T) {
 	require.NoError(t, manager.initialize())
 
 	// Freeze gossip state so Refresh() doesn't reset our seeded values.
-	manager.gossipState.SetRefreshNoOpForTest(true)
+	manager.profiles[0].gossipState.SetRefreshNoOpForTest(true)
 
 	// Seed one peer that is NOT self — self (192.168.1.100) will be absent from gossip,
 	// causing isSelfNotInGossip()=true; HasPeers(selfIP)=true so ensurePassive() is reached.
@@ -1147,7 +1143,7 @@ func TestEnsureHAState_DelinquencyBypass_Enabled(t *testing.T) {
 	})
 
 	// Network has declared the active peer delinquent.
-	manager.gossipState.SetActivePeerDelinquentForTest(true)
+	manager.profiles[0].gossipState.SetActivePeerDelinquentForTest(true)
 
 	manager.ensureHAState()
 
@@ -1168,12 +1164,12 @@ func TestEnsureHAState_DelinquencyBypass_Disabled(t *testing.T) {
 	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
 	require.NoError(t, manager.initialize())
 
-	manager.gossipState.SetRefreshNoOpForTest(true)
+	manager.profiles[0].gossipState.SetRefreshNoOpForTest(true)
 	seedGossipPeers(manager, map[string]gossip.PeerState{
 		"peer1": {IP: "192.168.1.101", Name: "peer1"},
 	})
 	// Peer is delinquent, but bypass is disabled — should be treated as "active peer found".
-	manager.gossipState.SetActivePeerDelinquentForTest(true)
+	manager.profiles[0].gossipState.SetActivePeerDelinquentForTest(true)
 
 	manager.ensureHAState()
 
@@ -1192,7 +1188,7 @@ func TestEnsureHAState_BelowThreshold_NoDelinquency_NoFailover(t *testing.T) {
 	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
 	require.NoError(t, manager.initialize())
 
-	manager.gossipState.SetRefreshNoOpForTest(true)
+	manager.profiles[0].gossipState.SetRefreshNoOpForTest(true)
 	seedGossipPeers(manager, map[string]gossip.PeerState{
 		"peer1": {IP: "192.168.1.101", Name: "peer1"},
 	})
@@ -1215,6 +1211,7 @@ func TestEnsureHAState_BelowThreshold_NoDelinquency_NoFailover(t *testing.T) {
 // the check and proceeds all the way to ensureActive(), setting cache to "becoming_active".
 func TestEnsureHAState_DelinquencyBypass_Rank0_ProceedsToEnsureActive(t *testing.T) {
 	cfg := createTestConfig()
+	cfg.Validator.RPCURL = newJSONRPCStub(t, map[string]any{"getIdentity": map[string]any{"identity": cfg.Validator.Identities.PassivePubkey()}})
 	cfg.Failover.LeaderlessSamplesThreshold = 3
 	cfg.Failover.DelinquencyBypass = true
 	// rank-0 by IP: self (185.0.0.1) < peer (186.0.0.1)
@@ -1228,7 +1225,7 @@ func TestEnsureHAState_DelinquencyBypass_Rank0_ProceedsToEnsureActive(t *testing
 	require.NoError(t, manager.initialize())
 
 	// Freeze gossip so seeded state persists across the ensureHAState call.
-	manager.gossipState.SetRefreshNoOpForTest(true)
+	manager.profiles[0].gossipState.SetRefreshNoOpForTest(true)
 
 	// Self is in gossip (passive), peer is also in gossip (no one active).
 	// LeaderlessSamplesCount is 1 — below threshold=3 — simulating the first delinquency sample.
@@ -1236,8 +1233,8 @@ func TestEnsureHAState_DelinquencyBypass_Rank0_ProceedsToEnsureActive(t *testing
 		"test-validator": {IP: selfIP, Name: "test-validator", LastSeenActive: false},
 		"peer1":          {IP: peerIP, Name: "peer1", LastSeenActive: false},
 	})
-	manager.gossipState.LeaderlessSamplesCount = 1
-	manager.gossipState.SetActivePeerDelinquentForTest(true)
+	manager.profiles[0].gossipState.LeaderlessSamplesCount = 1
+	manager.profiles[0].gossipState.SetActivePeerDelinquentForTest(true)
 
 	// Local state: healthy and healthy long enough to be a failover candidate.
 	manager.localState.SetForceHealthyForTest(true)
@@ -1268,7 +1265,7 @@ func TestObserveRecording_RecoveryRetention(t *testing.T) {
 				defer m.cancel()
 				start := time.Now().UTC()
 				healthy := recording.GossipSample{SampledAt: start.Add(-5 * time.Second), SelfInGossip: true, LocalRole: "passive", LocalHealthy: true}
-				m.ring.Add(healthy)
+				m.profiles[0].ring.Add(healthy)
 				anomaly := healthy
 				anomaly.SampledAt = start
 				switch kind {
@@ -1279,8 +1276,8 @@ func TestObserveRecording_RecoveryRetention(t *testing.T) {
 				case "leaderless":
 					anomaly.LeaderlessSamplesCount = 1
 				}
-				m.ring.Add(anomaly)
-				require.True(t, m.observeRecording(anomaly, false))
+				m.profiles[0].ring.Add(anomaly)
+				require.True(t, m.observeRecording(m.profiles[0], anomaly, false))
 				waitForRecordingWrites(t)
 				partials, err := filepath.Glob(filepath.Join(dir, "*.partial"))
 				require.NoError(t, err)
@@ -1288,12 +1285,12 @@ func TestObserveRecording_RecoveryRetention(t *testing.T) {
 				recovered := healthy
 				recovered.SampledAt = start.Add(5 * time.Second)
 				// Recovery must also clear suppression for the next independent incident.
-				m.repeatOutcome = "aborted_not_healthy"
-				m.repeatOutcomeWriteFailed = &atomic.Bool{}
-				require.False(t, m.observeRecording(recovered, false))
-				require.Nil(t, m.activeRecorder)
-				require.Empty(t, m.repeatOutcome)
-				require.Nil(t, m.repeatOutcomeWriteFailed)
+				m.profiles[0].repeatOutcome = "aborted_not_healthy"
+				m.profiles[0].repeatOutcomeWriteFailed = &atomic.Bool{}
+				require.False(t, m.observeRecording(m.profiles[0], recovered, false))
+				require.Nil(t, m.profiles[0].activeRecorder)
+				require.Empty(t, m.profiles[0].repeatOutcome)
+				require.Nil(t, m.profiles[0].repeatOutcomeWriteFailed)
 				waitForRecordingWrites(t)
 				entries, err := os.ReadDir(dir)
 				require.NoError(t, err)
@@ -1343,15 +1340,16 @@ func TestFinishRecording_Retention(t *testing.T) {
 				m := NewManager(NewManagerOptions{Cfg: cfg})
 				defer m.cancel()
 				m.recordingOutputDir = dir
-				m.activeRecorder = recording.New(recording.NodeInfo{}, recording.ConfigSnapshot{}, time.Now(), nil)
-				m.checkpointRecording()
+				profile := &profileRuntime{logger: m.logger}
+				profile.activeRecorder = recording.New(recording.NodeInfo{}, recording.ConfigSnapshot{}, time.Now(), nil)
+				m.checkpointRecording(profile)
 				// Excluded outcomes must be filtered before duplicate suppression.
 				if !retain {
-					m.repeatOutcome = outcome
-					m.repeatOutcomeWriteFailed = &atomic.Bool{}
+					profile.repeatOutcome = outcome
+					profile.repeatOutcomeWriteFailed = &atomic.Bool{}
 				}
-				m.finishRecording(outcome, "from", "to")
-				require.Nil(t, m.activeRecorder)
+				m.finishRecording(profile, outcome, "from", "to")
+				require.Nil(t, profile.activeRecorder)
 				waitForRecordingWrites(t)
 				entries, err := os.ReadDir(dir)
 				require.NoError(t, err)
@@ -1360,8 +1358,8 @@ func TestFinishRecording_Retention(t *testing.T) {
 					require.Equal(t, outcome, waitForRecordingOutcome(t, dir))
 				} else {
 					require.Empty(t, entries)
-					require.Empty(t, m.repeatOutcome)
-					require.Nil(t, m.repeatOutcomeWriteFailed)
+					require.Empty(t, profile.repeatOutcome)
+					require.Nil(t, profile.repeatOutcomeWriteFailed)
 				}
 			})
 		}

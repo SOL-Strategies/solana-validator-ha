@@ -1,0 +1,48 @@
+name: shared-alpenglow-stall-and-host-down
+description: A cluster stall suppresses vote-only failover. A subsequent host outage still allows takeover for that profile.
+
+initial_state:
+  active_profiles:
+    main: validator-1
+    secondary: validator-3
+
+steps:
+  - name: switch the cluster to Alpenglow
+    action: set_phase
+    phase: alpenglow
+
+  - name: wait for warm-up
+    action: wait
+    duration: 12s
+
+  - name: stall finalization
+    action: stall_finalization
+
+  - name: the shared backup observes the stall veto
+    action: assert_metric
+    target: validator-2
+    metric: solana_validator_ha_failover_vetoes_total
+    labels:
+      reason: cluster_stalled
+    min_value: 1
+    timeout: 45s
+
+  - name: both profiles retain their original holders
+    action: assert
+    timeout: 10s
+    active_count: 2
+    active_profiles:
+      main: validator-1
+      secondary: validator-3
+
+  - name: main disappears from gossip
+    action: disconnect
+    target: validator-1
+
+  - name: the shared backup takes main while secondary retains its holder
+    action: assert
+    timeout: 45s
+    active_count: 2
+    active_profiles:
+      main: validator-2
+      secondary: validator-3

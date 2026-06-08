@@ -218,6 +218,9 @@ func (p *State) evaluateAlpenglowVoting(node solanagorpc.GetClusterNodesResult) 
 	if err != nil {
 		return alpenglowVerdict{name: VerdictUnknown, why: "failed to get vote lag: " + err.Error()}
 	}
+	if p.votePubkey != nil && lag.Found && !lag.NodePubkey.Equals(node.Pubkey) {
+		return alpenglowVerdict{name: VetoVoteAccountExcluded, why: fmt.Sprintf("configured vote account %s belongs to identity %s, expected %s", votePubkey, lag.NodePubkey, node.Pubkey)}
+	}
 	if !lag.Found || lag.ActivatedStake == 0 {
 		// Forget the vote account so a replacement is discovered on the next Refresh.
 		delete(p.votePubkeyCache, node.Pubkey.String())
@@ -348,6 +351,9 @@ func (p *State) networkStakeGateOpen(now time.Time) (ratio float64, open bool) {
 // unfiltered getVoteAccounts call on first use. Unstaked and delinquent accounts are included,
 // so found is false only when the RPC knows no vote account for the identity.
 func (p *State) findVotePubkey(ctx context.Context, identity solana.PublicKey) (votePubkey solana.PublicKey, found bool, err error) {
+	if p.votePubkey != nil {
+		return *p.votePubkey, true, nil
+	}
 	if cached, ok := p.votePubkeyCache[identity.String()]; ok {
 		return cached, true, nil
 	}

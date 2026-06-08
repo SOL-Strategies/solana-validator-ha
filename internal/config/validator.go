@@ -37,12 +37,12 @@ type Validator struct {
 // a public key is supplied, the daemon operates in pubkey-only mode for that
 // identity. The keypair file takes precedence if both are set.
 type ValidatorIdentities struct {
-	ActiveKeyPairFile   string               `koanf:"active"`
-	ActiveKeyPair       *solanago.PrivateKey  `koanf:"-"`
-	ActivePubkeyStr     string               `koanf:"active_pubkey"`
-	PassiveKeyPairFile  string               `koanf:"passive"`
-	PassiveKeyPair      *solanago.PrivateKey  `koanf:"-"`
-	PassivePubkeyStr    string               `koanf:"passive_pubkey"`
+	ActiveKeyPairFile  string               `koanf:"active"`
+	ActiveKeyPair      *solanago.PrivateKey `koanf:"-"`
+	ActivePubkeyStr    string               `koanf:"active_pubkey"`
+	PassiveKeyPairFile string               `koanf:"passive"`
+	PassiveKeyPair     *solanago.PrivateKey `koanf:"-"`
+	PassivePubkeyStr   string               `koanf:"passive_pubkey"`
 }
 
 // ActivePubkey returns the active identity public key string.
@@ -63,23 +63,15 @@ func (v *ValidatorIdentities) PassivePubkey() string {
 
 // Load loads the identities from keypair files or validates pubkey strings.
 func (v *ValidatorIdentities) Load() error {
-	// Load active identity
-	if v.ActiveKeyPairFile != "" {
-		activeKeyPair, err := solanago.PrivateKeyFromSolanaKeygenFile(v.ActiveKeyPairFile)
-		if err != nil {
-			return fmt.Errorf("failed to load active identity file: %w", err)
-		}
-		v.ActiveKeyPair = &activeKeyPair
-		v.ActivePubkeyStr = activeKeyPair.PublicKey().String()
-	} else if v.ActivePubkeyStr != "" {
-		if _, err := solanago.PublicKeyFromBase58(v.ActivePubkeyStr); err != nil {
-			return fmt.Errorf("failed to parse active_pubkey as base58 public key: %w", err)
-		}
-	} else {
-		return fmt.Errorf("either validator.identities.active (keypair file) or validator.identities.active_pubkey (base58 pubkey) must be set")
+	if err := v.LoadActive(); err != nil {
+		return err
 	}
+	return v.LoadPassive()
+}
 
-	// Load passive identity
+// LoadPassive loads only the passive identity from a keypair file or validates
+// passive_pubkey. Multi-profile configs keep active identities under profiles.
+func (v *ValidatorIdentities) LoadPassive() error {
 	if v.PassiveKeyPairFile != "" {
 		passiveKeyPair, err := solanago.PrivateKeyFromSolanaKeygenFile(v.PassiveKeyPairFile)
 		if err != nil {
@@ -94,7 +86,26 @@ func (v *ValidatorIdentities) Load() error {
 	} else {
 		return fmt.Errorf("either validator.identities.passive (keypair file) or validator.identities.passive_pubkey (base58 pubkey) must be set")
 	}
+	return nil
+}
 
+// LoadActive loads only the active identity from a keypair file or validates
+// active_pubkey. Used by profiles.
+func (v *ValidatorIdentities) LoadActive() error {
+	if v.ActiveKeyPairFile != "" {
+		activeKeyPair, err := solanago.PrivateKeyFromSolanaKeygenFile(v.ActiveKeyPairFile)
+		if err != nil {
+			return fmt.Errorf("failed to load active identity file: %w", err)
+		}
+		v.ActiveKeyPair = &activeKeyPair
+		v.ActivePubkeyStr = activeKeyPair.PublicKey().String()
+	} else if v.ActivePubkeyStr != "" {
+		if _, err := solanago.PublicKeyFromBase58(v.ActivePubkeyStr); err != nil {
+			return fmt.Errorf("failed to parse active_pubkey as base58 public key: %w", err)
+		}
+	} else {
+		return fmt.Errorf("either validator.identities.active (keypair file) or validator.identities.active_pubkey (base58 pubkey) must be set")
+	}
 	return nil
 }
 
@@ -137,10 +148,7 @@ func (v *Validator) Validate() error {
 		}
 	}
 
-	// Only validate identities if they've been loaded
-	activeLoaded := v.Identities.ActiveKeyPair != nil || v.Identities.ActivePubkeyStr != ""
-	passiveLoaded := v.Identities.PassiveKeyPair != nil || v.Identities.PassivePubkeyStr != ""
-	if activeLoaded && passiveLoaded {
+	if v.Identities.ActivePubkey() != "" && v.Identities.PassivePubkey() != "" {
 		return v.Identities.Validate()
 	}
 

@@ -59,6 +59,10 @@ their docker IP); `isolate` also freezes that validator's local processed slot.
 |---|---|
 | `14-network-isolation` | Cluster RPC down with the local slot moving → active stays; local slot also frozen → active demotes itself and a passive takes over |
 
+### Shared backup profiles
+
+Run `make integration-test-shared` to start the shared-backup suite. It uses the same mock as the single-group suite and its own profile fixtures. Validator 1 serves only the main profile. Validators 2 and 3 can cover two profiles. The tests check simultaneous failures, busy peers, ranked takeover, Alpenglow cluster stalls, and local genesis eligibility. The suites use the same host ports, so run them sequentially.
+
 ## Failover Logic
 
 The current system uses a **first-responder wins** approach:

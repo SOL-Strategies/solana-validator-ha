@@ -29,7 +29,9 @@ type Config struct {
 	// Prometheus is the Prometheus metrics configuration
 	Prometheus Prometheus `koanf:"prometheus"`
 	// Failover is the failover decision parameters
-	Failover Failover `koanf:"failover"`
+	Failover              Failover          `koanf:"failover"`
+	Profiles              Profiles          `koanf:"profiles"`
+	KnownActiveIdentities map[string]string `koanf:"known_active_identities"`
 	// Update holds update-check settings
 	Update Update `koanf:"update"`
 	// File is the file that the config was loaded from
@@ -125,6 +127,15 @@ func (c *Config) LoadFromFile(filePath string) error {
 		return fmt.Errorf("error loading config file: %w", err)
 	}
 
+	if k.Exists("profiles") && (k.Exists("validator.identities.active") ||
+		k.Exists("validator.identities.active_pubkey") || k.Exists("failover.peers") ||
+		k.Exists("failover.priority")) {
+		return fmt.Errorf("profiles cannot be combined with validator.identities.active, validator.identities.active_pubkey, failover.peers, or failover.priority")
+	}
+	if k.Exists("profiles") {
+		c.Profiles = make(Profiles)
+	}
+
 	// Unmarshal into this config struct
 	if err := k.Unmarshal("", c); err != nil {
 		return fmt.Errorf("error unmarshaling config: %w", err)
@@ -139,13 +150,41 @@ func (c *Config) Initialize() error {
 	c.setDefaults()
 
 	// load identity key pair files
-	if err := c.Validator.Identities.Load(); err != nil {
-		return err
+	if c.Profiles == nil {
+		if err := c.Validator.Identities.Load(); err != nil {
+			return err
+		}
+	} else {
+		if c.Validator.Identities.ActiveKeyPairFile != "" || c.Validator.Identities.ActivePubkey() != "" ||
+			c.Failover.Peers != nil || c.Failover.Priority != nil {
+			return fmt.Errorf("profiles cannot be combined with legacy active identity and peer settings")
+		}
+		if err := c.Validator.Identities.LoadPassive(); err != nil {
+			return err
+		}
+		if err := c.Profiles.Load(); err != nil {
+			return err
+		}
+		if err := c.Profiles.Validate(); err != nil {
+			return err
+		}
 	}
 
 	// validate configuration (after identity files are loaded)
 	if err := c.validate(); err != nil {
 		return err
+	}
+
+	if err := c.validateKnownActiveIdentities(); err != nil {
+		return err
+	}
+	if c.Profiles != nil {
+		for _, profile := range c.Profiles.Enabled() {
+			if _, _, err := c.ProfileRoles(profile); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	// render failover commands, args and hooks
@@ -185,7 +224,7 @@ func (c *Config) validate() error {
 		return err
 	}
 
-	err = c.Failover.Validate()
+	err = c.Failover.validate(c.Profiles != nil)
 	if err != nil {
 		return err
 	}

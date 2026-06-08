@@ -112,8 +112,8 @@ func TestEnsureHAState_ReportsClusterRPCOutageWithoutActing(t *testing.T) {
 	cfg.Cluster.RPCURLCooldownDuration = time.Minute
 	cfg.Validator.RPCURL = server.URL
 	manager := newTakeoverCandidate(t, cfg, selfIP)
-	manager.gossipState.SetRefreshNoOpForTest(false)
-	manager.gossipState.LeaderlessSamplesCount = 0 // the active peer was visible until the outage began
+	manager.profiles[0].gossipState.SetRefreshNoOpForTest(false)
+	manager.profiles[0].gossipState.LeaderlessSamplesCount = 0 // the active peer was visible until the outage began
 	threshold := cfg.Failover.LeaderlessSamplesThreshold
 
 	for poll := 1; poll < threshold; poll++ {
@@ -130,7 +130,7 @@ func TestEnsureHAState_ReportsClusterRPCOutageWithoutActing(t *testing.T) {
 		require.Equal(t, poll, state.ClusterRPCFailures)
 		require.True(t, state.ClusterRPCOutage)
 		require.Equal(t, "idle", state.FailoverStatus, "an RPC outage must not trigger a takeover")
-		require.Zero(t, manager.gossipState.LeaderlessSamplesCount, "failed polls must not count as leaderless")
+		require.Zero(t, manager.profiles[0].gossipState.LeaderlessSamplesCount, "failed polls must not count as leaderless")
 	}
 
 	clusterDown.Store(false)

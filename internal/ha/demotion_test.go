@@ -69,9 +69,9 @@ func newDemotionCandidate(t *testing.T, localRPCURL string, recordingDir string)
 	if err := manager.initialize(); err != nil {
 		t.Fatalf("initialize() error = %v", err)
 	}
-	manager.gossipState.SetRefreshNoOpForTest(true)
+	manager.profiles[0].gossipState.SetRefreshNoOpForTest(true)
 	seedGossipPeers(manager, map[string]gossip.PeerState{"peer1": {IP: "192.168.1.101", Name: "peer1"}})
-	manager.gossipState.LeaderlessSamplesCount = cfg.Failover.LeaderlessSamplesThreshold
+	manager.profiles[0].gossipState.LeaderlessSamplesCount = cfg.Failover.LeaderlessSamplesThreshold
 	return manager
 }
 
@@ -100,7 +100,7 @@ func TestEnsurePassive_Outcomes(t *testing.T) {
 				local.mu.Unlock()
 			}
 
-			if got := manager.ensurePassive(); got != tt.want {
+			if got := manager.ensurePassive(manager.profiles[0]); got != tt.want {
 				t.Errorf("ensurePassive() = %q, want %q", got, tt.want)
 			}
 		})

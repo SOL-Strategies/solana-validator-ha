@@ -10,6 +10,10 @@ import (
 
 // RoleCommandTemplateData represents data available for command templates
 type RoleCommandTemplateData struct {
+	ProfileName                string
+	ProfilePriority            int
+	VoteAccountPubkey          string
+	AuthorizedVoterPubkey      string
 	ActiveIdentityKeypairFile  string
 	ActiveIdentityPubkey       string
 	PassiveIdentityKeypairFile string
@@ -67,6 +71,37 @@ func (r *Role) RenderCommands(data RoleCommandTemplateData) (err error) {
 	}
 
 	return nil
+}
+
+// RenderedCopy returns a rendered copy of the role without mutating the source config.
+func (r Role) RenderedCopy(data RoleCommandTemplateData) (Role, error) {
+	rendered := Role{
+		Name:    r.Name,
+		Command: r.Command,
+		Args:    append([]string(nil), r.Args...),
+		Hooks: Hooks{
+			Pre:  copyHooks(r.Hooks.Pre),
+			Post: copyHooks(r.Hooks.Post),
+		},
+	}
+	if r.Env != nil {
+		rendered.Env = make(map[string]string, len(r.Env))
+		for k, v := range r.Env {
+			rendered.Env[k] = v
+		}
+	}
+	if err := rendered.RenderCommands(data); err != nil {
+		return Role{}, err
+	}
+	return rendered, nil
+}
+
+func copyHooks(hooks []Hook) []Hook {
+	copied := append([]Hook(nil), hooks...)
+	for i := range copied {
+		copied[i].Args = append([]string(nil), copied[i].Args...)
+	}
+	return copied
 }
 
 func (r *Role) renderCommandAndArgs(data RoleCommandTemplateData) (err error) {

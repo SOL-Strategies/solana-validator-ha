@@ -1,0 +1,84 @@
+validator:
+  name: "validator-3"
+  rpc_url: "http://mock-solana:8899?validator=validator-3"
+  public_ip_service_urls: ["http://mock-solana:8899/public-ip?validator=validator-3"]
+  identities:
+    passive_pubkey: "5dXttfrjFEEExmZhVmVAdw2LzepNAhFYJTUgPCDk8CYD"
+
+cluster:
+  name: "mainnet-beta"
+  rpc_urls: ["http://mock-cluster:8899"]
+  consensus:
+    detection_interval_duration: "3s"
+
+prometheus:
+  port: 9090
+  static_labels:
+    environment: "shared-backup-integration-test"
+    validator: "validator-3"
+
+failover:
+  poll_interval_duration: "3s"
+  leaderless_samples_threshold: 3
+  alpenglow:
+    warmup_slots: 16
+
+  self_healthy:
+    minimum_duration: "5s"
+    poll_interval_duration: "2s"
+
+  active:
+    command: "curl"
+    args:
+      - "-sf"
+      - "-X"
+      - "POST"
+      - "-H"
+      - "Content-Type: application/json"
+      - "-d"
+      - '{"action":"set_active","target":"{{ .SelfName }}","profile":"{{ .ProfileName }}","vote_pubkey":"{{ .VoteAccountPubkey }}","authorized_voter":"{{ .AuthorizedVoterPubkey }}"}'
+      - "http://mock-solana:8899/action"
+
+  passive:
+    command: "curl"
+    args:
+      - "-sf"
+      - "-X"
+      - "POST"
+      - "-H"
+      - "Content-Type: application/json"
+      - "-d"
+      - '{"action":"set_passive","target":"{{ .SelfName }}","profile":"{{ .ProfileName }}"}'
+      - "http://mock-solana:8899/action"
+
+profiles:
+  main:
+    priority: 0
+    identities:
+      active_pubkey: "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
+    vote_pubkey: "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
+    authorized_voter: "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
+    peers:
+      validator-1:
+        ip: "10.0.0.100"
+        priority: 0
+      validator-2:
+        ip: "10.0.0.101"
+        priority: 1
+      validator-3:
+        ip: "10.0.0.102"
+        priority: 2
+
+  secondary:
+    priority: 1
+    identities:
+      active_pubkey: "SysvarC1ock11111111111111111111111111111111"
+    vote_pubkey: "SysvarC1ock11111111111111111111111111111111"
+    authorized_voter: "SysvarRecentB1ockHashes11111111111111111111"
+    peers:
+      validator-3:
+        ip: "10.0.0.102"
+        priority: 0
+      validator-2:
+        ip: "10.0.0.101"
+        priority: 1

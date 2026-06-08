@@ -33,10 +33,13 @@ CONFIG["identity-keyfile"]=""
 CONFIG["role"]=""
 CONFIG["rpc-url"]=""
 CONFIG["tower-file"]=""
+CONFIG["vote-history-file"]=""
+CONFIG["service"]=""
 # optional - override defaults if your layout differs
 CONFIG["user"]="solana"
 CONFIG["ledger-dir"]="/mnt/ledger"
 CONFIG["firedancer-config"]="/home/solana/config.toml"
+CONFIG["firedancer-bin"]="firedancer"
 
 # convenience poor man's logger with echo to be quick
 logger() {
@@ -78,11 +81,14 @@ Set the role of the validator
 $0 [flags]
 
 Flags:
-    --client                   <client> (required) client (one of: agave, jito-solana, firedancer)
+    --client                   <client> (required) client (one of: agave, jito-solana, firedancer, firebam)
     --identity-keyfile         <file>   (required) identity keyfile
     --role                     <role>   (required) role to transition to (one of: active, passive)
     --rpc-url                  <url>    (required) local validator rpc url
-    --tower-file               <file>   (required) tower file
+    --tower-file               <file>   (required for Agave/Jito-Solana) TowerBFT tower file
+    --vote-history-file        <file>   (required for Firedancer/FireBAM activation) latest signed vote history
+    --firedancer-bin            <path>   (optional) Firedancer or FireBAM control binary (default: firedancer)
+    --service                   <unit>   (optional) validator systemd unit
     --firedancer-config        <file>   (optional) firedancer config file (default: /home/solana/config.toml)
     --ledger-dir               <dir>    (optional) ledger directory (default: /mnt/ledger)
     --user                     <user>   (optional) user to run set identity commands as (default: solana)
@@ -97,16 +103,16 @@ parse_args() {
   [ $# -eq 0 ] && print_usage 1
 
   # required fields - validated non-empty after parsing
-  local required_fields=("client" "identity-keyfile" "role" "rpc-url" "tower-file")
+  local required_fields=("client" "identity-keyfile" "role" "rpc-url")
 
   # parse args
   while [ $# -gt 0 ]; do
     case $1 in
-    --role | --client | --identity-keyfile | --rpc-url | --tower-file | --user | --ledger-dir | --firedancer-config)
+    --role | --client | --identity-keyfile | --rpc-url | --tower-file | --user | --ledger-dir | --firedancer-config | --firedancer-bin | --vote-history-file | --service)
       CONFIG["${1#--}"]="$2"
       shift 2
       ;;
-    --role=* | --client=* | --identity-keyfile=* | --rpc-url=* | --tower-file=* | --user=* | --ledger-dir=* | --firedancer-config=*)
+    --role=* | --client=* | --identity-keyfile=* | --rpc-url=* | --tower-file=* | --user=* | --ledger-dir=* | --firedancer-config=* | --firedancer-bin=* | --vote-history-file=* | --service=*)
       local key="${1#--}"
       key="${key%%=*}"
       local value="${1#*=}"
@@ -142,18 +148,25 @@ parse_args() {
   fi
   logger info "retrieved identity from file" keyfile "${keyfile}" pubkey "${CONFIG["identity-pubkey"]}"
 
-  # ensure client is one of: agave, jito-solana, firedancer and set service and set-identity command accordingly
   case "${CONFIG["client"]}" in
-  "firedancer")
-    CONFIG["service"]="firedancer.service"
-    CONFIG["set-identity-command"]="fdctl set-identity --config ${CONFIG["firedancer-config"]} --force ${CONFIG["identity-keyfile"]}"
+  firedancer | firebam)
+    CONFIG["service"]="${CONFIG["service"]:-firedancer.service}"
+    local command
+    printf -v command '%q set-identity --config %q' "${CONFIG["firedancer-bin"]}" "${CONFIG["firedancer-config"]}"
+    if [ "${CONFIG["role"]}" = "active" ]; then
+      local history="${CONFIG["vote-history-file"]}"
+      [ -n "${history}" ] || logger fatal "Firedancer/FireBAM activation requires --vote-history-file"
+      printf -v command '%s --vote-history-file %q' "${command}" "${history}"
+    fi
+    printf -v 'CONFIG[set-identity-command]' '%s %q' "${command}" "${keyfile}"
     ;;
   agave | jito-solana)
-    CONFIG["service"]="sol.service"
-    CONFIG["set-identity-command"]="agave-validator --ledger ${CONFIG["ledger-dir"]} set-identity ${CONFIG["identity-keyfile"]}"
+    [ -n "${CONFIG["tower-file"]}" ] || logger fatal "Agave/Jito-Solana requires --tower-file"
+    CONFIG["service"]="${CONFIG["service"]:-sol.service}"
+    printf -v 'CONFIG[set-identity-command]' 'agave-validator --ledger %q set-identity %q' "${CONFIG["ledger-dir"]}" "${keyfile}"
     ;;
   *)
-    logger fatal "unknown client: ${CONFIG["client"]}" got "${CONFIG["client"]}" want "agave|jito-solana|firedancer"
+    logger fatal "unknown client: ${CONFIG["client"]}" want "agave|jito-solana|firedancer|firebam"
     ;;
   esac
 }
@@ -248,6 +261,9 @@ run_as_user() {
 
 remove_tower_file() {
   local tower_file="${CONFIG["tower-file"]}"
+  case "${CONFIG["client"]}" in
+    firedancer | firebam) return ;;
+  esac
   if [ -f "${tower_file}" ]; then
     logger info "removing" file "${tower_file}"
     rm -f "${tower_file}"

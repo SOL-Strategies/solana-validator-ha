@@ -59,14 +59,14 @@ func TestEnsureHAState_PostDelayRefreshRPCFailureAndRecovery(t *testing.T) {
 	cfg.Validator.RPCURL = server.URL
 	dir := enableRecording(cfg, t)
 	manager := newTakeoverCandidate(t, cfg, selfIP)
-	manager.gossipState.SetRefreshNoOpForTest(false)
+	manager.profiles[0].gossipState.SetRefreshNoOpForTest(false)
 
 	manager.ensureHAState()
 	// Wait for background writes before assertions that could end the test early.
 	outcome := waitForRecordingOutcome(t, dir)
 
 	require.Equal(t, int32(2), clusterCalls.Load(), "initial and post-delay refreshes must reach RPC")
-	require.True(t, manager.gossipState.LastRefreshHadRPCError())
+	require.True(t, manager.profiles[0].gossipState.LastRefreshHadRPCError())
 	require.Equal(t, "idle", manager.cache.GetState().FailoverStatus, "failed revalidation must abort promotion")
 	require.Equal(t, "aborted_revalidation_failed", outcome)
 
@@ -76,6 +76,6 @@ func TestEnsureHAState_PostDelayRefreshRPCFailureAndRecovery(t *testing.T) {
 	manager.ensureHAState()
 
 	require.Equal(t, int32(4), clusterCalls.Load(), "the next poll must refresh and revalidate again")
-	require.False(t, manager.gossipState.LastRefreshHadRPCError(), "successful refresh must clear the RPC error")
+	require.False(t, manager.profiles[0].gossipState.LastRefreshHadRPCError(), "successful refresh must clear the RPC error")
 	require.Equal(t, "becoming_active", manager.cache.GetState().FailoverStatus, "recovery must allow another takeover attempt")
 }

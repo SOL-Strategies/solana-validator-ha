@@ -38,8 +38,20 @@ type State struct {
 	// Alpenglow holds signals that are only tracked in the Alpenglow phase; nil otherwise.
 	Alpenglow *AlpenglowState
 
+	// Profiles is populated for named HA profiles. Treat published maps as immutable.
+	Profiles map[string]ProfileState
+
 	// Timestamps
 	LastUpdated time.Time
+}
+
+// ProfileState is the last published HA snapshot of one named profile.
+type ProfileState struct {
+	Role               string
+	PeerCount          int
+	SelfInGossip       bool
+	FailoverStatus     string
+	ActiveVoteLagSlots *uint64
 }
 
 // AlpenglowState holds the signals that are only tracked while the cluster runs Alpenglow.

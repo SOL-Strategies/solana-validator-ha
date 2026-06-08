@@ -107,7 +107,7 @@ func TestEnsureActivePreservesExitError(t *testing.T) {
 	cfg.Failover.Active = config.Role{Name: "active", Command: "/bin/sh", Args: []string{"-c", "exit 7"}}
 	manager := newTakeoverCandidate(t, cfg, "185.0.0.1")
 	t.Cleanup(manager.cancel)
-	err := manager.ensureActive()
+	err := manager.ensureActive(manager.profiles[0])
 	var exitErr *exec.ExitError
 	require.True(t, errors.As(err, &exitErr))
 	require.Equal(t, 7, exitErr.ExitCode())

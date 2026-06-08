@@ -1,0 +1,29 @@
+name: dedicated-primary-busy-backup
+description: A primary that only serves main retains its role when its only visible backup is busy with secondary.
+
+initial_state:
+  active_profiles:
+    main: validator-1
+    secondary: validator-2
+
+steps:
+  - name: remove the other backup from gossip
+    action: disconnect
+    target: validator-3
+
+  - name: main stops landing votes
+    action: set_vote_lag
+    target: validator-1
+    value: 200
+
+  - name: allow the leaderless threshold to pass
+    action: wait
+    duration: 18s
+
+  - name: the dedicated primary retains main
+    action: assert
+    timeout: 10s
+    active_count: 2
+    active_profiles:
+      main: validator-1
+      secondary: validator-2

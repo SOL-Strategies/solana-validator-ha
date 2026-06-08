@@ -3,6 +3,8 @@ package prometheus
 import (
 	"fmt"
 	"net/http"
+	"slices"
+	"sync/atomic"
 
 	"github.com/charmbracelet/log"
 	"github.com/prometheus/client_golang/prometheus"
@@ -24,6 +26,7 @@ const (
 	selfInGossipLabelName    = "self_in_gossip"
 	consensusPhaseLabelName  = "phase"
 	verdictLabelName         = "verdict"
+	profileLabelName         = "profile"
 	vetoReasonLabelName      = "reason"
 )
 
@@ -39,7 +42,7 @@ type Metrics struct {
 	config           *config.Config
 	logger           *log.Logger
 	cache            *cache.Cache
-	server           *http.Server
+	server           atomic.Pointer[http.Server]
 	registry         *prometheus.Registry
 	commonLabelNames []string
 
@@ -50,6 +53,11 @@ type Metrics struct {
 	failoverStatus         *prometheus.GaugeVec
 	updateAvailable        *prometheus.GaugeVec
 	recordingWriteFailures prometheus.Counter
+	profileMetadata        *prometheus.GaugeVec
+	profilePeerCount       *prometheus.GaugeVec
+	profileSelfInGossip    *prometheus.GaugeVec
+	profileFailoverStatus  *prometheus.GaugeVec
+	profileVoteLag         *prometheus.GaugeVec
 
 	// Consensus metrics
 	consensusPhase           *prometheus.GaugeVec
@@ -171,6 +179,7 @@ func (m *Metrics) initMetrics() {
 	})
 
 	m.initConsensusMetrics()
+	m.initProfileMetrics()
 
 	// Register all metrics
 	m.registry.MustRegister(m.metadata)
@@ -193,6 +202,51 @@ func (m *Metrics) initMetrics() {
 	m.registry.MustRegister(m.failoverVetoes)
 
 	m.logger.Debug("initialized Prometheus metrics")
+}
+
+func (m *Metrics) initProfileMetrics() {
+	profileLabels := slices.DeleteFunc(slices.Clone(m.commonLabelNames), func(label string) bool {
+		return label == profileLabelName
+	})
+	profileLabels = append(profileLabels, profileLabelName)
+	newGauge := func(name, help string, extraLabels ...string) *prometheus.GaugeVec {
+		gauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: metricsNamespacePrefix + name,
+			Help: help,
+		}, append(extraLabels, profileLabels...))
+		m.registry.MustRegister(gauge)
+		return gauge
+	}
+	m.profileMetadata = newGauge("profile_metadata", "Current occupancy of a named HA profile (active, passive, busy, or unknown)", validatorRoleLabelName)
+	m.profilePeerCount = newGauge("profile_peer_count", "Number of peers seen in gossip for a named HA profile")
+	m.profileSelfInGossip = newGauge("profile_self_in_gossip", "Whether this node sees itself in gossip for a named HA profile")
+	m.profileFailoverStatus = newGauge("profile_failover_status", "Current failover status for a named HA profile", failoverStatusLabelName)
+	m.profileVoteLag = newGauge("profile_active_vote_lag_slots", "Slot lag of the named profile's active vote account, when measured")
+}
+
+func (m *Metrics) exportProfileMetrics(state *cache.State) {
+	if len(state.Profiles) == 0 {
+		return
+	}
+	m.profileMetadata.Reset()
+	m.profilePeerCount.Reset()
+	m.profileSelfInGossip.Reset()
+	m.profileFailoverStatus.Reset()
+	m.profileVoteLag.Reset()
+	for name, profile := range state.Profiles {
+		labels := m.getCommonLabels(state)
+		labels[profileLabelName] = name
+		labels[validatorRoleLabelName] = profile.Role
+		m.profileMetadata.With(labels).Set(1)
+		delete(labels, validatorRoleLabelName)
+		m.profilePeerCount.With(labels).Set(float64(profile.PeerCount))
+		m.profileSelfInGossip.With(labels).Set(boolToFloat(profile.SelfInGossip))
+		if profile.ActiveVoteLagSlots != nil {
+			m.profileVoteLag.With(labels).Set(float64(*profile.ActiveVoteLagSlots))
+		}
+		labels[failoverStatusLabelName] = profile.FailoverStatus
+		m.profileFailoverStatus.With(labels).Set(1)
+	}
 }
 
 // initConsensusMetrics creates the metrics that describe the consensus phase and the Alpenglow
@@ -249,14 +303,15 @@ func (m *Metrics) StartServer(port int) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))
 
-	m.server = &http.Server{
+	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: mux,
 	}
+	m.server.Store(server)
 
 	m.logger.Debug("starting Prometheus metrics server", "port", port)
 
-	err := m.server.ListenAndServe()
+	err := server.ListenAndServe()
 	if err != nil {
 		m.logger.Error("Prometheus metrics server failed", "error", err)
 	}
@@ -265,8 +320,8 @@ func (m *Metrics) StartServer(port int) error {
 
 // StopServer stops the Prometheus metrics HTTP server
 func (m *Metrics) StopServer() error {
-	if m.server != nil {
-		return m.server.Close()
+	if server := m.server.Load(); server != nil {
+		return server.Close()
 	}
 	return nil
 }
@@ -288,6 +343,7 @@ func (m *Metrics) RefreshMetrics() {
 	m.exportMetricFailoverStatus(&state)
 	m.exportMetricUpdateAvailable(&state)
 	m.exportConsensusMetrics(&state)
+	m.exportProfileMetrics(&state)
 
 	m.logger.Debug("metrics refreshed",
 		validatorRoleLabelName, state.Role,

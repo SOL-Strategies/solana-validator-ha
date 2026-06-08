@@ -23,7 +23,7 @@ func newNotVotingActive(t *testing.T, peers map[string]gossip.PeerState, recordi
 	local.identity = manager.cfg.Validator.Identities.ActivePubkey()
 	local.mu.Unlock()
 	seedGossipPeers(manager, peers)
-	manager.gossipState.SetNotVotingActivePeerForTest(gossip.PeerState{
+	manager.profiles[0].gossipState.SetNotVotingActivePeerForTest(gossip.PeerState{
 		Name:   manager.cfg.Validator.Name,
 		IP:     manager.peerSelf.IP,
 		Pubkey: manager.cfg.Validator.Identities.ActivePubkey(),
@@ -75,10 +75,10 @@ func readRecordingOutcome(t *testing.T, path string) string {
 func TestEnsureHAState_NotVotingActiveCountsAsInGossip(t *testing.T) {
 	manager := newNotVotingActive(t, map[string]gossip.PeerState{}, "")
 
-	if !manager.isSelfInGossip() {
+	if !manager.isSelfInGossip(manager.profiles[0]) {
 		t.Error("isSelfInGossip() = false, want true: we hold the active identity in gossip")
 	}
-	if !manager.buildGossipSample().SelfInGossip {
+	if !manager.buildGossipSample(manager.profiles[0]).SelfInGossip {
 		t.Error("recording sample SelfInGossip = false, want true")
 	}
 }
@@ -122,18 +122,18 @@ func TestEnsureHAState_RepeatedNoActionOutcomeIsRecordedOnce(t *testing.T) {
 	waitForRecordings(t, dir, 1)
 
 	// the votes land again: the condition clears, so the next occurrence is a new incident
-	manager.gossipState.SetNotVotingActivePeerForTest(gossip.PeerState{})
+	manager.profiles[0].gossipState.SetNotVotingActivePeerForTest(gossip.PeerState{})
 	seedGossipPeers(manager, map[string]gossip.PeerState{
 		manager.cfg.Validator.Name: {IP: manager.peerSelf.IP, Name: manager.cfg.Validator.Name, Pubkey: manager.cfg.Validator.Identities.ActivePubkey(), LastSeenActive: true},
 	})
-	manager.gossipState.LeaderlessSamplesCount = 0
+	manager.profiles[0].gossipState.LeaderlessSamplesCount = 0
 	manager.ensureHAState()
 
 	seedGossipPeers(manager, map[string]gossip.PeerState{})
-	manager.gossipState.SetNotVotingActivePeerForTest(gossip.PeerState{
+	manager.profiles[0].gossipState.SetNotVotingActivePeerForTest(gossip.PeerState{
 		Name: manager.cfg.Validator.Name, IP: manager.peerSelf.IP, Pubkey: manager.cfg.Validator.Identities.ActivePubkey(),
 	})
-	manager.gossipState.LeaderlessSamplesCount = manager.cfg.Failover.LeaderlessSamplesThreshold
+	manager.profiles[0].gossipState.LeaderlessSamplesCount = manager.cfg.Failover.LeaderlessSamplesThreshold
 	manager.ensureHAState()
 
 	for _, got := range waitForRecordings(t, dir, 2) {

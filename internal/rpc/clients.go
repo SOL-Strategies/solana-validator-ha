@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -36,6 +37,8 @@ type Client struct {
 	urlLabels map[string]string
 	// clients is a map of RPC clients, keyed by the rpc URL
 	clients map[string]*rpc.Client
+	// rotationMu protects endpoint rotation when identity and health share this client.
+	rotationMu sync.Mutex
 	// lastSuccessfulURL tracks the last URL that succeeded to avoid it for throttling protection
 	lastSuccessfulURL string
 	// urlCooldowns tracks when rate-limited / access-forbidden / unreachable URLs may be retried again
@@ -133,6 +136,9 @@ func (c *Client) getURLsToTry() []string {
 		return c.urls
 	}
 
+	c.rotationMu.Lock()
+	defer c.rotationMu.Unlock()
+
 	now := time.Now()
 	activeURLs := make([]string, 0, len(c.urls))
 	coolingURLs := make([]string, 0)
@@ -165,8 +171,10 @@ func (c *Client) getURLsToTry() []string {
 // coolDown deprioritises url for the client's cooldown and warns once per cooldown window.
 func (c *Client) coolDown(url, method, msg string) {
 	now := time.Now()
+	c.rotationMu.Lock()
 	alreadyCooling := c.urlCooldowns[url].After(now)
 	c.urlCooldowns[url] = now.Add(c.urlCooldown)
+	c.rotationMu.Unlock()
 	if !alreadyCooling {
 		c.logger.Warn(msg, "method", method, "url", c.urlLabel(url), "cooldown", c.urlCooldown)
 	}
@@ -212,7 +220,9 @@ func executeWithRetry[T any](c *Client, ctx context.Context, op rpcOperation[T])
 		}
 
 		// Success! Update the last successful URL
+		c.rotationMu.Lock()
 		c.lastSuccessfulURL = url
+		c.rotationMu.Unlock()
 		return result, nil
 	}
 
@@ -394,6 +404,7 @@ func decodeFeatureStatus(data []byte) (FeatureStatus, error) {
 type VoteLag struct {
 	// Found is false when the node returned no vote account for the requested pubkey.
 	Found          bool
+	NodePubkey     solana.PublicKey
 	LastVote       uint64
 	ActivatedStake uint64
 	ProcessedSlot  uint64
@@ -431,6 +442,7 @@ func (c *Client) GetVoteLag(ctx context.Context, votePubkey solana.PublicKey) (V
 			for _, account := range slices.Concat(accounts.Current, accounts.Delinquent) {
 				if account.VotePubkey.Equals(votePubkey) {
 					lag.Found = true
+					lag.NodePubkey = account.NodePubkey
 					lag.LastVote = account.LastVote
 					lag.ActivatedStake = account.ActivatedStake
 					break

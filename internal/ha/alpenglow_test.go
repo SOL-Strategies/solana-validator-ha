@@ -46,18 +46,21 @@ func newTakeoverCandidate(t *testing.T, cfg *config.Config, selfIP string) *Mana
 	t.Helper()
 	const peerIP = "185.0.0.2"
 	cfg.Failover.Peers = map[string]config.Peer{"peer1": {IP: peerIP, Name: "peer1"}}
+	if cfg.Validator.RPCURL == "http://localhost:8899" {
+		cfg.Validator.RPCURL = newJSONRPCStub(t, map[string]any{"getIdentity": map[string]any{"identity": cfg.Validator.Identities.PassivePubkey()}})
+	}
 	cfg.Failover.PollIntervalDuration = 10 * time.Millisecond // keeps the rank-1 delay short
 	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: func() (string, error) { return selfIP, nil }})
 	if err := manager.initialize(); err != nil {
 		t.Fatalf("initialize() error = %v", err)
 	}
 
-	manager.gossipState.SetRefreshNoOpForTest(true)
+	manager.profiles[0].gossipState.SetRefreshNoOpForTest(true)
 	seedGossipPeers(manager, map[string]gossip.PeerState{
 		"test-validator": {IP: selfIP, Name: "test-validator"},
 		"peer1":          {IP: peerIP, Name: "peer1"},
 	})
-	manager.gossipState.LeaderlessSamplesCount = cfg.Failover.LeaderlessSamplesThreshold
+	manager.profiles[0].gossipState.LeaderlessSamplesCount = cfg.Failover.LeaderlessSamplesThreshold
 	manager.localState.SetForceHealthyForTest(true)
 	manager.localState.SetHealthySinceForTest(time.Now().Add(-time.Hour))
 	return manager
@@ -120,8 +123,11 @@ func TestEnsureHAState_LocalAlpenglowGenesis(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rpcURL := newJSONRPCStub(t, map[string]any{"getAgGenesisCert": tt.localGenesisCert})
 			cfg := createTestConfig()
+			rpcURL := newJSONRPCStub(t, map[string]any{
+				"getAgGenesisCert": tt.localGenesisCert,
+				"getIdentity":      map[string]any{"identity": cfg.Validator.Identities.PassivePubkey()},
+			})
 			cfg.Cluster.Consensus.Mode = config.ConsensusModeAlpenglow
 			cfg.Cluster.RPCURLs = []string{rpcURL}
 			cfg.Validator.RPCURL = rpcURL
@@ -193,7 +199,7 @@ func TestEnsureHAState_PostDelayVeto(t *testing.T) {
 				dir = enableRecording(cfg, t)
 			}
 			manager := newTakeoverCandidate(t, cfg, "185.0.0.3") // rank 1, so the post-delay re-check runs
-			manager.gossipState.SetVoteEvidenceForTest(gossip.LeaderlessReasonVoteLag, tt.veto, tt.streakHasGossipAbsent)
+			manager.profiles[0].gossipState.SetVoteEvidenceForTest(gossip.LeaderlessReasonVoteLag, tt.veto, tt.streakHasGossipAbsent)
 
 			manager.ensureHAState()
 
@@ -239,9 +245,9 @@ func TestEnsureHAState_PostDelayRefreshRPCError(t *testing.T) {
 				dir = enableRecording(cfg, t)
 			}
 			manager := newTakeoverCandidate(t, cfg, tt.selfIP)
-			manager.gossipState.SetVoteEvidenceForTest(gossip.LeaderlessReasonVoteLag, "", false)
+			manager.profiles[0].gossipState.SetVoteEvidenceForTest(gossip.LeaderlessReasonVoteLag, "", false)
 			// Refresh is a no-op in these tests, so the flag stands for the post-delay refresh
-			manager.gossipState.SetLastRefreshHadRPCErrorForTest(true)
+			manager.profiles[0].gossipState.SetLastRefreshHadRPCErrorForTest(true)
 
 			manager.ensureHAState()
 
@@ -298,7 +304,10 @@ func TestEnsureHAState_RechecksLocalGenesisBeforePromotion(t *testing.T) {
 			cfg.Cluster.Consensus.Mode = config.ConsensusModeAuto
 			cfg.Cluster.RPCURLs = []string{cluster.URL}
 			cfg.Cluster.RPCTimeoutDuration = time.Second
-			cfg.Validator.RPCURL = newJSONRPCStub(t, map[string]any{"getAgGenesisCert": nil}) // not migrated
+			cfg.Validator.RPCURL = newJSONRPCStub(t, map[string]any{
+				"getAgGenesisCert": nil, // not migrated
+				"getIdentity":      map[string]any{"identity": cfg.Validator.Identities.PassivePubkey()},
+			})
 			dir := enableRecording(cfg, t)
 			manager := newTakeoverCandidate(t, cfg, tt.selfIP)
 
@@ -322,8 +331,8 @@ func TestEnsureHAState_DelinquencyBypassIgnoredOutsideTower(t *testing.T) {
 	cfg.Validator.RPCURL = rpcURL
 	cfg.Failover.DelinquencyBypass = true
 	manager := newTakeoverCandidate(t, cfg, "185.0.0.1")
-	manager.gossipState.LeaderlessSamplesCount = 1 // below the threshold; only the bypass could act
-	manager.gossipState.SetActivePeerDelinquentForTest(true)
+	manager.profiles[0].gossipState.LeaderlessSamplesCount = 1 // below the threshold; only the bypass could act
+	manager.profiles[0].gossipState.SetActivePeerDelinquentForTest(true)
 
 	manager.ensureHAState()
 

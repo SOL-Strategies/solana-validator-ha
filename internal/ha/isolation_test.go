@@ -114,8 +114,8 @@ func newIsolatedActiveCandidate(t *testing.T, local *localValidatorStub) *Manage
 	local.identity = cfg.Validator.Identities.ActivePubkey()
 	local.mu.Unlock()
 
-	manager.gossipState.SetRefreshNoOpForTest(true)
-	manager.gossipState.SetLastRefreshHadRPCErrorForTest(true)
+	manager.profiles[0].gossipState.SetRefreshNoOpForTest(true)
+	manager.profiles[0].gossipState.SetLastRefreshHadRPCErrorForTest(true)
 	manager.isolation.clusterRPCFailures = cfg.Failover.LeaderlessSamplesThreshold - 1 // this poll reaches it
 	local.mu.Lock()
 	manager.isolation.localSlot = local.slot

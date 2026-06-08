@@ -11,6 +11,7 @@ var supportedSchemaVersions = []string{"1", "2", SchemaVersion}
 type NodeInfo struct {
 	Name          string `json:"name"`
 	IP            string `json:"ip"`
+	Profile       string `json:"profile,omitempty"`
 	ActivePubkey  string `json:"active_pubkey"`
 	PassivePubkey string `json:"passive_pubkey"`
 	BinaryVersion string `json:"binary_version,omitempty"`
@@ -18,6 +19,9 @@ type NodeInfo struct {
 
 // ConfigSnapshot captures the failover-relevant config values at the time of the event.
 type ConfigSnapshot struct {
+	Profile                            string  `json:"profile,omitempty"`
+	VotePubkey                         string  `json:"vote_pubkey,omitempty"`
+	AuthorizedVoterPubkey              string  `json:"authorized_voter,omitempty"`
 	PollIntervalDuration               string  `json:"poll_interval_duration"`
 	LeaderlessSamplesThreshold         int     `json:"leaderless_samples_threshold"`
 	LeaderlessConfirmationPollDuration string  `json:"leaderless_confirmation_poll_duration"`
@@ -36,7 +40,8 @@ type PeerSnapshot struct {
 	Name         string  `json:"name"`
 	IP           string  `json:"ip"`
 	Pubkey       string  `json:"pubkey,omitempty"`
-	Role         string  `json:"role"` // "active", "passive", "missing"
+	Role         string  `json:"role"` // "active", "passive", "busy", "missing"
+	BusyProfile  string  `json:"busy_profile,omitempty"`
 	LastVoteSlot *uint64 `json:"last_vote_slot,omitempty"`
 	CurrentSlot  *uint64 `json:"current_slot,omitempty"`
 	SlotDistance *uint64 `json:"slot_distance,omitempty"`

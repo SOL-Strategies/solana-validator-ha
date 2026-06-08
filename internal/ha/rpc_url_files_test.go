@@ -51,7 +51,7 @@ func TestManager_FileRPCURL(t *testing.T) {
 	assert.NotContains(t, logs.String(), endpoint)
 	assert.NotContains(t, logs.String(), "path-secret")
 	assert.NotContains(t, logs.String(), "query-secret")
-	manager.gossipState.Refresh()
+	manager.profiles[0].gossipState.Refresh()
 	assert.Positive(t, requests.Load(), "resolved URL must reach the RPC transport")
-	assert.False(t, manager.gossipState.LastRefreshHadRPCError())
+	assert.False(t, manager.profiles[0].gossipState.LastRefreshHadRPCError())
 }

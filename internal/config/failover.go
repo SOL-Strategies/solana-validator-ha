@@ -57,6 +57,10 @@ type DelinquentSlotDistanceOverride struct {
 }
 
 func (f *Failover) Validate() error {
+	return f.validate(false)
+}
+
+func (f *Failover) validate(namedProfiles bool) error {
 	// failover.poll_interval must be greater than zero
 	if f.PollIntervalDuration == 0 {
 		return fmt.Errorf("failover.poll_interval_duration must be greater than zero")
@@ -133,6 +137,10 @@ func (f *Failover) Validate() error {
 		if hook.Command == "" {
 			return fmt.Errorf("failover.passive.hooks.post must have a command")
 		}
+	}
+
+	if namedProfiles {
+		return nil
 	}
 
 	// failover.peers must be at least 1

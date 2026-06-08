@@ -1,0 +1,25 @@
+name: shared-stable-operation
+description: >
+  Two profiles are active on different validators. The shared backup is passive
+  and no profile should fail over while both active validators are healthy.
+
+initial_state:
+  active_profiles:
+    main: validator-1
+    secondary: validator-3
+
+steps:
+  - name: assert stable shared profile holders
+    action: assert
+    timeout: 30s
+    active_count: 2
+    active_profiles:
+      main: validator-1
+      secondary: validator-3
+    state:
+      validator-1:
+        role: active
+      validator-2:
+        role: passive
+      validator-3:
+        role: active

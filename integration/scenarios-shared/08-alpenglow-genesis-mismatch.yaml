@@ -1,0 +1,37 @@
+name: shared-alpenglow-genesis-mismatch
+description: An unmigrated shared backup declines main while another profile stays active.
+
+initial_state:
+  active_profiles:
+    main: validator-1
+    secondary: validator-3
+
+steps:
+  - name: the shared backup reports a different Alpenglow genesis
+    action: set_local_genesis
+    target: validator-2
+    value: 1
+
+  - name: main disappears from gossip
+    action: disconnect
+    target: validator-1
+
+  - name: the shared backup records a local genesis veto
+    action: assert_metric
+    target: validator-2
+    metric: solana_validator_ha_failover_vetoes_total
+    labels:
+      reason: local_genesis_mismatch
+    min_value: 1
+    timeout: 45s
+
+  - name: secondary stays active and main has no active validator
+    action: assert
+    timeout: 10s
+    active_count: 1
+    active_profiles:
+      main: ""
+      secondary: validator-3
+    state:
+      validator-2:
+        role: passive

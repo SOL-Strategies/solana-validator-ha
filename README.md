@@ -73,6 +73,8 @@ failover:
 - **🏁 First-Responder Failover**: Race-based failover with deterministic rank-based delay so the highest-priority eligible passive validator assumes the active role. Default ordering is ascending IP sort; operators can override with explicit `failover.priority` per node
 - **📼 Incident Recording**: Optionally checkpoints timestamped JSON from the first anomalous network observation through recovery, demotion, or takeover — for multi-node diagnosis and replay
 
+- **Shared backups** use named HA profiles. One passive validator can cover multiple active identities and take over one profile at a time. [HA profiles and shared backups](docs/profile-migration.md)
+
 ## Upgrading from v0.1.24
 
 Existing configuration files remain valid, but this release changes failover behavior:
@@ -120,6 +122,8 @@ Download and install the latest [release](https://github.com/SOL-Strategies/sola
    ```
 
 ## Configuration
+
+The configuration below describes a single HA group. It continues to work as-is. Promotion requires local RPC to report the configured passive identity. For named groups, shared backups, and profile-specific role commands, see the [profile configuration guide](docs/profile-migration.md).
 
 ```yaml
 log:
@@ -786,7 +790,12 @@ The application exposes Prometheus metrics on the configured port (default: 9090
 - **`solana_validator_ha_update_available`**: Whether a newer release is available (1=yes, 0=no). Updated on startup and periodically per `update.check_interval_duration`
 - **`solana_validator_ha_recording_write_failures_total`**: Number of failed recording checkpoints or final writes
 
+### Profile metrics
+
+Named profiles also export `solana_validator_ha_profile_metadata`, `solana_validator_ha_profile_peer_count`, `solana_validator_ha_profile_self_in_gossip`, `solana_validator_ha_profile_failover_status`, and `solana_validator_ha_profile_active_vote_lag_slots`. They carry a `profile` label. On a shared backup the gauges without a profile label for vote lag and gossip describe the held profile when active and the highest-priority profile otherwise.
+
 ### Consensus Metrics
+
 - **`solana_validator_ha_consensus_phase{phase}`**: 1 for the current phase (`unknown`, `tower`, `migrating`, `alpenglow`), 0 for the others
 - **`solana_validator_ha_alpenglow_genesis_slot`**: Alpenglow genesis slot, 0 if unknown
 - **`solana_validator_ha_active_vote_lag_slots`**: Slots the active's last vote trailed the reference slot in the last sample, when measured

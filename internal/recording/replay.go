@@ -388,6 +388,11 @@ func RenderReplay(data *ReplayData) (string, error) {
 				roleStyled = lipgloss.NewStyle().Foreground(lipgloss.Color("#00B894")).Render("active")
 			case "passive":
 				roleStyled = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B6B")).Render("passive")
+			case "busy":
+				roleStyled = lipgloss.NewStyle().Foreground(lipgloss.Color("#E1A325")).Render("busy")
+				if p.BusyProfile != "" {
+					roleStyled += "(" + p.BusyProfile + ")"
+				}
 			default:
 				roleStyled = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Render("missing")
 			}
@@ -445,7 +450,7 @@ const replayTemplate = `{{ HRule }}
   {{ Muted "files:" }}
 {{ range .Nodes }}    {{ Muted "-" }} {{ LightGrey .File }} {{ Muted (printf "[schema=%s binary=%s]" .SchemaVersion (ValueOrUnknown .Info.BinaryVersion)) }}
 {{ end }}  {{ Muted "outcomes:" }}
-{{ range .Nodes }}    {{ Node .Info.Name }}  {{ if .Outcome }}{{ Outcome .Outcome.Result }}{{ if .Outcome.Error }} {{ LightGrey .Outcome.Error }}{{ end }}{{ else }}{{ Outcome "incomplete" }}{{ end }}  {{ Muted (printf "poll=%s threshold=%d delinquency_bypass=%t" .Config.PollIntervalDuration .Config.LeaderlessSamplesThreshold .Config.DelinquencyBypass) }}{{ if .Config.ConsensusMode }} {{ Muted (printf "consensus_mode=%s vote_lag_threshold=%d" .Config.ConsensusMode .Config.VoteLagSlotsThreshold) }}{{ end }}
+{{ range .Nodes }}    {{ Node .Info.Name }}{{ if .Info.Profile }} {{ Muted (printf "profile=%s" .Info.Profile) }}{{ end }}  {{ if .Outcome }}{{ Outcome .Outcome.Result }}{{ if .Outcome.Error }} {{ LightGrey .Outcome.Error }}{{ end }}{{ else }}{{ Outcome "incomplete" }}{{ end }}  {{ Muted (printf "poll=%s threshold=%d delinquency_bypass=%t" .Config.PollIntervalDuration .Config.LeaderlessSamplesThreshold .Config.DelinquencyBypass) }}{{ if .Config.ConsensusMode }} {{ Muted (printf "consensus_mode=%s vote_lag_threshold=%d" .Config.ConsensusMode .Config.VoteLagSlotsThreshold) }}{{ end }}
 {{ end }}
   {{ Muted "TTFL=time to first leaderless" }}
 {{ HRule }}

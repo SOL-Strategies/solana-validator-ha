@@ -39,6 +39,8 @@ type State struct {
 	peerStatesByName               map[string]PeerState // these are the peers that are currently in the solana network, keyed by their name
 	configPeers                    config.Peers
 	activePubkey                   string
+	votePubkey                     *solana.PublicKey
+	knownActiveIdentities          map[string]string
 	selfIP                         string
 	clusterRPC                     *rpc.Client
 	logger                         *log.Logger
@@ -107,6 +109,8 @@ type PeerState struct {
 	IP string
 	// Pubkey is the public key of the peer
 	Pubkey string
+	// BusyProfile is the other HA group this peer is serving.
+	BusyProfile string
 	// LastSeenAt is the last time the peer was seen by the solana network
 	LastSeenAtUTC time.Time
 	// LastSeenActive is true if the peer was the active validator when it was last seen
@@ -120,6 +124,8 @@ type Options struct {
 	ClusterRPC                     *rpc.Client
 	DelinquentSlotDistanceOverride config.DelinquentSlotDistanceOverride
 	ActivePubkey                   string
+	VotePubkey                     *solana.PublicKey
+	KnownActiveIdentities          map[string]string
 	SelfIP                         string
 	ConfigPeers                    config.Peers
 	LogPrefix                      string
@@ -132,6 +138,8 @@ func NewState(opts Options) *State {
 		logger:                         logging.New(opts.LogPrefix, "gossip_state"),
 		clusterRPC:                     opts.ClusterRPC,
 		activePubkey:                   opts.ActivePubkey,
+		votePubkey:                     opts.VotePubkey,
+		knownActiveIdentities:          opts.KnownActiveIdentities,
 		selfIP:                         opts.SelfIP,
 		configPeers:                    opts.ConfigPeers,
 		peerStatesByName:               make(map[string]PeerState),
@@ -155,6 +163,15 @@ func (p *State) Refresh() {
 	if p.skipRefreshForTest {
 		return
 	}
+	clusterNodes, err := p.clusterRPC.GetClusterNodes(context.Background())
+	p.RefreshFromClusterNodes(clusterNodes, err)
+}
+
+// RefreshFromClusterNodes applies a cluster gossip snapshot shared by all profiles in a poll.
+func (p *State) RefreshFromClusterNodes(clusterNodes []*solanagorpc.GetClusterNodesResult, err error) {
+	if p.skipRefreshForTest {
+		return
+	}
 	if !p.legendPrinted {
 		p.printStateEmojiKeyFormat()
 		p.legendPrinted = true
@@ -173,7 +190,6 @@ func (p *State) Refresh() {
 	// Get cluster nodes. On failure, clear the peer states and leave the leaderless
 	// sample count unchanged, so RPC failures do not advance the failover threshold.
 	// Sustained failures are reported by clusterRPCOutageMonitor in internal/ha.
-	clusterNodes, err := p.clusterRPC.GetClusterNodes(context.Background())
 	if err != nil {
 		p.lastRefreshHadRPCError = true
 		p.peerStatesByName = latestPeerStatesByName
@@ -197,8 +213,16 @@ func (p *State) Refresh() {
 	// look through all the returned gossip nodes, looking for the ones that are in the config
 	isLeaderlessSample := true
 	for _, node := range clusterNodes {
+		if node == nil || node.Gossip == nil {
+			continue
+		}
 		nodeIP := strings.Split(*node.Gossip, ":")[0]
-		isActiveNode := node.Pubkey.String() == p.activePubkey
+		nodePubkey := node.Pubkey.String()
+		isActiveNode := nodePubkey == p.activePubkey
+		busyProfile := ""
+		if !isActiveNode {
+			busyProfile = p.knownActiveIdentities[nodePubkey]
+		}
 
 		// if the peer is not the config - enjoy the code stench of some nested if statements to figure shit out....
 		if p.isNonConfigDeclaredPeerWithIP(nodeIP) {
@@ -260,15 +284,15 @@ func (p *State) Refresh() {
 			Name:               peerName,
 			IP:                 nodeIP,
 			LastSeenAtUTC:      time.Now().UTC(),
-			Pubkey:             node.Pubkey.String(),
+			Pubkey:             nodePubkey,
+			BusyProfile:        busyProfile,
 			LastSeenActive:     isActiveNode,
 			IsRecentlyInGossip: slices.Contains(p.missingGossipIPs, nodeIP),
 		}
 
-		// Active presence takes precedence: if this peer was already confirmed active in this
-		// refresh cycle (possible when both old and new CRDS identity entries briefly coexist
-		// during a gossip identity transition), don't overwrite it with the stale passive entry.
-		if existing, ok := latestPeerStatesByName[peerName]; ok && existing.LastSeenActive {
+		// CRDS can retain the prior passive identity during a role change.
+		if existing, ok := latestPeerStatesByName[peerName]; ok &&
+			(existing.LastSeenActive || existing.BusyProfile != "" && !isActiveNode) {
 			continue
 		}
 
@@ -394,7 +418,7 @@ func (p *State) Refresh() {
 
 // printStateEmojiKeyFormat prints the emoji legend once, called automatically on first Refresh.
 func (p *State) printStateEmojiKeyFormat() {
-	p.logger.Info("🟢=active 🟡=passive 🔴=active but not voting ❓=missing")
+	p.logger.Info("🟢=active 🟡=passive 🔴=active but not voting 🟠=busy ❓=missing")
 }
 
 // peersStateString returns a compact string representation of all configured peers for logging.
@@ -412,6 +436,7 @@ func (p *State) peersStateString() string {
 		discovered  bool
 		active      bool
 		notVoting   bool
+		busyProfile string
 		isSelf      bool
 		pubkeyShort string
 	}
@@ -422,6 +447,7 @@ func (p *State) peersStateString() string {
 		if state, ok := p.peerStatesByName[name]; ok {
 			info.discovered = true
 			info.active = state.LastSeenActive
+			info.busyProfile = state.BusyProfile
 			info.pubkeyShort = state.Pubkey[:7] // FN1Yjxx
 		} else if p.notVotingActivePeer.Name == name {
 			info.notVoting = true
@@ -441,6 +467,8 @@ func (p *State) peersStateString() string {
 			emoji = "🔴"
 		case peer.discovered && peer.active:
 			emoji = "🟢"
+		case peer.busyProfile != "":
+			emoji = "🟠"
 		case peer.discovered:
 			emoji = "🟡"
 		}
@@ -555,7 +583,22 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 
 	// attempt a filtered call if we have a cached vote pubkey for this identity
 	var voteAccounts *solanagorpc.GetVoteAccountsResult
-	if cached, ok := p.votePubkeyCache[identityKey]; ok {
+	if p.votePubkey != nil {
+		opts := buildOpts(p.votePubkey)
+		result, err := p.clusterRPC.GetVoteAccounts(context.Background(), &opts)
+		if err != nil {
+			p.logger.Error("failed to get configured vote account", "error", err)
+			return true
+		}
+		matches := func(account solanagorpc.VoteAccountsResult) bool {
+			return p.matchesActiveVoteAccount(account, node.Pubkey)
+		}
+		if !slices.ContainsFunc(result.Current, matches) && !slices.ContainsFunc(result.Delinquent, matches) {
+			p.logger.Warn("configured vote account could not be verified for active identity", "identity", identityKey, "vote_pubkey", p.votePubkey.String())
+			return true
+		}
+		voteAccounts = result
+	} else if cached, ok := p.votePubkeyCache[identityKey]; ok {
 		opts := buildOpts(&cached)
 		result, err := p.clusterRPC.GetVoteAccounts(context.Background(), &opts)
 		if err != nil {
@@ -585,7 +628,7 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 	// if the node is in the delinquent list - it is not voting, but forgive delinquency due to low balance
 	// because failing over in this case definitely won't fix things anyway
 	for _, delinquentVoteAccount := range voteAccounts.Delinquent {
-		if !delinquentVoteAccount.NodePubkey.Equals(node.Pubkey) {
+		if !p.matchesActiveVoteAccount(delinquentVoteAccount, node.Pubkey) {
 			continue
 		}
 
@@ -639,7 +682,7 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 	found := false
 
 	for _, voteAccount := range voteAccounts.Current {
-		if !voteAccount.NodePubkey.Equals(node.Pubkey) {
+		if !p.matchesActiveVoteAccount(voteAccount, node.Pubkey) {
 			continue
 		}
 		p.cacheVotePubkey(voteAccount)
@@ -666,6 +709,10 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 	)
 
 	return true
+}
+
+func (p *State) matchesActiveVoteAccount(account solanagorpc.VoteAccountsResult, identity solana.PublicKey) bool {
+	return account.NodePubkey.Equals(identity) && (p.votePubkey == nil || account.VotePubkey.Equals(*p.votePubkey))
 }
 
 // LeaderlessReason returns why the last Refresh found no active peer: one of the
@@ -739,12 +786,12 @@ func (p *State) GetActivePeer() (state PeerState, err error) {
 	return PeerState{}, fmt.Errorf("no active peer found")
 }
 
-// HasPeers returns true if the IP has any peers in the gossip state
+// HasPeers returns true if the IP has any available peers in the gossip state
 // that is, any peers in that state that are not the passed IP address
 func (p *State) HasPeers(ip string) bool {
 	// if the self IP is in the gossip state, we have peers
 	for _, peer := range p.peerStatesByName {
-		if peer.IP != ip {
+		if peer.IP != ip && peer.BusyProfile == "" {
 			return true
 		}
 	}

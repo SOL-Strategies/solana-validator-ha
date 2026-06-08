@@ -1,0 +1,43 @@
+name: shared-profile-multiple-backups
+description: >
+  A profile still supports multiple backups. If the first backup in the main
+  profile is already active for another profile, the next available peer in the
+  main profile's priority order should take over.
+
+initial_state:
+  active_profiles:
+    main: validator-1
+    secondary: validator-2
+
+steps:
+  - name: assert initial profile holders
+    action: assert
+    timeout: 30s
+    active_count: 2
+    active_profiles:
+      main: validator-1
+      secondary: validator-2
+    state:
+      validator-1:
+        role: active
+      validator-2:
+        role: active
+      validator-3:
+        role: passive
+
+  - name: disconnect main active validator
+    action: disconnect
+    target: validator-1
+
+  - name: next available backup takes main
+    action: assert
+    timeout: 60s
+    active_count: 2
+    active_profiles:
+      main: validator-3
+      secondary: validator-2
+    state:
+      validator-2:
+        role: active
+      validator-3:
+        role: active
