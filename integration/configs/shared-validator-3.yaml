@@ -1,26 +1,26 @@
 validator:
-  name: "validator-2"
-  rpc_url: "http://localhost:8899?validator=validator-2"
-  public_ip_service_urls: ["http://localhost:8899/public-ip?validator=validator-2"]
+  name: "validator-3"
+  rpc_url: "http://mock-solana:8899?validator=validator-3"
+  public_ip_service_urls: ["http://mock-solana:8899/public-ip"]
   identities:
-    passive_pubkey: "DJ7w4p8Ve7qdSAmkpA3sviSbsd1HPUxd43x7MTH72JHT"
+    passive_pubkey: "5dXttfrjFEEExmZhVmVAdw2LzepNAhFYJTUgPCDk8CYD"
 
 cluster:
   name: "mainnet-beta"
-  rpc_urls: ["http://localhost:8899"]
+  rpc_urls: ["http://mock-cluster:8899"]
 
 prometheus:
-  port: 9095
-  health_check_port: 9096
+  port: 9090
   static_labels:
-    environment: "demo"
+    environment: "shared-backup-integration-test"
+    validator: "validator-3"
 
 failover:
   poll_interval_duration: "3s"
-  leaderless_samples_threshold: 3  # 3 × 3s = 9s before failover
+  leaderless_samples_threshold: 3
 
   self_healthy:
-    minimum_duration: "5s"       # short for demo (default is 30s)
+    minimum_duration: "5s"
     poll_interval_duration: "2s"
 
   active:
@@ -33,7 +33,7 @@ failover:
       - "Content-Type: application/json"
       - "-d"
       - '{"action":"set_active","target":"{{ .SelfName }}","profile":"{{ .ProfileName }}"}'
-      - "http://localhost:8899/action"
+      - "http://mock-solana:8899/action"
 
   passive:
     command: "curl"
@@ -45,7 +45,7 @@ failover:
       - "Content-Type: application/json"
       - "-d"
       - '{"action":"set_passive","target":"{{ .SelfName }}","profile":"{{ .ProfileName }}"}'
-      - "http://localhost:8899/action"
+      - "http://mock-solana:8899/action"
 
 profiles:
   main:
@@ -57,7 +57,27 @@ profiles:
     peers:
       validator-1:
         ip: "10.0.0.100"
+        priority: 0
       validator-2:
         ip: "10.0.0.101"
+        priority: 1
       validator-3:
         ip: "10.0.0.102"
+        priority: 2
+
+  secondary:
+    priority: 1
+    identities:
+      active_pubkey: "SysvarC1ock11111111111111111111111111111111"
+    vote_pubkey: "SysvarC1ock11111111111111111111111111111111"
+    authorized_voter: "SysvarRecentB1ockHashes11111111111111111111"
+    peers:
+      validator-3:
+        ip: "10.0.0.102"
+        priority: 0
+      validator-2:
+        ip: "10.0.0.101"
+        priority: 1
+      validator-1:
+        ip: "10.0.0.100"
+        priority: 2

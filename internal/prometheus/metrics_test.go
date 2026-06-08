@@ -60,9 +60,14 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, logger, metrics.logger)
 	assert.NotNil(t, metrics.registry)
 	assert.NotNil(t, metrics.metadata)
+	assert.NotNil(t, metrics.occupancy)
 	assert.NotNil(t, metrics.peerCount)
 	assert.NotNil(t, metrics.selfInGossip)
 	assert.NotNil(t, metrics.failoverStatus)
+	assert.NotNil(t, metrics.profileMetadata)
+	assert.NotNil(t, metrics.profilePeerCount)
+	assert.NotNil(t, metrics.profileSelfInGossip)
+	assert.NotNil(t, metrics.profileFailoverStatus)
 
 	// Verify common label names include static labels
 	expectedLabelNames := []string{
@@ -331,6 +336,37 @@ func TestExportMetricMetadata(t *testing.T) {
 	assert.Equal(t, float64(1), *metadataMetric.Metric[0].Gauge.Value)
 }
 
+func TestExportMetricOccupancy(t *testing.T) {
+	cfg := createTestConfig()
+	cacheInstance := createTestCache()
+	logger := createTestLogger()
+
+	opts := Options{
+		Config: cfg,
+		Logger: logger,
+		Cache:  cacheInstance,
+	}
+
+	metrics := New(opts)
+
+	state := cache.State{
+		ValidatorName:    "test-validator",
+		PublicIP:         "192.168.1.100",
+		Occupancy:        "active",
+		OccupancyProfile: "validator-a",
+	}
+
+	metrics.exportMetricOccupancy(&state)
+
+	metricFamily := requireMetricFamily(t, metrics, "solana_validator_ha_occupancy")
+	require.Len(t, metricFamily.Metric, 1)
+	assert.Equal(t, float64(1), *metricFamily.Metric[0].Gauge.Value)
+	labels := metricLabels(metricFamily.Metric[0])
+	assert.Equal(t, "active", labels["occupancy"])
+	assert.Equal(t, "validator-a", labels["occupancy_profile"])
+	assert.Equal(t, "test-validator", labels["validator_name"])
+}
+
 func TestExportMetricPeerCount(t *testing.T) {
 	cfg := createTestConfig()
 	cacheInstance := createTestCache()
@@ -487,6 +523,70 @@ func TestExportMetricFailoverStatus(t *testing.T) {
 	assert.Equal(t, float64(1), *failoverStatusMetric.Metric[0].Gauge.Value)
 }
 
+func TestExportProfileMetrics(t *testing.T) {
+	cfg := createTestConfig()
+	cacheInstance := createTestCache()
+	logger := createTestLogger()
+
+	opts := Options{
+		Config: cfg,
+		Logger: logger,
+		Cache:  cacheInstance,
+	}
+
+	metrics := New(opts)
+
+	state := cache.State{
+		ValidatorName: "test-validator",
+		PublicIP:      "192.168.1.100",
+		Profiles: map[string]cache.ProfileState{
+			"validator-a": {
+				Role:           "active",
+				PeerCount:      2,
+				SelfInGossip:   true,
+				FailoverStatus: "idle",
+			},
+			"validator-b": {
+				Role:           "passive",
+				PeerCount:      1,
+				SelfInGossip:   false,
+				FailoverStatus: "aborted_local_busy",
+			},
+		},
+	}
+
+	metrics.exportProfileMetrics(&state)
+
+	metadataMetric := requireMetricFamily(t, metrics, "solana_validator_ha_profile_metadata")
+	require.Len(t, metadataMetric.Metric, 2)
+	assertMetricWithLabels(t, metadataMetric, prometheus.Labels{
+		"profile":        "validator-a",
+		"validator_role": "active",
+	}, 1)
+	assertMetricWithLabels(t, metadataMetric, prometheus.Labels{
+		"profile":        "validator-b",
+		"validator_role": "passive",
+	}, 1)
+
+	peerCountMetric := requireMetricFamily(t, metrics, "solana_validator_ha_profile_peer_count")
+	assertMetricWithLabels(t, peerCountMetric, prometheus.Labels{"profile": "validator-a"}, 2)
+	assertMetricWithLabels(t, peerCountMetric, prometheus.Labels{"profile": "validator-b"}, 1)
+
+	selfInGossipMetric := requireMetricFamily(t, metrics, "solana_validator_ha_profile_self_in_gossip")
+	assertMetricWithLabels(t, selfInGossipMetric, prometheus.Labels{"profile": "validator-a"}, 1)
+	assertMetricWithLabels(t, selfInGossipMetric, prometheus.Labels{"profile": "validator-b"}, 0)
+
+	failoverMetric := requireMetricFamily(t, metrics, "solana_validator_ha_profile_failover_status")
+	assertMetricWithLabels(t, failoverMetric, prometheus.Labels{
+		"profile": "validator-a",
+		"status":  "idle",
+	}, 1)
+	assertMetricWithLabels(t, failoverMetric, prometheus.Labels{
+		"profile": "validator-b",
+		"status":  "aborted_local_busy",
+	}, 1)
+}
+
 func TestGetRegistry(t *testing.T) {
 	cfg := createTestConfig()
 	cacheInstance := createTestCache()
@@ -505,6 +605,48 @@ func TestGetRegistry(t *testing.T) {
 
 	// Verify it's the same registry instance
 	assert.Equal(t, metrics.registry, registry)
+}
+
+func requireMetricFamily(t *testing.T, metrics *Metrics, name string) *dto.MetricFamily {
+	t.Helper()
+
+	metricsList, err := metrics.GetRegistry().Gather()
+	require.NoError(t, err)
+	for _, metricFamily := range metricsList {
+		if metricFamily.GetName() == name {
+			return metricFamily
+		}
+	}
+	require.FailNowf(t, "metric family not found", "name=%s", name)
+	return nil
+}
+
+func metricLabels(metric *dto.Metric) map[string]string {
+	labels := map[string]string{}
+	for _, label := range metric.Label {
+		labels[label.GetName()] = label.GetValue()
+	}
+	return labels
+}
+
+func assertMetricWithLabels(t *testing.T, metricFamily *dto.MetricFamily, labels prometheus.Labels, value float64) {
+	t.Helper()
+
+	for _, metric := range metricFamily.Metric {
+		metricLabels := metricLabels(metric)
+		matches := true
+		for label, want := range labels {
+			if metricLabels[label] != want {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			assert.Equal(t, value, metric.GetGauge().GetValue())
+			return
+		}
+	}
+	require.FailNowf(t, "metric labels not found", "metric=%s labels=%v", metricFamily.GetName(), labels)
 }
 
 func TestStartServer(t *testing.T) {

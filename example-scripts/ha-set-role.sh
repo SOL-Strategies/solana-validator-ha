@@ -23,6 +23,8 @@
 #      "--client", "agave",
 #      "--rpc-url", "http://127.0.0.1:8899",
 #      "--identity-keyfile", "{{ .ActiveIdentityKeypairFile }}",
+#      "--authorized-voter-keyfile", "/home/solana/voters/{{ .AuthorizedVoterPubkey }}.json",
+#      "--authorized-voter-pubkey", "{{ .AuthorizedVoterPubkey }}",
 #      "--tower-file", "/mnt/accounts/tower/tower-1_9-{{ .ActiveIdentityPubkey }}.bin",
 #    ]
 # ....
@@ -33,6 +35,8 @@ CONFIG["identity-keyfile"]=""
 CONFIG["role"]=""
 CONFIG["rpc-url"]=""
 CONFIG["tower-file"]=""
+CONFIG["authorized-voter-keyfile"]=""
+CONFIG["authorized-voter-pubkey"]=""
 # optional - override defaults if your layout differs
 CONFIG["user"]="solana"
 CONFIG["ledger-dir"]="/mnt/ledger"
@@ -83,6 +87,8 @@ Flags:
     --role                     <role>   (required) role to transition to (one of: active, passive)
     --rpc-url                  <url>    (required) local validator rpc url
     --tower-file               <file>   (required) tower file
+    --authorized-voter-keyfile <file>   (optional) authorized voter keypair to set before active identity
+    --authorized-voter-pubkey  <pubkey> (optional) expected pubkey for --authorized-voter-keyfile
     --firedancer-config        <file>   (optional) firedancer config file (default: /home/solana/config.toml)
     --ledger-dir               <dir>    (optional) ledger directory (default: /mnt/ledger)
     --user                     <user>   (optional) user to run set identity commands as (default: solana)
@@ -102,11 +108,11 @@ parse_args() {
   # parse args
   while [ $# -gt 0 ]; do
     case $1 in
-    --role | --client | --identity-keyfile | --rpc-url | --tower-file | --user | --ledger-dir | --firedancer-config)
+    --role | --client | --identity-keyfile | --rpc-url | --tower-file | --authorized-voter-keyfile | --authorized-voter-pubkey | --user | --ledger-dir | --firedancer-config)
       CONFIG["${1#--}"]="$2"
       shift 2
       ;;
-    --role=* | --client=* | --identity-keyfile=* | --rpc-url=* | --tower-file=* | --user=* | --ledger-dir=* | --firedancer-config=*)
+    --role=* | --client=* | --identity-keyfile=* | --rpc-url=* | --tower-file=* | --authorized-voter-keyfile=* | --authorized-voter-pubkey=* | --user=* | --ledger-dir=* | --firedancer-config=*)
       local key="${1#--}"
       key="${key%%=*}"
       local value="${1#*=}"
@@ -142,6 +148,21 @@ parse_args() {
   fi
   logger info "retrieved identity from file" keyfile "${keyfile}" pubkey "${CONFIG["identity-pubkey"]}"
 
+  if [ -n "${CONFIG["authorized-voter-keyfile"]}" ]; then
+    local voter_keyfile="${CONFIG["authorized-voter-keyfile"]}"
+    CONFIG["authorized-voter-keyfile-pubkey"]="$(solana-keygen pubkey "${voter_keyfile}")"
+    if [ -z "${CONFIG["authorized-voter-keyfile-pubkey"]}" ]; then
+      logger fatal "Unable to get pubkey for authorized voter keyfile" keyfile "${voter_keyfile}"
+    fi
+    if [ -n "${CONFIG["authorized-voter-pubkey"]}" ] && [ "${CONFIG["authorized-voter-pubkey"]}" != "${CONFIG["authorized-voter-keyfile-pubkey"]}" ]; then
+      logger fatal "authorized voter keyfile does not match expected pubkey" keyfile "${voter_keyfile}" want "${CONFIG["authorized-voter-pubkey"]}" got "${CONFIG["authorized-voter-keyfile-pubkey"]}"
+    fi
+    CONFIG["authorized-voter-pubkey"]="${CONFIG["authorized-voter-keyfile-pubkey"]}"
+    logger info "retrieved authorized voter from file" keyfile "${voter_keyfile}" pubkey "${CONFIG["authorized-voter-pubkey"]}"
+  elif [ "${CONFIG["role"]}" = "active" ] && [ -n "${CONFIG["authorized-voter-pubkey"]}" ]; then
+    logger fatal "active role requires --authorized-voter-keyfile when --authorized-voter-pubkey is set" pubkey "${CONFIG["authorized-voter-pubkey"]}"
+  fi
+
   # ensure client is one of: agave, jito-solana, firedancer and set service and set-identity command accordingly
   case "${CONFIG["client"]}" in
   "firedancer")
@@ -154,6 +175,31 @@ parse_args() {
     ;;
   *)
     logger fatal "unknown client: ${CONFIG["client"]}" got "${CONFIG["client"]}" want "agave|jito-solana|firedancer"
+    ;;
+  esac
+}
+
+set_authorized_voter() {
+  local voter_keyfile="${CONFIG["authorized-voter-keyfile"]}"
+  if [ -z "${voter_keyfile}" ]; then
+    logger warn "no authorized voter keyfile supplied - skipping authorized voter update"
+    return
+  fi
+
+  case "${CONFIG["client"]}" in
+  agave | jito-solana)
+    local remove_cmd="agave-validator --ledger ${CONFIG["ledger-dir"]} authorized-voter remove-all"
+    local add_cmd="agave-validator --ledger ${CONFIG["ledger-dir"]} authorized-voter add ${voter_keyfile}"
+    logger info "clearing existing authorized voters" command "${remove_cmd}"
+    run_as_user "${remove_cmd}" >/dev/null
+    logger info "adding authorized voter" pubkey "${CONFIG["authorized-voter-pubkey"]}" command "${add_cmd}"
+    run_as_user "${add_cmd}" >/dev/null
+    ;;
+  firedancer)
+    logger fatal "authorized voter runtime update is not implemented for firedancer in this example script"
+    ;;
+  *)
+    logger fatal "unknown client for authorized voter update" client "${CONFIG["client"]}"
     ;;
   esac
 }
@@ -282,8 +328,12 @@ set_active() {
 
   # already has requested identity, we are good
   if has_requested_identity; then
+    set_authorized_voter
     return
   fi
+
+  # active promotion must install the profile's authorized voter before identity switch.
+  set_authorized_voter
 
   # remove the stale local tower file so the validator fetches a fresh one from the network
   # on its next restart, rather than loading a potentially outdated local copy

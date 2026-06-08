@@ -1,0 +1,38 @@
+name: shared-backup-busy
+description: >
+  After the shared backup takes the main profile, the secondary profile's active
+  validator also disconnects. The shared backup must remain active for main and
+  leave secondary inactive instead of serving two active identities.
+
+initial_state:
+  active_profiles:
+    main: validator-1
+    secondary: validator-3
+
+steps:
+  - name: disconnect main active validator
+    action: disconnect
+    target: validator-1
+
+  - name: shared backup takes main
+    action: assert
+    timeout: 60s
+    active_count: 2
+    active_profiles:
+      main: validator-2
+      secondary: validator-3
+
+  - name: disconnect secondary active validator
+    action: disconnect
+    target: validator-3
+
+  - name: secondary stays inactive because the backup is busy
+    action: assert
+    timeout: 45s
+    active_count: 1
+    active_profiles:
+      main: validator-2
+      secondary: ""
+    state:
+      validator-2:
+        role: active

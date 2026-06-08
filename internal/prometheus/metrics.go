@@ -13,14 +13,17 @@ import (
 )
 
 const (
-	metricsNamespacePrefix   = "solana_validator_ha_"
-	validatorNameLabelName   = "validator_name"
-	publicIPLabelName        = "public_ip"
-	validatorRoleLabelName   = "validator_role"
-	validatorStatusLabelName = "validator_status"
-	failoverStatusLabelName  = "status"
-	peerCountLabelName       = "peer_count"
-	selfInGossipLabelName    = "self_in_gossip"
+	metricsNamespacePrefix    = "solana_validator_ha_"
+	validatorNameLabelName    = "validator_name"
+	publicIPLabelName         = "public_ip"
+	validatorRoleLabelName    = "validator_role"
+	validatorStatusLabelName  = "validator_status"
+	failoverStatusLabelName   = "status"
+	peerCountLabelName        = "peer_count"
+	selfInGossipLabelName     = "self_in_gossip"
+	profileLabelName          = "profile"
+	occupancyLabelName        = "occupancy"
+	occupancyProfileLabelName = "occupancy_profile"
 )
 
 var (
@@ -40,11 +43,16 @@ type Metrics struct {
 	commonLabelNames []string
 
 	// Metrics
-	metadata        *prometheus.GaugeVec
-	peerCount       *prometheus.GaugeVec
-	selfInGossip    *prometheus.GaugeVec
-	failoverStatus  *prometheus.GaugeVec
-	updateAvailable *prometheus.GaugeVec
+	metadata              *prometheus.GaugeVec
+	occupancy             *prometheus.GaugeVec
+	peerCount             *prometheus.GaugeVec
+	selfInGossip          *prometheus.GaugeVec
+	failoverStatus        *prometheus.GaugeVec
+	profileMetadata       *prometheus.GaugeVec
+	profilePeerCount      *prometheus.GaugeVec
+	profileSelfInGossip   *prometheus.GaugeVec
+	profileFailoverStatus *prometheus.GaugeVec
+	updateAvailable       *prometheus.GaugeVec
 }
 
 // Options for creating a new Metrics instance
@@ -92,6 +100,20 @@ func (m *Metrics) initMetrics() {
 		metadataLabelNames,
 	)
 
+	// Occupancy metric
+	occupancyLabelNames := []string{
+		occupancyLabelName,
+		occupancyProfileLabelName,
+	}
+	occupancyLabelNames = append(occupancyLabelNames, m.commonLabelNames...)
+	m.occupancy = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: metricsNamespacePrefix + "occupancy",
+			Help: "Current local validator occupancy, always 1 with occupancy labels",
+		},
+		occupancyLabelNames,
+	)
+
 	// Peer count metric
 	m.peerCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -123,6 +145,54 @@ func (m *Metrics) initMetrics() {
 		failoverLabelNames,
 	)
 
+	// Profile metadata metric
+	profileMetadataLabelNames := []string{
+		profileLabelName,
+		validatorRoleLabelName,
+	}
+	profileMetadataLabelNames = append(profileMetadataLabelNames, m.commonLabelNames...)
+	m.profileMetadata = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: metricsNamespacePrefix + "profile_metadata",
+			Help: "Metadata about each configured HA profile, always 1 with profile labels",
+		},
+		profileMetadataLabelNames,
+	)
+
+	// Profile peer count metric
+	profileCommonLabelNames := []string{profileLabelName}
+	profileCommonLabelNames = append(profileCommonLabelNames, m.commonLabelNames...)
+	m.profilePeerCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: metricsNamespacePrefix + "profile_peer_count",
+			Help: "Number of peers seen in gossip for each profile",
+		},
+		profileCommonLabelNames,
+	)
+
+	// Profile self in gossip metric
+	m.profileSelfInGossip = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: metricsNamespacePrefix + "profile_self_in_gossip",
+			Help: "Whether this node sees itself in gossip for each profile (1 = yes, 0 = no)",
+		},
+		profileCommonLabelNames,
+	)
+
+	// Profile failover status metric
+	profileFailoverLabelNames := []string{
+		profileLabelName,
+		failoverStatusLabelName,
+	}
+	profileFailoverLabelNames = append(profileFailoverLabelNames, m.commonLabelNames...)
+	m.profileFailoverStatus = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: metricsNamespacePrefix + "profile_failover_status",
+			Help: "Current failover status for each profile",
+		},
+		profileFailoverLabelNames,
+	)
+
 	// Update available metric
 	m.updateAvailable = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -134,9 +204,14 @@ func (m *Metrics) initMetrics() {
 
 	// Register all metrics
 	m.registry.MustRegister(m.metadata)
+	m.registry.MustRegister(m.occupancy)
 	m.registry.MustRegister(m.peerCount)
 	m.registry.MustRegister(m.selfInGossip)
 	m.registry.MustRegister(m.failoverStatus)
+	m.registry.MustRegister(m.profileMetadata)
+	m.registry.MustRegister(m.profilePeerCount)
+	m.registry.MustRegister(m.profileSelfInGossip)
+	m.registry.MustRegister(m.profileFailoverStatus)
 	m.registry.MustRegister(m.updateAvailable)
 
 	m.logger.Debug("initialized Prometheus metrics")
@@ -180,9 +255,11 @@ func (m *Metrics) RefreshMetrics() {
 	state := m.cache.GetState()
 
 	m.exportMetricMetadata(&state)
+	m.exportMetricOccupancy(&state)
 	m.exportMetricPeerCount(&state)
 	m.exportMetricSelfInGossip(&state)
 	m.exportMetricFailoverStatus(&state)
+	m.exportProfileMetrics(&state)
 	m.exportMetricUpdateAvailable(&state)
 
 	m.logger.Debug("metrics refreshed",
@@ -191,6 +268,8 @@ func (m *Metrics) RefreshMetrics() {
 		peerCountLabelName, state.PeerCount,
 		selfInGossipLabelName, state.SelfInGossip,
 		failoverStatusLabelName, state.FailoverStatus,
+		occupancyLabelName, state.Occupancy,
+		occupancyProfileLabelName, state.OccupancyProfile,
 		"update_available", state.UpdateAvailable,
 	)
 }
@@ -206,6 +285,21 @@ func (m *Metrics) exportMetricMetadata(state *cache.State) {
 				prometheus.Labels{
 					validatorRoleLabelName:   state.Role,
 					validatorStatusLabelName: state.Status,
+				},
+				m.getCommonLabels(state),
+			),
+		).
+		Set(1)
+}
+
+func (m *Metrics) exportMetricOccupancy(state *cache.State) {
+	m.occupancy.Reset()
+	m.occupancy.
+		With(
+			m.mergeLabels(
+				prometheus.Labels{
+					occupancyLabelName:        state.Occupancy,
+					occupancyProfileLabelName: state.OccupancyProfile,
 				},
 				m.getCommonLabels(state),
 			),
@@ -242,6 +336,50 @@ func (m *Metrics) exportMetricFailoverStatus(state *cache.State) {
 		Set(1)
 }
 
+func (m *Metrics) exportProfileMetrics(state *cache.State) {
+	m.profileMetadata.Reset()
+	m.profilePeerCount.Reset()
+	m.profileSelfInGossip.Reset()
+	m.profileFailoverStatus.Reset()
+
+	for profile, profileState := range state.Profiles {
+		profileLabels := m.getProfileCommonLabels(state, profile)
+		m.profileMetadata.
+			With(
+				m.mergeLabels(
+					prometheus.Labels{
+						profileLabelName:       profile,
+						validatorRoleLabelName: profileState.Role,
+					},
+					m.getCommonLabels(state),
+				),
+			).
+			Set(1)
+		m.profilePeerCount.
+			With(profileLabels).
+			Set(float64(profileState.PeerCount))
+
+		var selfInGossipValue float64
+		if profileState.SelfInGossip {
+			selfInGossipValue = 1
+		}
+		m.profileSelfInGossip.
+			With(profileLabels).
+			Set(selfInGossipValue)
+		m.profileFailoverStatus.
+			With(
+				m.mergeLabels(
+					prometheus.Labels{
+						profileLabelName:        profile,
+						failoverStatusLabelName: profileState.FailoverStatus,
+					},
+					m.getCommonLabels(state),
+				),
+			).
+			Set(1)
+	}
+}
+
 func (m *Metrics) exportMetricUpdateAvailable(state *cache.State) {
 	var value float64
 	if state.UpdateAvailable {
@@ -269,4 +407,11 @@ func (m *Metrics) getCommonLabels(state *cache.State) prometheus.Labels {
 		commonLabels[k] = v
 	}
 	return commonLabels
+}
+
+func (m *Metrics) getProfileCommonLabels(state *cache.State, profile string) prometheus.Labels {
+	labels := prometheus.Labels{
+		profileLabelName: profile,
+	}
+	return m.mergeLabels(labels, m.getCommonLabels(state))
 }

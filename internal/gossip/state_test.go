@@ -602,10 +602,12 @@ func TestGetSortedIPs(t *testing.T) {
 // ---- helpers for undeclared active peer tests ----
 
 const (
-	testActivePubkey = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-	testUndeclaredIP = "10.0.0.99"
-	testDeclaredIP   = "192.168.1.101"
-	testSelfIP       = "192.168.1.100"
+	testActivePubkey      = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+	testOtherActivePubkey = "SysvarC1ock11111111111111111111111111111111"
+	testVotePubkey        = "11111111111111111111111111111111"
+	testUndeclaredIP      = "10.0.0.99"
+	testDeclaredIP        = "192.168.1.101"
+	testSelfIP            = "192.168.1.100"
 )
 
 // newGossipMockRPCServer creates a mock Solana JSON-RPC HTTP server for gossip state tests.
@@ -656,7 +658,7 @@ func votingVoteAccountsResult(currentNodePubkeys []string) map[string]interface{
 	for _, pk := range currentNodePubkeys {
 		current = append(current, map[string]interface{}{
 			"nodePubkey":       pk,
-			"votePubkey":       "11111111111111111111111111111111",
+			"votePubkey":       testVotePubkey,
 			"activatedStake":   1000000,
 			"epochVoteAccount": true,
 			"epochCredits":     []interface{}{},
@@ -677,6 +679,7 @@ func TestHasConfigUndeclaredActivePeer(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", "https://api.mainnet-beta.solana.com"),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{},
 	})
@@ -715,6 +718,7 @@ func TestRefresh_UndeclaredActivePeer_VotingBlocksFailover(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", server.URL),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
 	})
@@ -743,6 +747,7 @@ func TestRefresh_UndeclaredActivePeer_NotVotingAllowsFailover(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", server.URL),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
 	})
@@ -764,6 +769,7 @@ func TestRefresh_ConfigUndeclaredActivePeer_ResetOnEachRefresh(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", server.URL),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{},
 	})
@@ -781,6 +787,34 @@ func TestRefresh_ConfigUndeclaredActivePeer_ResetOnEachRefresh(t *testing.T) {
 	state.Refresh()
 
 	assert.False(t, state.HasConfigUndeclaredActivePeer(), "configUndeclaredActivePeer must be reset on every Refresh()")
+}
+
+func TestRefresh_BusyPeerNotAvailable(t *testing.T) {
+	server := newGossipMockRPCServer(t, map[string]interface{}{
+		"getClusterNodes": []interface{}{
+			gossipClusterNode(testOtherActivePubkey, testDeclaredIP),
+		},
+	})
+
+	state := NewState(Options{
+		ClusterRPC:   rpc.NewClient("test", server.URL),
+		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
+		KnownActivePubkeys: map[string]string{
+			testActivePubkey:      "validator-a",
+			testOtherActivePubkey: "validator-b",
+		},
+		SelfIP:      testSelfIP,
+		ConfigPeers: config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
+	})
+
+	state.Refresh()
+
+	peer := state.GetPeerStates()["peer1"]
+	assert.Equal(t, "busy", peer.Role)
+	assert.Equal(t, "validator-b", peer.BusyProfile)
+	assert.False(t, peer.LastSeenActive)
+	assert.False(t, state.HasAvailablePeers(testSelfIP), "busy peers must not be failover candidates")
 }
 
 func TestRefresh_DualCRDSEntry_ActiveWinsOverStalePassive(t *testing.T) {
@@ -803,6 +837,7 @@ func TestRefresh_DualCRDSEntry_ActiveWinsOverStalePassive(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", server.URL),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
 	})
@@ -833,6 +868,7 @@ func TestRefresh_DualCRDSEntry_PassiveFirstActiveSecond_ActiveWins(t *testing.T)
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", server.URL),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
 	})
@@ -860,6 +896,7 @@ func TestRefresh_DeclaredActivePeer_NotRecordedAsUndeclared(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", server.URL),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
 	})
@@ -883,7 +920,7 @@ func delinquentVoteAccountsResult(delinquentNodePubkeys []string, lastVote uint6
 	for _, pk := range delinquentNodePubkeys {
 		delinquent = append(delinquent, map[string]interface{}{
 			"nodePubkey":       pk,
-			"votePubkey":       "11111111111111111111111111111111",
+			"votePubkey":       testVotePubkey,
 			"activatedStake":   1000000,
 			"epochVoteAccount": true,
 			"epochCredits":     []interface{}{},
@@ -910,6 +947,7 @@ func TestActivePeerIsDelinquent_FalseByDefault(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", "https://api.mainnet-beta.solana.com"),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
 	})
@@ -931,6 +969,7 @@ func TestActivePeerIsDelinquent_SetOnGenuineDelinquency(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", server.URL),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
 	})
@@ -955,6 +994,7 @@ func TestActivePeerIsDelinquent_NotSetForLowBalance(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", server.URL),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
 	})
@@ -976,6 +1016,7 @@ func TestActivePeerIsDelinquent_NotSetWhenVoting(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", server.URL),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
 	})
@@ -1003,6 +1044,7 @@ func TestActivePeerIsDelinquent_ResetOnNextRefresh(t *testing.T) {
 	state := NewState(Options{
 		ClusterRPC:   rpc.NewClient("test", delinquentServer.URL),
 		ActivePubkey: testActivePubkey,
+		VotePubkey:   testVotePubkey,
 		SelfIP:       testSelfIP,
 		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
 	})

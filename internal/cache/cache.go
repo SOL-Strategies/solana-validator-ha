@@ -8,11 +8,13 @@ import (
 // State represents the current state of the HA manager
 type State struct {
 	// Metadata
-	ValidatorName string
-	Hostname      string
-	PublicIP      string
-	Role          string // "active", "passive", "unknown"
-	Status        string // "healthy", "unhealthy", "unknown"
+	ValidatorName    string
+	Hostname         string
+	PublicIP         string
+	Role             string // "active", "passive", "unknown"
+	Status           string // "healthy", "unhealthy", "unknown"
+	Occupancy        string
+	OccupancyProfile string
 
 	// Peer information
 	PeerCount    int
@@ -26,6 +28,15 @@ type State struct {
 
 	// Timestamps
 	LastUpdated time.Time
+
+	Profiles map[string]ProfileState
+}
+
+type ProfileState struct {
+	Role           string
+	PeerCount      int
+	SelfInGossip   bool
+	FailoverStatus string
 }
 
 // Cache provides thread-safe access to the HA manager state

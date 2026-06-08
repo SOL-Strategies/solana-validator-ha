@@ -37,12 +37,12 @@ type Validator struct {
 // a public key is supplied, the daemon operates in pubkey-only mode for that
 // identity. The keypair file takes precedence if both are set.
 type ValidatorIdentities struct {
-	ActiveKeyPairFile   string               `koanf:"active"`
-	ActiveKeyPair       *solanago.PrivateKey  `koanf:"-"`
-	ActivePubkeyStr     string               `koanf:"active_pubkey"`
-	PassiveKeyPairFile  string               `koanf:"passive"`
-	PassiveKeyPair      *solanago.PrivateKey  `koanf:"-"`
-	PassivePubkeyStr    string               `koanf:"passive_pubkey"`
+	ActiveKeyPairFile  string               `koanf:"active"`
+	ActiveKeyPair      *solanago.PrivateKey `koanf:"-"`
+	ActivePubkeyStr    string               `koanf:"active_pubkey"`
+	PassiveKeyPairFile string               `koanf:"passive"`
+	PassiveKeyPair     *solanago.PrivateKey `koanf:"-"`
+	PassivePubkeyStr   string               `koanf:"passive_pubkey"`
 }
 
 // ActivePubkey returns the active identity public key string.
@@ -98,12 +98,63 @@ func (v *ValidatorIdentities) Load() error {
 	return nil
 }
 
+// LoadPassive loads only the passive identity from a keypair file or validates
+// passive_pubkey. Multi-profile configs keep active identities under profiles.
+func (v *ValidatorIdentities) LoadPassive() error {
+	if v.PassiveKeyPairFile != "" {
+		passiveKeyPair, err := solanago.PrivateKeyFromSolanaKeygenFile(v.PassiveKeyPairFile)
+		if err != nil {
+			return fmt.Errorf("failed to load passive identity file: %w", err)
+		}
+		v.PassiveKeyPair = &passiveKeyPair
+		v.PassivePubkeyStr = passiveKeyPair.PublicKey().String()
+	} else if v.PassivePubkeyStr != "" {
+		if _, err := solanago.PublicKeyFromBase58(v.PassivePubkeyStr); err != nil {
+			return fmt.Errorf("failed to parse passive_pubkey as base58 public key: %w", err)
+		}
+	} else {
+		return fmt.Errorf("either validator.identities.passive (keypair file) or validator.identities.passive_pubkey (base58 pubkey) must be set")
+	}
+	return nil
+}
+
+// LoadActive loads only the active identity from a keypair file or validates
+// active_pubkey. Used by profiles.
+func (v *ValidatorIdentities) LoadActive() error {
+	if v.ActiveKeyPairFile != "" {
+		activeKeyPair, err := solanago.PrivateKeyFromSolanaKeygenFile(v.ActiveKeyPairFile)
+		if err != nil {
+			return fmt.Errorf("failed to load active identity file: %w", err)
+		}
+		v.ActiveKeyPair = &activeKeyPair
+		v.ActivePubkeyStr = activeKeyPair.PublicKey().String()
+	} else if v.ActivePubkeyStr != "" {
+		if _, err := solanago.PublicKeyFromBase58(v.ActivePubkeyStr); err != nil {
+			return fmt.Errorf("failed to parse active_pubkey as base58 public key: %w", err)
+		}
+	} else {
+		return fmt.Errorf("either identities.active (keypair file) or identities.active_pubkey (base58 pubkey) must be set")
+	}
+	return nil
+}
+
 // Validate validates the validator identities, returns an error if the identities are the same
 func (v *ValidatorIdentities) Validate() (err error) {
 	if v.ActivePubkey() == v.PassivePubkey() {
 		err = fmt.Errorf("validator.identities.active and validator.identities.passive must be different: %s", v.ActivePubkey())
 	}
 	return err
+}
+
+// ValidatePassive validates the global passive identity in multi-profile mode.
+func (v *ValidatorIdentities) ValidatePassive() error {
+	if v.PassivePubkey() == "" {
+		return fmt.Errorf("validator.identities.passive or validator.identities.passive_pubkey must be defined")
+	}
+	if v.ActiveKeyPairFile != "" || v.ActivePubkeyStr != "" || v.ActiveKeyPair != nil {
+		return fmt.Errorf("validator.identities.active is no longer supported; move active identities under profiles.<name>.identities")
+	}
+	return nil
 }
 
 // Validate validates the validator configuration
@@ -137,11 +188,8 @@ func (v *Validator) Validate() error {
 		}
 	}
 
-	// Only validate identities if they've been loaded
-	activeLoaded := v.Identities.ActiveKeyPair != nil || v.Identities.ActivePubkeyStr != ""
-	passiveLoaded := v.Identities.PassiveKeyPair != nil || v.Identities.PassivePubkeyStr != ""
-	if activeLoaded && passiveLoaded {
-		return v.Identities.Validate()
+	if err := v.Identities.ValidatePassive(); err != nil {
+		return err
 	}
 
 	return nil

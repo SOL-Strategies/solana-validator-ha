@@ -20,6 +20,9 @@ func TestValidator_Validate(t *testing.T) {
 	validator := &Validator{
 		Name:   "test-validator",
 		RPCURL: "http://localhost:8899",
+		Identities: ValidatorIdentities{
+			PassivePubkeyStr: "SysvarC1ock11111111111111111111111111111111",
+		},
 	}
 
 	err := validator.Validate()
@@ -48,6 +51,12 @@ func TestValidator_Validate(t *testing.T) {
 	validator.RPCURL = "https://api.testnet.solana.com"
 	err = validator.Validate()
 	assert.NoError(t, err)
+
+	// Test with legacy top-level active identity
+	validator.Identities.ActivePubkeyStr = "11111111111111111111111111111111"
+	err = validator.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "validator.identities.active is no longer supported")
 }
 
 func TestValidatorIdentities_Load(t *testing.T) {

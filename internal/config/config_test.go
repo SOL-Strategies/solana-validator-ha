@@ -81,6 +81,9 @@ func TestValidate(t *testing.T) {
 		Validator: Validator{
 			Name:   "test-validator",
 			RPCURL: "http://localhost:8899",
+			Identities: ValidatorIdentities{
+				PassivePubkeyStr: "SysvarC1ock11111111111111111111111111111111",
+			},
 		},
 		Cluster: Cluster{
 			Name:    "testnet",
@@ -100,8 +103,19 @@ func TestValidate(t *testing.T) {
 			Passive: Role{
 				Command: "systemctl stop solana",
 			},
-			Peers: Peers{
-				"validator-1": {IP: "192.168.1.10"},
+		},
+		Profiles: Profiles{
+			"main": {
+				Priority: intPtr(0),
+				Identities: ValidatorIdentities{
+					ActivePubkeyStr: "11111111111111111111111111111111",
+				},
+				VotePubkeyStr:         "Vote111111111111111111111111111111111111111",
+				AuthorizedVoterPubkey: "Stake11111111111111111111111111111111111111",
+				Peers: Peers{
+					"test-validator": {IP: "192.168.1.10"},
+					"validator-2":    {IP: "192.168.1.11"},
+				},
 			},
 		},
 	}
@@ -162,7 +176,6 @@ validator:
   name: "test-validator"
   rpc_url: "http://localhost:8899"
   identities:
-    active: "` + activeIdentityFile + `"
     passive: "` + passiveIdentityFile + `"
 
 cluster:
@@ -184,11 +197,19 @@ failover:
     command: "systemctl start solana"
   passive:
     command: "systemctl stop solana"
-  peers:
-    validator-1:
-      ip: "192.168.1.10"
-    validator-2:
-      ip: "192.168.1.11"
+
+profiles:
+  main:
+    priority: 0
+    identities:
+      active: "` + activeIdentityFile + `"
+    vote_pubkey: "Vote111111111111111111111111111111111111111"
+    authorized_voter: "Stake11111111111111111111111111111111111111"
+    peers:
+      test-validator:
+        ip: "192.168.1.10"
+      validator-2:
+        ip: "192.168.1.11"
 `
 
 	tempFile, err := os.CreateTemp("", "config-*.yaml")
@@ -219,7 +240,6 @@ validator:
   name: "test-validator"
   rpc_url: "http://localhost:8899"
   identities:
-    active: "` + activeIdentityFile + `"
     passive: "` + passiveIdentityFile + `"
 
 cluster:
@@ -241,11 +261,19 @@ failover:
     command: "systemctl start solana"
   passive:
     command: "systemctl stop solana"
-  peers:
-    validator-1:
-      ip: "192.168.1.10"
-    validator-2:
-      ip: "192.168.1.11"
+
+profiles:
+  main:
+    priority: 0
+    identities:
+      active: "` + activeIdentityFile + `"
+    vote_pubkey: "Vote111111111111111111111111111111111111111"
+    authorized_voter: "Stake11111111111111111111111111111111111111"
+    peers:
+      test-validator:
+        ip: "192.168.1.10"
+      validator-2:
+        ip: "192.168.1.11"
 `
 
 	tempFile, err := os.CreateTemp("", "config-*.yaml")

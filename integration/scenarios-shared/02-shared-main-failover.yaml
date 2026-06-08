@@ -1,0 +1,35 @@
+name: shared-main-failover
+description: >
+  The main profile's active validator disconnects while the secondary profile
+  remains active elsewhere. The shared backup should take only the main profile.
+
+initial_state:
+  active_profiles:
+    main: validator-1
+    secondary: validator-3
+
+steps:
+  - name: assert initial shared state
+    action: assert
+    timeout: 30s
+    active_count: 2
+    active_profiles:
+      main: validator-1
+      secondary: validator-3
+
+  - name: disconnect main active validator
+    action: disconnect
+    target: validator-1
+
+  - name: shared backup takes main while secondary remains active
+    action: assert
+    timeout: 60s
+    active_count: 2
+    active_profiles:
+      main: validator-2
+      secondary: validator-3
+    state:
+      validator-2:
+        role: active
+      validator-3:
+        role: active

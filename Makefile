@@ -85,6 +85,12 @@ integration-test:
 	cd integration && ./run-tests.sh
 	@echo "Integration tests completed!"
 
+.PHONY: integration-test-shared
+integration-test-shared:
+	@echo "Running shared-backup integration tests..."
+	cd integration && ./run-tests.sh --shared
+	@echo "Shared-backup integration tests completed!"
+
 # Start the integration docker compose environment and wait for services to be ready.
 # Run this before `make integration-test`. For GIF recording use `make demo` instead.
 .PHONY: integration

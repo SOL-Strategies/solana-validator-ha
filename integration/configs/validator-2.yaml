@@ -3,8 +3,7 @@ validator:
   rpc_url: "http://mock-solana:8899?validator=validator-2"
   public_ip_service_urls: ["http://mock-solana:8899/public-ip"]
   identities:
-    active: "/tmp/active-identity.json"
-    passive: "/tmp/passive-identity-2.json"
+    passive_pubkey: "DJ7w4p8Ve7qdSAmkpA3sviSbsd1HPUxd43x7MTH72JHT"
 
 cluster:
   name: "mainnet-beta"
@@ -33,7 +32,7 @@ failover:
       - "-H"
       - "Content-Type: application/json"
       - "-d"
-      - '{"action":"set_active","target":"{{ .SelfName }}"}'
+      - '{"action":"set_active","target":"{{ .SelfName }}","profile":"{{ .ProfileName }}"}'
       - "http://mock-solana:8899/action"
 
   passive:
@@ -45,11 +44,20 @@ failover:
       - "-H"
       - "Content-Type: application/json"
       - "-d"
-      - '{"action":"set_passive","target":"{{ .SelfName }}"}'
+      - '{"action":"set_passive","target":"{{ .SelfName }}","profile":"{{ .ProfileName }}"}'
       - "http://mock-solana:8899/action"
 
-  peers:
-    validator-1:
-      ip: "10.0.0.100"
-    validator-3:
-      ip: "10.0.0.102"
+profiles:
+  main:
+    priority: 0
+    identities:
+      active_pubkey: "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
+    vote_pubkey: "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
+    authorized_voter: "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
+    peers:
+      validator-1:
+        ip: "10.0.0.100"
+      validator-2:
+        ip: "10.0.0.101"
+      validator-3:
+        ip: "10.0.0.102"

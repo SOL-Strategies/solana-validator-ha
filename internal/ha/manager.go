@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -37,16 +39,29 @@ type Manager struct {
 	ctx             context.Context
 	peerSelf        *config.Peer
 	cancel          context.CancelFunc
-	gossipState     *gossip.State
+	profiles        map[string]*profileRuntime
 	localState      *local.State
 	getPublicIPFunc func() (string, error)
 	peerCount       int
 	initialized     bool
 	logPrefix       string
-	// ring holds the last N gossip samples for pre-failover context in recordings.
-	ring            *recording.Ring
+	// profileFailoverStatuses holds transient per-profile status for the next metrics refresh.
+	profileFailoverStatuses map[string]string
 	// recordingOutputDir is the resolved output directory for failover recordings (empty if disabled).
 	recordingOutputDir string
+}
+
+type profileRuntime struct {
+	name        string
+	cfg         config.Profile
+	gossipState *gossip.State
+	ring        *recording.Ring
+}
+
+type failoverCandidate struct {
+	profile  *profileRuntime
+	rec      *recording.Recorder
+	fromNode string
 }
 
 // NewManager creates a new HA manager from options
@@ -64,14 +79,16 @@ func NewManager(opts NewManagerOptions) *Manager {
 	})
 
 	manager := &Manager{
-		cfg:       opts.Cfg,
-		version:   opts.Version,
-		metrics:   metrics,
-		cache:     cache,
-		logger:    logging.New(opts.Cfg.Validator.Name, "ha_manager"),
-		ctx:       ctx,
-		cancel:    cancel,
-		peerCount: len(opts.Cfg.Failover.Peers),
+		cfg:                     opts.Cfg,
+		version:                 opts.Version,
+		metrics:                 metrics,
+		cache:                   cache,
+		logger:                  logging.New(opts.Cfg.Validator.Name, "ha_manager"),
+		ctx:                     ctx,
+		cancel:                  cancel,
+		peerCount:               len(opts.Cfg.Profiles),
+		profiles:                make(map[string]*profileRuntime),
+		profileFailoverStatuses: make(map[string]string),
 	}
 
 	if opts.GetPublicIPFunc != nil {
@@ -127,18 +144,13 @@ func (m *Manager) initialize() error {
 	m.logPrefix = m.cfg.Validator.Name
 	m.logger = logging.New(m.logPrefix, "ha_manager")
 
-	// peers config file must not declare ourselves
-	if m.cfg.Failover.Peers.HasIP(publicIP) {
-		return fmt.Errorf("failover.peers must not reference ourselves, found %s in failover.peers", publicIP)
-	}
-
-	// now we can set ourselves as a peer and continue
-	m.logger.Debug("adding us to config peers", "name", m.cfg.Validator.Name, "ip", publicIP)
 	m.peerSelf = &config.Peer{
 		Name: m.cfg.Validator.Name,
 		IP:   publicIP,
 	}
-	m.cfg.Failover.Peers.Add(*m.peerSelf)
+	if err := m.cfg.Profiles.ValidateSelfPeer(m.cfg.Validator.Name, publicIP); err != nil {
+		return err
+	}
 
 	// initialize
 	m.logger.Info("initializing",
@@ -146,39 +158,56 @@ func (m *Manager) initialize() error {
 		"public_ip", publicIP,
 		"cluster_rpc_urls", m.cfg.Cluster.RPCURLs,
 		"validator_rpc_url", m.cfg.Validator.RPCURL,
-		"active_pubkey", m.cfg.Validator.Identities.ActivePubkey(),
 		"passive_pubkey", m.cfg.Validator.Identities.PassivePubkey(),
-		"peers", m.cfg.Failover.Peers.String(),
+		"profiles_count", len(m.cfg.Profiles.Enabled()),
 		"failover_dry_run", m.cfg.Failover.DryRun,
 		"prometheus_port", m.cfg.Prometheus.Port,
 		"health_check_port", m.cfg.Prometheus.HealthCheckPort,
 	)
 
-	// create gossip state
-	m.logger.Debug("creating gossip state")
-	m.gossipState = gossip.NewState(gossip.Options{
-		ClusterRPC: rpc.NewClient(m.logPrefix, m.cfg.Cluster.RPCURLs...).
-				WithTimeout(m.cfg.Cluster.RPCTimeoutDuration).
-				WithCooldown(m.cfg.Cluster.RPCURLCooldownDuration),
-		ActivePubkey:                   m.cfg.Validator.Identities.ActivePubkey(),
-		ConfigPeers:                    m.cfg.Failover.Peers,
-		DelinquentSlotDistanceOverride: m.cfg.Failover.DelinquentSlotDistanceOverride,
-		SelfIP:                         m.peerSelf.IP,
-		LogPrefix:                      m.logPrefix,
-	})
+	clusterRPC := rpc.NewClient(m.logPrefix, m.cfg.Cluster.RPCURLs...).
+		WithTimeout(m.cfg.Cluster.RPCTimeoutDuration).
+		WithCooldown(m.cfg.Cluster.RPCURLCooldownDuration)
+	knownActivePubkeys := m.cfg.Profiles.ActivePubkeyProfileMap()
+	activePubkeysByProfile := make(map[string]string, len(knownActivePubkeys))
+
+	for _, profile := range m.cfg.Profiles.Enabled() {
+		activePubkeysByProfile[profile.Name] = profile.ActivePubkey()
+		m.logger.Info("initializing profile",
+			"profile", profile.Name,
+			"profile_priority", *profile.Priority,
+			"active_pubkey", profile.ActivePubkey(),
+			"vote_pubkey", profile.VotePubkeyStr,
+			"authorized_voter", profile.AuthorizedVoterPubkey,
+			"peers", profile.Peers.String(),
+		)
+		m.profiles[profile.Name] = &profileRuntime{
+			name: profile.Name,
+			cfg:  profile,
+			gossipState: gossip.NewState(gossip.Options{
+				ClusterRPC:                     clusterRPC,
+				ActivePubkey:                   profile.ActivePubkey(),
+				VotePubkey:                     profile.VotePubkeyStr,
+				KnownActivePubkeys:             knownActivePubkeys,
+				ConfigPeers:                    profile.Peers,
+				DelinquentSlotDistanceOverride: m.cfg.Failover.DelinquentSlotDistanceOverride,
+				SelfIP:                         m.peerSelf.IP,
+				LogPrefix:                      m.logPrefix + " " + profile.Name,
+			}),
+			ring: &recording.Ring{},
+		}
+	}
 
 	// create local state
 	m.logger.Debug("creating local state")
 	m.localState = local.NewState(local.Options{
-		RPC:          rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL),
-		Cfg:          m.cfg.Failover.SelfHealthy,
-		ActivePubkey: m.cfg.Validator.Identities.ActivePubkey(),
-		Ctx:          m.ctx,
-		LogPrefix:    m.logPrefix,
+		RPC:                    rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL),
+		Cfg:                    m.cfg.Failover.SelfHealthy,
+		PassivePubkey:          m.cfg.Validator.Identities.PassivePubkey(),
+		ActivePubkeysByProfile: activePubkeysByProfile,
+		Ctx:                    m.ctx,
+		LogPrefix:              m.logPrefix,
 	})
-
-	// initialize gossip sample ring buffer (always, regardless of recording setting)
-	m.ring = &recording.Ring{}
 
 	// resolve recording output dir once so it is ready when a failover fires
 	if m.cfg.Failover.Recording.Enabled {
@@ -247,7 +276,9 @@ func (m *Manager) haMonitorLoop() error {
 	}
 
 	// initial gossip state population
-	m.gossipState.Refresh()
+	for _, pr := range m.sortedProfiles() {
+		pr.gossipState.Refresh()
+	}
 
 	// start the monitor loop with ticker aligned to interval boundaries
 	ticker := time.NewTicker(m.cfg.Failover.PollIntervalDuration)
@@ -291,9 +322,8 @@ func (m *Manager) haMonitorLoop() error {
 			// the shorter confirmation poll interval for the final sample only.
 			// We do NOT fast-poll on the first leaderless sample to avoid reacting to
 			// transient gossip blips that resolve within a normal poll cycle.
-			if fastPolling && m.gossipState.LeaderlessSamplesCount == m.cfg.Failover.LeaderlessSamplesThreshold-1 {
+			if fastPolling && m.anyProfileNeedsConfirmationPoll() {
 				m.logger.Warn("leaderless samples approaching threshold - switching to confirmation poll interval",
-					"leaderless_samples_count", m.gossipState.LeaderlessSamplesCount,
 					"leaderless_samples_threshold", m.cfg.Failover.LeaderlessSamplesThreshold,
 					"confirmation_poll_interval", confirmationPoll,
 				)
@@ -318,31 +348,43 @@ func (m *Manager) runConfirmationPollLoop(interval time.Duration) error {
 			// Exit the fast-poll loop once the leaderless count is no longer in the
 			// "one below threshold" window — either it crossed threshold (failover fired
 			// or was aborted) or a peer reappeared and the count reset.
-			if m.gossipState.LeaderlessSamplesCount != m.cfg.Failover.LeaderlessSamplesThreshold-1 {
+			if !m.anyProfileNeedsConfirmationPoll() {
 				return nil
 			}
 		}
 	}
 }
 
+func (m *Manager) anyProfileNeedsConfirmationPoll() bool {
+	for _, pr := range m.profiles {
+		if pr.gossipState.LeaderlessSamplesCount == m.cfg.Failover.LeaderlessSamplesThreshold-1 {
+			return true
+		}
+	}
+	return false
+}
+
 // buildGossipSample converts the current gossip state into a recording.GossipSample.
 // It must be called immediately after a gossipState.Refresh() while the state is fresh.
-func (m *Manager) buildGossipSample() recording.GossipSample {
-	peerStates := m.gossipState.GetPeerStates()
-	peers := make([]recording.PeerSnapshot, 0, len(m.cfg.Failover.Peers))
+func (m *Manager) buildGossipSample(pr *profileRuntime) recording.GossipSample {
+	peerStates := pr.gossipState.GetPeerStates()
+	peers := make([]recording.PeerSnapshot, 0, len(pr.cfg.Peers))
 
-	for name, cfgPeer := range m.cfg.Failover.Peers {
+	for name, cfgPeer := range pr.cfg.Peers {
 		snap := recording.PeerSnapshot{Name: name, IP: cfgPeer.IP}
 		if ps, ok := peerStates[name]; ok {
 			snap.Pubkey = ps.Pubkey
-			if ps.LastSeenActive {
+			if ps.Role == "busy" {
+				snap.Role = "busy"
+				snap.BusyProfile = ps.BusyProfile
+			} else if ps.LastSeenActive {
 				snap.Role = "active"
 			} else {
 				snap.Role = "passive"
 			}
 			// attach slot-distance detail to the peer that triggered delinquency
-			if m.gossipState.ActivePeerIsDelinquent() && ps.LastSeenActive {
-				if d := m.gossipState.GetDelinquencyDetail(); d != nil {
+			if pr.gossipState.ActivePeerIsDelinquent() && ps.LastSeenActive {
+				if d := pr.gossipState.GetDelinquencyDetail(); d != nil {
 					snap.LastVoteSlot = &d.LastVoteSlot
 					snap.CurrentSlot = &d.CurrentSlot
 					snap.SlotDistance = &d.SlotDistance
@@ -355,24 +397,28 @@ func (m *Manager) buildGossipSample() recording.GossipSample {
 	}
 
 	return recording.GossipSample{
-		SampledAt:              m.gossipState.PeerStatesRefreshedAt,
+		SampledAt:              pr.gossipState.PeerStatesRefreshedAt,
 		Peers:                  peers,
-		LeaderlessSamplesCount: m.gossipState.LeaderlessSamplesCount,
-		ActivePeerDelinquent:   m.gossipState.ActivePeerIsDelinquent(),
-		RPCError:               m.gossipState.LastRefreshHadRPCError(),
+		LeaderlessSamplesCount: pr.gossipState.LeaderlessSamplesCount,
+		ActivePeerDelinquent:   pr.gossipState.ActivePeerIsDelinquent(),
+		RPCError:               pr.gossipState.LastRefreshHadRPCError(),
 	}
 }
 
 // newRecorder creates a Recorder seeded with node/config context and the current ring snapshot.
-func (m *Manager) newRecorder() *recording.Recorder {
+func (m *Manager) newRecorder(pr *profileRuntime) *recording.Recorder {
 	node := recording.NodeInfo{
 		Name:          m.cfg.Validator.Name,
 		IP:            m.peerSelf.IP,
-		ActivePubkey:  m.cfg.Validator.Identities.ActivePubkey(),
+		Profile:       pr.name,
+		ActivePubkey:  pr.cfg.ActivePubkey(),
 		PassivePubkey: m.cfg.Validator.Identities.PassivePubkey(),
 	}
 
 	cfg := recording.ConfigSnapshot{
+		Profile:                            pr.name,
+		VotePubkey:                         pr.cfg.VotePubkeyStr,
+		AuthorizedVoterPubkey:              pr.cfg.AuthorizedVoterPubkey,
 		PollIntervalDuration:               m.cfg.Failover.PollIntervalDuration.String(),
 		LeaderlessSamplesThreshold:         m.cfg.Failover.LeaderlessSamplesThreshold,
 		LeaderlessConfirmationPollDuration: m.cfg.Failover.LeaderlessConfirmationPollDuration.String(),
@@ -383,131 +429,196 @@ func (m *Manager) newRecorder() *recording.Recorder {
 		cfg.DelinquentSlotDistanceOverride = &v
 	}
 
-	return recording.New(node, cfg, time.Now().UTC(), m.ring.Snapshot())
+	return recording.New(node, cfg, time.Now().UTC(), pr.ring.Snapshot())
 }
 
-// ensureHAState implements basic HA logic
+// ensureHAState evaluates all enabled profiles and executes at most one failover.
 func (m *Manager) ensureHAState() {
 	m.logger.Debug("ensuring HA")
 
-	// refresh gossip state
-	m.gossipState.Refresh()
+	candidates := []failoverCandidate{}
+	for _, pr := range m.sortedProfiles() {
+		if candidate := m.evaluateProfile(pr); candidate != nil {
+			candidates = append(candidates, *candidate)
+		}
+	}
 
-	// capture gossip sample into ring buffer on every poll tick (pre-failover context window)
-	m.ring.Add(m.buildGossipSample())
+	if len(candidates) > 1 {
+		for _, candidate := range candidates[1:] {
+			m.logger.Warn("profile failover candidate deferred by profile priority",
+				"profile", candidate.profile.name,
+				"selected_profile", candidates[0].profile.name,
+			)
+			m.setProfileFailoverStatus(candidate.profile, "aborted_profile_priority")
+			if candidate.rec != nil {
+				candidate.rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+					Result: "aborted_profile_priority", FromNode: candidate.fromNode, ToNode: "unknown",
+				})
+			}
+		}
+	}
 
-	// refresh metrics
 	m.refreshMetrics()
-
-	// do nothing except warn if a config-undeclared active peer is found, this prevents false positive failovers
-	// and prompts users to declare these so that the anti-race condition logic (based on IPs) can continue to work as intended
-	if m.gossipState.HasConfigUndeclaredActivePeer() {
-		configUndeclaredActivePeer := m.gossipState.GetConfigUndeclaredActivePeer()
-		m.logger.Warn("active peer found not declared in HA cluster config - no failover required, but should be added to failover.peers", "ip", configUndeclaredActivePeer.IP, "pubkey", configUndeclaredActivePeer.Pubkey)
+	if len(candidates) == 0 {
 		return
 	}
 
-	// if there is an active peer found in the last failover.leaderless_samples_threshold - we are good
-	// having a lookback grace period is important to allow for RPC glitches and other issues
+	m.executeFailover(candidates[0])
+}
+
+func (m *Manager) evaluateProfile(pr *profileRuntime) *failoverCandidate {
+	m.logger.Debug("ensuring profile HA", "profile", pr.name)
+
+	pr.gossipState.Refresh()
+	pr.ring.Add(m.buildGossipSample(pr))
+
+	if pr.gossipState.HasConfigUndeclaredActivePeer() {
+		configUndeclaredActivePeer := pr.gossipState.GetConfigUndeclaredActivePeer()
+		m.logger.Warn("active peer found not declared in HA profile config - no failover required, but should be added to profiles.<name>.peers",
+			"profile", pr.name,
+			"ip", configUndeclaredActivePeer.IP,
+			"pubkey", configUndeclaredActivePeer.Pubkey,
+		)
+		return nil
+	}
+
 	var rec *recording.Recorder
-	if !m.gossipState.LeaderlessSamplesExceedsThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
-		// delinquency fast-path (opt-in): if failover.delinquency_bypass is enabled and the network
-		// has authoritatively declared the active peer delinquent via getVoteAccounts — cluster-wide
-		// consensus that the peer has not voted for at least delinquent_slot_distance slots, and not
-		// due to a low balance — skip the leaderless sample threshold and trigger failover immediately.
-		// ⚠️ Risk: a validator on a minority fork can appear delinquent but later recover. If it does,
-		// this bypass may trigger an unnecessary failover. Only enable if your validator can enter a
-		// "ghost" state (alive in gossip, not voting) that it cannot recover from on its own.
-		if m.cfg.Failover.DelinquencyBypass && m.gossipState.ActivePeerIsDelinquent() {
-			m.logger.Error("active peer declared delinquent by network - bypassing leaderless sample threshold and triggering failover (delinquency_bypass enabled)")
+	if !pr.gossipState.LeaderlessSamplesExceedsThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
+		if m.cfg.Failover.DelinquencyBypass && pr.gossipState.ActivePeerIsDelinquent() {
+			m.logger.Error("active peer declared delinquent by network - bypassing leaderless sample threshold and triggering failover (delinquency_bypass enabled)",
+				"profile", pr.name,
+			)
 			if m.cfg.Failover.Recording.Enabled {
-				rec = m.newRecorder()
+				rec = m.newRecorder(pr)
 				rec.AddEvent("bypass_triggered", fmt.Sprintf("leaderless_count=%d threshold=%d",
-					m.gossipState.LeaderlessSamplesCount, m.cfg.Failover.LeaderlessSamplesThreshold))
+					pr.gossipState.LeaderlessSamplesCount, m.cfg.Failover.LeaderlessSamplesThreshold))
 			}
 		} else {
-			m.logger.Debug("active peer found - no failover required")
-			return
+			m.logger.Debug("active peer found - no failover required", "profile", pr.name)
+			return nil
 		}
 	} else {
-		m.logger.Error(fmt.Sprintf("no active peer found in the last %d samples - failover required", m.gossipState.LeaderlessSamplesCount))
+		m.logger.Error(fmt.Sprintf("no active peer found in the last %d samples - failover required", pr.gossipState.LeaderlessSamplesCount),
+			"profile", pr.name,
+		)
 		if m.cfg.Failover.Recording.Enabled {
-			rec = m.newRecorder()
+			rec = m.newRecorder(pr)
 			rec.AddEvent("threshold_reached", fmt.Sprintf("leaderless_count=%d threshold=%d",
-				m.gossipState.LeaderlessSamplesCount, m.cfg.Failover.LeaderlessSamplesThreshold))
+				pr.gossipState.LeaderlessSamplesCount, m.cfg.Failover.LeaderlessSamplesThreshold))
 		}
 	}
 
-	// fromNode is the peer that was active before this failover; used in the recording filename.
-	fromNode := m.gossipState.GetLastActivePeer().Name
+	fromNode := pr.gossipState.GetLastActivePeer().Name
 	if fromNode == "" {
 		fromNode = "unknown"
 	}
 
-	// if we don't see ourselves in gossip - evaluate whether to become passive
-	if m.isSelfNotInGossip() {
-		// If RPC failed, we likely have network connectivity issues - become passive
-		if m.gossipState.LastRefreshHadRPCError() {
-			m.logger.Error("we do not appear in gossip due to RPC error (possible network connectivity issue) - ensuring we are passive")
-			m.ensurePassive()
-			return
+	occupancy := m.localState.Occupancy()
+	if m.isSelfNotInGossip(pr) {
+		if pr.gossipState.LastRefreshHadRPCError() {
+			if occupancy.Status == local.OccupancyActive && occupancy.Profile == pr.name {
+				m.logger.Error("we do not appear in gossip due to RPC error (possible network connectivity issue) - ensuring we are passive",
+					"profile", pr.name,
+				)
+				m.ensurePassive(pr)
+			}
+			return nil
 		}
 
-		// RPC succeeded but we're not in the results
-		// Check if there are other peers visible that could take over
-		if !m.gossipState.HasPeers(m.peerSelf.IP) {
-			// No other peers visible either - we might be the last node standing
-			// Don't call ensurePassive to avoid taking the entire cluster offline
-			m.logger.Warn("we do not appear in gossip and no other peers are visible (but RPC is working) - skipping ensurePassive to avoid taking entire cluster offline")
-			return
+		if !pr.gossipState.HasAvailablePeers(m.peerSelf.IP) {
+			m.logger.Warn("we do not appear in gossip and no available backup peers are visible - staying active/passive and alerting",
+				"profile", pr.name,
+			)
+			m.setProfileFailoverStatus(pr, "aborted_no_available_backup")
+			if rec != nil {
+				rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+					Result: "aborted_no_available_backup", FromNode: fromNode, ToNode: "unknown",
+				})
+			}
+			return nil
 		}
 
-		// Other peers are visible and could take over - safe to become passive
-		m.logger.Error("we do not appear in gossip but other peers are visible - ensuring we are passive so a peer can take over")
-		m.ensurePassive()
-		return
+		if occupancy.Status == local.OccupancyActive && occupancy.Profile == pr.name {
+			m.logger.Error("we do not appear in gossip but available peers are visible - ensuring we are passive so a peer can take over",
+				"profile", pr.name,
+			)
+			m.ensurePassive(pr)
+		}
+		return nil
 	}
-	m.logger.Debug("we are in gossip", "pubkey", m.selfGossipPubkey(), "public_ip", m.peerSelf.IP)
+	m.logger.Debug("we are in gossip", "profile", pr.name, "pubkey", m.selfGossipPubkey(pr), "public_ip", m.peerSelf.IP)
 
-	// to participate in failover we must be healthy
 	if !m.localState.IsSelfHealthy() {
-		m.logger.Error("we are not healthy - unable to become active in failover")
+		m.logger.Error("we are not healthy - unable to become active in failover", "profile", pr.name)
+		m.setProfileFailoverStatus(pr, "aborted_not_healthy")
 		if rec != nil {
 			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
 				Result: "aborted_not_healthy", FromNode: fromNode, ToNode: "unknown",
 			})
 		}
-		return
+		return nil
 	}
 
-	// we must have been healthy for long enough to rule out startup health flaps
 	if !m.localState.IsSelfHealthyLongEnough() {
 		m.logger.Warn("not healthy for long enough to be a failover candidate - standing by",
+			"profile", pr.name,
 			"healthy_for", m.localState.SelfHealthyDuration(),
 			"minimum_duration", m.cfg.Failover.SelfHealthy.MinimumDuration,
 		)
+		m.setProfileFailoverStatus(pr, "aborted_not_healthy_long_enough")
 		if rec != nil {
 			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
 				Result: "aborted_not_healthy_long_enough", FromNode: fromNode, ToNode: "unknown",
 			})
 		}
-		return
+		return nil
 	}
 
-	// one last check to ensure we are NOT already active
-	if m.localState.IsSelfActive() {
-		m.logger.Warn("we are already active - nothing to do")
-		return
+	occupancy = m.localState.Occupancy()
+	if occupancy.Status == local.OccupancyActive && occupancy.Profile == pr.name {
+		m.logger.Warn("we are already active - nothing to do", "profile", pr.name)
+		return nil
+	}
+	if occupancy.Status == local.OccupancyActive {
+		m.logger.Warn("local validator is already active for another profile - unable to become active",
+			"profile", pr.name,
+			"busy_profile", occupancy.Profile,
+		)
+		m.setProfileFailoverStatus(pr, "aborted_local_busy")
+		if rec != nil {
+			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+				Result: "aborted_local_busy", FromNode: fromNode, ToNode: occupancy.Profile,
+			})
+		}
+		return nil
+	}
+	if occupancy.Status != local.OccupancyFree {
+		m.logger.Error("local validator identity is unknown - unable to become active",
+			"profile", pr.name,
+			"identity", occupancy.Pubkey,
+		)
+		m.setProfileFailoverStatus(pr, "aborted_unknown_occupancy")
+		if rec != nil {
+			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
+				Result: "aborted_unknown_occupancy", FromNode: fromNode, ToNode: "unknown",
+			})
+		}
+		return nil
 	}
 
-	// at this point we know we are in gossip, healthy, and passive
-	// so we begin checks to make sure none of our peers have already taken over as active
+	return &failoverCandidate{profile: pr, rec: rec, fromNode: fromNode}
+}
 
-	// introduce a rank-based delay to safeguard against multiple nodes trying to become active at the same time
+func (m *Manager) executeFailover(candidate failoverCandidate) {
+	pr := candidate.profile
+	rec := candidate.rec
+	fromNode := candidate.fromNode
+
 	delayStart := time.Now()
-	delayApplied, err := m.delayTakeoverAsActive()
+	delayApplied, err := m.delayTakeoverAsActive(pr)
 	if err != nil {
 		m.logger.Error(err.Error())
+		m.setProfileFailoverStatus(pr, "aborted_delay_error")
 		if rec != nil {
 			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
 				Result: "aborted_delay_error", FromNode: fromNode, ToNode: "unknown",
@@ -523,35 +634,30 @@ func (m *Manager) ensureHAState() {
 		}
 	}
 
-	// refresh the peers state to ensure no one else has taken over already - this will reset the leaderless samples count
-	// if a new leader is found.
-	// rank-0 nodes skip this re-validation because zero time elapsed during their "delay", so no peer could have
-	// taken over in the interim - avoiding an unnecessary RPC round trip on the hot path.
 	if delayApplied {
-		m.gossipState.Refresh()
+		pr.gossipState.Refresh()
 		if rec != nil {
-			rec.AddSample(m.buildGossipSample())
+			rec.AddSample(m.buildGossipSample(pr))
 			rec.AddEvent("revalidation_refresh", "")
 		}
 	}
 
-	// an undeclared active peer may have appeared during the delay - treat the same as the pre-delay check
-	if m.gossipState.HasConfigUndeclaredActivePeer() {
-		configUndeclaredActivePeer := m.gossipState.GetConfigUndeclaredActivePeer()
-		m.logger.Warn("active peer found not declared in HA cluster config (post-delay re-check) - aborting takeover, should be added to failover.peers", "ip", configUndeclaredActivePeer.IP, "pubkey", configUndeclaredActivePeer.Pubkey)
+	if pr.gossipState.HasConfigUndeclaredActivePeer() {
+		configUndeclaredActivePeer := pr.gossipState.GetConfigUndeclaredActivePeer()
+		m.logger.Warn("active peer found not declared in HA profile config (post-delay re-check) - aborting takeover, should be added to profiles.<name>.peers",
+			"profile", pr.name,
+			"ip", configUndeclaredActivePeer.IP,
+			"pubkey", configUndeclaredActivePeer.Pubkey,
+		)
+		m.setProfileFailoverStatus(pr, "aborted_config_undeclared_active_peer")
 		return
 	}
 
-	// If we delayed (rank > 0) and the post-delay re-validation refresh found an active peer
-	// (LeaderlessSamplesCount reset to 0), a peer took over during our delay window — abort.
-	// We do NOT check this for rank-0 nodes (delayApplied == false): no time elapsed, no
-	// refresh was done, so the count simply reflects accumulated samples from this cycle.
-	// Checking count < threshold here would falsely abort delinquency-bypass takeovers on
-	// rank-0 (count=1) and on rank-1 when no peer took over during the delay (count still < threshold).
-	if delayApplied && m.gossipState.LeaderlessSamplesCount == 0 {
-		activePeerState, err := m.gossipState.GetActivePeer()
+	if delayApplied && pr.gossipState.LeaderlessSamplesCount == 0 {
+		activePeerState, err := pr.gossipState.GetActivePeer()
 		if err != nil {
 			m.logger.Warn("active peer appeared during takeover delay but could not be identified in state - aborting takeover", "error", err)
+			m.setProfileFailoverStatus(pr, "aborted_peer_took_over")
 			if rec != nil {
 				rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
 					Result: "aborted_peer_took_over", FromNode: fromNode, ToNode: "unknown",
@@ -564,6 +670,7 @@ func (m *Manager) ensureHAState() {
 			"pubkey", activePeerState.Pubkey,
 			"seen_at", activePeerState.LastSeenAtString(),
 		)
+		m.setProfileFailoverStatus(pr, "aborted_peer_took_over")
 		if rec != nil {
 			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
 				Result: "aborted_peer_took_over", FromNode: fromNode, ToNode: activePeerState.Name,
@@ -572,16 +679,14 @@ func (m *Manager) ensureHAState() {
 		return
 	}
 
-	// now we know we are healthy, passive, and none of our peers have assumed active role
-	// we can take over as active - this should be idempotent in setting the active role
 	if rec != nil {
 		rec.AddEvent("ensure_active_start", "")
 	}
 	ensureActiveStart := time.Now()
-	m.ensureActive()
+	m.ensureActive(pr)
 	if rec != nil {
 		duration := time.Since(ensureActiveStart).Round(time.Millisecond)
-		if m.localState.IsSelfActive() {
+		if m.localState.IsSelfActive(pr.name) {
 			rec.AddEvent("confirmed_active", fmt.Sprintf("duration=%s", duration))
 			rec.WriteAsync(m.recordingOutputDir, recording.Outcome{
 				Result: "became_active", FromNode: fromNode, ToNode: m.cfg.Validator.Name,
@@ -595,156 +700,186 @@ func (m *Manager) ensureHAState() {
 	}
 }
 
-// ensurePassive calls a user-specified command that should be idempotent in setting the passive role
-// safest thing would be to to ensure validator service always starts with passive identity
-// and the failover.passive.command simply retsarts the validator service or waits for it to start up
-func (m *Manager) ensurePassive() {
-	var err error
-	passivePubkey := m.cfg.Validator.Identities.PassivePubkey()
-	m.logger.Info("becoming passive", "pubkey", passivePubkey)
+func (m *Manager) roleTemplateData(pr *profileRuntime) config.RoleCommandTemplateData {
+	priority := 0
+	if pr != nil && pr.cfg.Priority != nil {
+		priority = *pr.cfg.Priority
+	}
+	data := config.RoleCommandTemplateData{
+		ProfilePriority:            priority,
+		PassiveIdentityKeypairFile: m.cfg.Validator.Identities.PassiveKeyPairFile,
+		PassiveIdentityPubkey:      m.cfg.Validator.Identities.PassivePubkey(),
+		SelfName:                   m.cfg.Validator.Name,
+	}
+	if pr != nil {
+		data.ProfileName = pr.name
+		data.VoteAccountPubkey = pr.cfg.VotePubkeyStr
+		data.AuthorizedVoterPubkey = pr.cfg.AuthorizedVoterPubkey
+		data.ActiveIdentityKeypairFile = pr.cfg.Identities.ActiveKeyPairFile
+		data.ActiveIdentityPubkey = pr.cfg.ActivePubkey()
+	}
+	return data
+}
 
-	// Update failover status in cache
+func (m *Manager) renderedRole(role config.Role, pr *profileRuntime) (config.Role, error) {
+	return role.RenderedCopy(m.roleTemplateData(pr))
+}
+
+// ensurePassive calls a user-specified command that should be idempotent in setting the shared passive role.
+func (m *Manager) ensurePassive(pr *profileRuntime) {
+	passivePubkey := m.cfg.Validator.Identities.PassivePubkey()
+	m.logger.Info("becoming passive", "profile", pr.name, "pubkey", passivePubkey)
+
+	role, err := m.renderedRole(m.cfg.Failover.Passive, pr)
+	if err != nil {
+		m.logger.Error("failed to render passive command", "profile", pr.name, "error", err)
+		return
+	}
+
 	state := m.cache.GetState()
 	state.FailoverStatus = constants.StatusBecomingPassive
+	m.setProfileFailoverStatus(pr, constants.StatusBecomingPassive)
+	setCachedProfileFailoverStatus(&state, pr, constants.StatusBecomingPassive)
 	m.cache.UpdateState(state)
 
-	// run pre hooks
-	if len(m.cfg.Failover.Passive.Hooks.Pre) > 0 {
-		m.logger.Debug("running pre-passive hooks")
-		err = m.cfg.Failover.Passive.Hooks.RunPre(config.HooksRunOptions{
+	if len(role.Hooks.Pre) > 0 {
+		m.logger.Debug("running pre-passive hooks", "profile", pr.name)
+		err = role.Hooks.RunPre(config.HooksRunOptions{
 			DryRun:       m.cfg.Failover.DryRun,
 			LoggerPrefix: m.logPrefix,
 			LoggerArgs: []any{
 				"failover_stage", "pre-passive",
+				"profile", pr.name,
 			},
 		})
 	}
 	if err != nil {
-		m.logger.Error("failed to run pre-passive hooks", "error", err)
+		m.logger.Error("failed to run pre-passive hooks", "profile", pr.name, "error", err)
 		return
 	}
 
-	// run passive command
-	m.logger.Debug("running passive command")
-	err = m.cfg.Failover.Passive.RunCommand(config.RoleCommandRunOptions{
+	m.logger.Debug("running passive command", "profile", pr.name)
+	err = role.RunCommand(config.RoleCommandRunOptions{
 		DryRun:       m.cfg.Failover.DryRun,
 		LoggerPrefix: m.logPrefix,
 		LoggerArgs: []any{
 			"failover_stage", constants.RoleNamePassive,
+			"profile", pr.name,
 			"passive_pubkey", passivePubkey,
 		},
 	})
 	if err != nil {
-		m.logger.Warn("failed to run passive command", "error", err)
+		m.logger.Warn("failed to run passive command", "profile", pr.name, "error", err)
 		return
 	}
 
-	// run post hooks
-	if len(m.cfg.Failover.Passive.Hooks.Post) > 0 {
-		m.logger.Debug("running post-passive hooks")
-		m.cfg.Failover.Passive.Hooks.RunPost(config.HooksRunOptions{
+	if len(role.Hooks.Post) > 0 {
+		m.logger.Debug("running post-passive hooks", "profile", pr.name)
+		role.Hooks.RunPost(config.HooksRunOptions{
 			DryRun:       m.cfg.Failover.DryRun,
 			LoggerPrefix: m.logPrefix,
 			LoggerArgs: []any{
 				"failover_stage", "post-passive",
+				"profile", pr.name,
 			},
 		})
 	}
 
-	// check to ensure the call to the failover.passive.command was successful
 	if !m.localState.IsSelfPassive() {
 		m.logger.Error("we are not passive as reported by local rpc - unable to become active in failover",
+			"profile", pr.name,
 			"passive_pubkey", passivePubkey,
 		)
 		return
 	}
 
-	m.logger.Debug("we are confirmed to be passive as reported by local rpc", "passive_pubkey", passivePubkey)
+	m.logger.Debug("we are confirmed to be passive as reported by local rpc", "profile", pr.name, "passive_pubkey", passivePubkey)
+	pr.gossipState.Refresh()
 
-	// refresh gossip state to warn if we are in gossip but not passive
-	m.gossipState.Refresh()
-
-	// if we are not in gossip, warn - we may be starting up or dropped from the network
-	if m.isSelfNotInGossip() {
-		m.logger.Warn("we are not in gossip after becoming passive", "passive_pubkey", passivePubkey)
+	if m.isSelfNotInGossip(pr) {
+		m.logger.Warn("we are not in gossip after becoming passive", "profile", pr.name, "passive_pubkey", passivePubkey)
 		return
 	}
 
-	// if we are in gossip but not passive, show error - failover.passive.command has likely fucked up
 	if !m.localState.IsSelfPassive() {
-		m.logger.Error("we are in gossip but not passive - this should not happen check failover.passive.command logic", "passive_pubkey", passivePubkey)
+		m.logger.Error("we are in gossip but not passive - this should not happen check failover.passive.command logic", "profile", pr.name, "passive_pubkey", passivePubkey)
 		return
 	}
 
-	// we are passive by local rpc and in gossip
-	m.logger.Info("we are confirmed to be passive", "passive_pubkey", passivePubkey)
+	m.logger.Info("we are confirmed to be passive", "profile", pr.name, "passive_pubkey", passivePubkey)
 }
 
-// ensureActive makes the node active - this should be idempotent in setting the  active role
-// safest thing would be to to ensure validator service alywas starts with passive identity
-// and the failover.passive.command simply retsarts the validator service
-func (m *Manager) ensureActive() {
-	var err error
-	activePubkey := m.cfg.Validator.Identities.ActivePubkey()
-	m.logger.Info("becoming active", "pubkey", activePubkey)
+// ensureActive makes the node active for the selected profile.
+func (m *Manager) ensureActive(pr *profileRuntime) {
+	activePubkey := pr.cfg.ActivePubkey()
+	m.logger.Info("becoming active", "profile", pr.name, "pubkey", activePubkey)
 
-	// Update failover status in cache
+	role, err := m.renderedRole(m.cfg.Failover.Active, pr)
+	if err != nil {
+		m.logger.Error("failed to render active command", "profile", pr.name, "error", err)
+		return
+	}
+
 	state := m.cache.GetState()
 	state.FailoverStatus = constants.StatusBecomingActive
+	m.setProfileFailoverStatus(pr, constants.StatusBecomingActive)
+	setCachedProfileFailoverStatus(&state, pr, constants.StatusBecomingActive)
 	m.cache.UpdateState(state)
 
-	// run pre hooks
-	if len(m.cfg.Failover.Active.Hooks.Pre) > 0 {
-		m.logger.Debug("running pre-active hooks")
-		err = m.cfg.Failover.Active.Hooks.RunPre(config.HooksRunOptions{
+	if len(role.Hooks.Pre) > 0 {
+		m.logger.Debug("running pre-active hooks", "profile", pr.name)
+		err = role.Hooks.RunPre(config.HooksRunOptions{
 			DryRun:       m.cfg.Failover.DryRun,
 			LoggerPrefix: m.logPrefix,
 			LoggerArgs: []any{
 				"failover_stage", "pre-active",
+				"profile", pr.name,
 			},
 		})
 	}
 	if err != nil {
-		m.logger.Error("failed to run pre-active hooks", "error", err)
+		m.logger.Error("failed to run pre-active hooks", "profile", pr.name, "error", err)
 		return
 	}
 
-	// run active command
-	m.logger.Debug("running active command")
-	err = m.cfg.Failover.Active.RunCommand(config.RoleCommandRunOptions{
+	m.logger.Debug("running active command", "profile", pr.name)
+	err = role.RunCommand(config.RoleCommandRunOptions{
 		DryRun:       m.cfg.Failover.DryRun,
 		LoggerPrefix: m.logPrefix,
 		LoggerArgs: []any{
 			"failover_stage", constants.RoleNameActive,
+			"profile", pr.name,
 			"active_pubkey", activePubkey,
+			"vote_pubkey", pr.cfg.VotePubkeyStr,
+			"authorized_voter", pr.cfg.AuthorizedVoterPubkey,
 		},
 	})
 	if err != nil {
-		m.logger.Warn("failed to run active command", "error", err)
+		m.logger.Warn("failed to run active command", "profile", pr.name, "error", err)
 		return
 	}
 
-	// run post hooks
-	if len(m.cfg.Failover.Active.Hooks.Post) > 0 {
-		m.logger.Debug("running post-active hooks")
-		m.cfg.Failover.Active.Hooks.RunPost(config.HooksRunOptions{
+	if len(role.Hooks.Post) > 0 {
+		m.logger.Debug("running post-active hooks", "profile", pr.name)
+		role.Hooks.RunPost(config.HooksRunOptions{
 			DryRun:       m.cfg.Failover.DryRun,
 			LoggerPrefix: m.logPrefix,
 			LoggerArgs: []any{
 				"failover_stage", "post-active",
+				"profile", pr.name,
 			},
 		})
 	}
 
-	// check to ensure the call to the failover.active.command was successful
-	if !m.localState.IsSelfActive() {
+	if !m.localState.IsSelfActive(pr.name) {
 		m.logger.Error("this node is not active as reported by local rpc - unable to become active in failover",
+			"profile", pr.name,
 			"active_pubkey", activePubkey,
 		)
 		return
 	}
 
-	m.logger.Info("we are confirmed to be active", "active_pubkey", activePubkey)
+	m.logger.Info("we are confirmed to be active", "profile", pr.name, "active_pubkey", activePubkey)
 }
 
 // startHealthyTracker starts a goroutine that samples the local validator health on its own
@@ -770,18 +905,18 @@ func (m *Manager) startHealthyTracker() {
 }
 
 // isSelfInGossip checks if the validator is in the gossip state
-func (m *Manager) isSelfInGossip() (isInGossip bool) {
-	return m.gossipState.HasIP(m.peerSelf.IP)
+func (m *Manager) isSelfInGossip(pr *profileRuntime) (isInGossip bool) {
+	return pr.gossipState.HasIP(m.peerSelf.IP)
 }
 
 // isSelfNotInGossip checks if the validator is not in the gossip state
-func (m *Manager) isSelfNotInGossip() (isNotInGossip bool) {
-	return !m.isSelfInGossip()
+func (m *Manager) isSelfNotInGossip(pr *profileRuntime) (isNotInGossip bool) {
+	return !m.isSelfInGossip(pr)
 }
 
 // selfGossipPubkey returns the pubkey of the validator in gossip
-func (m *Manager) selfGossipPubkey() (pubkey string) {
-	for _, peer := range m.gossipState.GetPeerStates() {
+func (m *Manager) selfGossipPubkey(pr *profileRuntime) (pubkey string) {
+	for _, peer := range pr.gossipState.GetPeerStates() {
 		if peer.IP == m.peerSelf.IP {
 			return peer.Pubkey
 		}
@@ -793,11 +928,14 @@ func (m *Manager) selfGossipPubkey() (pubkey string) {
 func (m *Manager) refreshMetrics() {
 	m.logger.Debug("refreshing metrics")
 
-	// Determine role and status
+	previousState := m.cache.GetState()
+
+	// Determine global role and status
 	var role, status string
-	if m.localState.IsSelfActive() {
+	occupancy := m.localState.Occupancy()
+	if occupancy.Status == local.OccupancyActive {
 		role = constants.RoleNameActive
-	} else if m.localState.IsSelfPassive() {
+	} else if occupancy.Status == local.OccupancyFree {
 		role = constants.RoleNamePassive
 	} else {
 		role = constants.RoleNameUnknown
@@ -808,26 +946,46 @@ func (m *Manager) refreshMetrics() {
 	} else {
 		status = constants.StatusUnhealthy
 	}
+	failoverStatus := m.failoverStatusForMetrics(previousState.FailoverStatus, occupancy)
 
-	// Get peer count and self in gossip status
-	peerCount := len(m.gossipState.GetPeerStates())
-	selfInGossip := m.gossipState.HasIP(m.peerSelf.IP)
+	peerCount := 0
+	selfInGossip := false
+	profileStates := map[string]cache.ProfileState{}
+	for _, pr := range m.sortedProfiles() {
+		ps := cache.ProfileState{
+			PeerCount:      len(pr.gossipState.GetPeerStates()),
+			SelfInGossip:   pr.gossipState.HasIP(m.peerSelf.IP),
+			FailoverStatus: m.profileFailoverStatusForMetrics(pr, occupancy),
+		}
+		if pr.gossipState.HasActivePeer() {
+			ps.Role = constants.RoleNameActive
+		} else {
+			ps.Role = constants.RoleNamePassive
+		}
+		profileStates[pr.name] = ps
+		peerCount += ps.PeerCount
+		selfInGossip = selfInGossip || ps.SelfInGossip
+	}
 
 	// Update cache with current state
 	state := cache.State{
-		ValidatorName:  m.cfg.Validator.Name,
-		PublicIP:       m.peerSelf.IP,
-		Role:           role,
-		Status:         status,
-		PeerCount:      peerCount,
-		SelfInGossip:   selfInGossip,
-		FailoverStatus: constants.StatusIdle,
+		ValidatorName:    m.cfg.Validator.Name,
+		PublicIP:         m.peerSelf.IP,
+		Role:             role,
+		Status:           status,
+		Occupancy:        string(occupancy.Status),
+		OccupancyProfile: occupancy.Profile,
+		PeerCount:        peerCount,
+		SelfInGossip:     selfInGossip,
+		FailoverStatus:   failoverStatus,
+		Profiles:         profileStates,
 	}
 
 	m.cache.UpdateState(state)
 
 	// Refresh metrics from cache
 	m.metrics.RefreshMetrics()
+	m.clearTransientProfileFailoverStatuses()
 
 	m.logger.Debug("metrics refreshed",
 		"role", role,
@@ -837,24 +995,112 @@ func (m *Manager) refreshMetrics() {
 	)
 }
 
+func (m *Manager) failoverStatusForMetrics(previous string, occupancy local.Occupancy) string {
+	switch previous {
+	case constants.StatusBecomingActive:
+		if occupancy.Status == local.OccupancyActive {
+			return constants.StatusIdle
+		}
+		return previous
+	case constants.StatusBecomingPassive:
+		if occupancy.Status == local.OccupancyFree {
+			return constants.StatusIdle
+		}
+		return previous
+	default:
+		return constants.StatusIdle
+	}
+}
+
+func (m *Manager) setProfileFailoverStatus(pr *profileRuntime, status string) {
+	if pr == nil || pr.name == "" || status == "" {
+		return
+	}
+	if m.profileFailoverStatuses == nil {
+		m.profileFailoverStatuses = make(map[string]string)
+	}
+	m.profileFailoverStatuses[pr.name] = status
+}
+
+func setCachedProfileFailoverStatus(state *cache.State, pr *profileRuntime, status string) {
+	if pr == nil || pr.name == "" || status == "" {
+		return
+	}
+	if state.Profiles == nil {
+		state.Profiles = map[string]cache.ProfileState{}
+	}
+	profileState := state.Profiles[pr.name]
+	profileState.FailoverStatus = status
+	state.Profiles[pr.name] = profileState
+}
+
+func (m *Manager) profileFailoverStatusForMetrics(pr *profileRuntime, occupancy local.Occupancy) string {
+	status := m.profileFailoverStatuses[pr.name]
+	if status == "" {
+		return constants.StatusIdle
+	}
+
+	switch status {
+	case constants.StatusBecomingActive:
+		if occupancy.Status == local.OccupancyActive && occupancy.Profile == pr.name {
+			return constants.StatusIdle
+		}
+	case constants.StatusBecomingPassive:
+		if occupancy.Status == local.OccupancyFree {
+			return constants.StatusIdle
+		}
+	}
+	return status
+}
+
+func (m *Manager) clearTransientProfileFailoverStatuses() {
+	for profileName, status := range m.profileFailoverStatuses {
+		if strings.HasPrefix(status, "aborted_") {
+			delete(m.profileFailoverStatuses, profileName)
+		}
+	}
+}
+
+func (m *Manager) sortedProfiles() []*profileRuntime {
+	profiles := make([]*profileRuntime, 0, len(m.profiles))
+	for _, pr := range m.profiles {
+		profiles = append(profiles, pr)
+	}
+	sort.Slice(profiles, func(i, j int) bool {
+		pi := 0
+		pj := 0
+		if profiles[i].cfg.Priority != nil {
+			pi = *profiles[i].cfg.Priority
+		}
+		if profiles[j].cfg.Priority != nil {
+			pj = *profiles[j].cfg.Priority
+		}
+		if pi == pj {
+			return profiles[i].name < profiles[j].name
+		}
+		return pi < pj
+	})
+	return profiles
+}
+
 // delayTakeoverAsActive introduces a delay when there are multiple peers
 // to safeguard against multiple nodes trying to become active at the same time.
 // Returns (delayApplied, error): delayApplied is true only when the node actually slept
 // (i.e. rank > 0). Rank-0 nodes return false so the caller can skip the post-delay
 // re-validation gossip refresh - no time elapsed, so no peer could have taken over.
-func (m *Manager) delayTakeoverAsActive() (delayApplied bool, err error) {
+func (m *Manager) delayTakeoverAsActive(pr *profileRuntime) (delayApplied bool, err error) {
 	// peerCount includes ourselves, so if we are the only peer, we don't need to delay
-	peerCount := m.gossipState.PeerCount()
+	peerCount := pr.gossipState.PeerCount()
 	if peerCount == 0 {
 		return false, fmt.Errorf("no peers found - unable to delay takeover")
 	}
 
 	// Determine self rank: prefer explicit config priorities, fall back to IP-based ordering.
 	// Config-based ranking is stable and does not shift when a peer briefly drops from gossip.
-	rankedPeerIPs := m.cfg.Failover.PeerIPPriorityRankMap(m.peerSelf.IP)
+	rankedPeerIPs := pr.cfg.PeerIPPriorityRankMap()
 	rankingSource := "config priority"
 	if rankedPeerIPs == nil {
-		rankedPeerIPs = m.gossipState.PeerIPRankMap()
+		rankedPeerIPs = pr.gossipState.PeerIPRankMap()
 		rankingSource = "IP address"
 	}
 
@@ -865,15 +1111,15 @@ func (m *Manager) delayTakeoverAsActive() (delayApplied bool, err error) {
 	}
 
 	if selfPeerRank == 0 {
-		m.logger.Debug(fmt.Sprintf("this node is ranked 0/%d by %s - no takeover delay", peerCount, rankingSource))
+		m.logger.Debug(fmt.Sprintf("this node is ranked 0/%d by %s - no takeover delay", peerCount, rankingSource), "profile", pr.name)
 		return false, nil
 	}
 
 	// peers with ranks 1 and over have a deterministic delay of rank*poll_interval_duration
 	delay := time.Duration(selfPeerRank) * m.cfg.Failover.PollIntervalDuration
 
-	m.logger.Warn(fmt.Sprintf("delaying takeover by %s (<rank %d (of %d peers) by %s> * <%s poll_interval_duration>) to avoid race condition with higher ranked peer", delay, selfPeerRank, peerCount, rankingSource, m.cfg.Failover.PollIntervalDuration))
+	m.logger.Warn(fmt.Sprintf("delaying takeover by %s (<rank %d (of %d peers) by %s> * <%s poll_interval_duration>) to avoid race condition with higher ranked peer", delay, selfPeerRank, peerCount, rankingSource, m.cfg.Failover.PollIntervalDuration), "profile", pr.name)
 	time.Sleep(delay)
-	m.logger.Warn("takeover delay complete")
+	m.logger.Warn("takeover delay complete", "profile", pr.name)
 	return true, nil
 }

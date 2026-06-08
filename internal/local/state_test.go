@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	testProfileName   = "test-profile"
 	testActivePubkey  = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 	testPassivePubkey = "11111111111111111111111111111112"
 )
@@ -59,8 +60,11 @@ func identityResult(pubkey string) map[string]interface{} {
 // newTestState creates a State wired to the given rpc.Client with sensible test defaults.
 func newTestState(rpcClient *rpc.Client, minDuration time.Duration) *State {
 	return NewState(Options{
-		RPC:          rpcClient,
-		ActivePubkey: testActivePubkey,
+		RPC:           rpcClient,
+		PassivePubkey: testPassivePubkey,
+		ActivePubkeysByProfile: map[string]string{
+			testProfileName: testActivePubkey,
+		},
 		Cfg: config.SelfHealthy{
 			MinimumDuration:      minDuration,
 			PollIntervalDuration: time.Second,
@@ -79,14 +83,18 @@ func TestNewState(t *testing.T) {
 	}
 
 	s := NewState(Options{
-		RPC:          rpcClient,
-		Cfg:          cfg,
-		ActivePubkey: testActivePubkey,
-		Ctx:          context.Background(),
+		RPC:           rpcClient,
+		Cfg:           cfg,
+		PassivePubkey: testPassivePubkey,
+		ActivePubkeysByProfile: map[string]string{
+			testProfileName: testActivePubkey,
+		},
+		Ctx: context.Background(),
 	})
 
 	require.NotNil(t, s)
-	assert.Equal(t, testActivePubkey, s.activePubkey)
+	assert.Equal(t, testPassivePubkey, s.passivePubkey)
+	assert.Equal(t, testActivePubkey, s.activePubkeysByProfile[testProfileName])
 	assert.Equal(t, cfg.MinimumDuration, s.cfg.MinimumDuration)
 	assert.True(t, s.healthySince.IsZero())
 	assert.False(t, s.minDurationReached)
@@ -154,7 +162,7 @@ func TestIsSelfActive_IdentityMatchesActivePubkey(t *testing.T) {
 		"getIdentity": identityResult(testActivePubkey),
 	})
 	s := newTestState(rpc.NewClient("test", server.URL), 45*time.Second)
-	assert.True(t, s.IsSelfActive())
+	assert.True(t, s.IsSelfActive(testProfileName))
 }
 
 func TestIsSelfActive_IdentityDoesNotMatchActivePubkey(t *testing.T) {
@@ -162,12 +170,12 @@ func TestIsSelfActive_IdentityDoesNotMatchActivePubkey(t *testing.T) {
 		"getIdentity": identityResult(testPassivePubkey),
 	})
 	s := newTestState(rpc.NewClient("test", server.URL), 45*time.Second)
-	assert.False(t, s.IsSelfActive())
+	assert.False(t, s.IsSelfActive(testProfileName))
 }
 
 func TestIsSelfActive_RPCError(t *testing.T) {
 	s := newTestState(rpc.NewClient("test", "https://invalid-url-that-will-fail.local"), 45*time.Second)
-	assert.False(t, s.IsSelfActive())
+	assert.False(t, s.IsSelfActive(testProfileName))
 }
 
 // --- IsSelfPassive ---
@@ -345,8 +353,11 @@ func TestSampleSelf_ConcurrentAccess(t *testing.T) {
 // newTestStateWithGrace creates a State with an explicit UnhealthyGraceCount.
 func newTestStateWithGrace(rpcClient *rpc.Client, minDuration time.Duration, graceCount int) *State {
 	return NewState(Options{
-		RPC:          rpcClient,
-		ActivePubkey: testActivePubkey,
+		RPC:           rpcClient,
+		PassivePubkey: testPassivePubkey,
+		ActivePubkeysByProfile: map[string]string{
+			testProfileName: testActivePubkey,
+		},
 		Cfg: config.SelfHealthy{
 			MinimumDuration:      minDuration,
 			PollIntervalDuration: time.Second,

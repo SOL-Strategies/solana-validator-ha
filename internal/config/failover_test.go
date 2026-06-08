@@ -47,7 +47,6 @@ func TestFailover_Validate_ConfirmationPollCeiling(t *testing.T) {
 		SelfHealthy:                        SelfHealthy{MinimumDuration: 30 * time.Second, PollIntervalDuration: 2 * time.Second},
 		Active:                             Role{Command: "echo active"},
 		Passive:                            Role{Command: "echo passive"},
-		Peers:                              Peers{"v1": {IP: "1.2.3.4"}},
 	}
 
 	err := base.Validate()
@@ -64,7 +63,6 @@ func TestFailover_Validate_ConfirmationPollAtCeiling(t *testing.T) {
 		SelfHealthy:                        SelfHealthy{MinimumDuration: 30 * time.Second, PollIntervalDuration: 2 * time.Second},
 		Active:                             Role{Command: "echo active"},
 		Passive:                            Role{Command: "echo passive"},
-		Peers:                              Peers{"v1": {IP: "1.2.3.4"}},
 	}
 
 	err := base.Validate()
@@ -79,7 +77,6 @@ func TestFailover_Validate_ConfirmationPollBelowCeiling(t *testing.T) {
 		SelfHealthy:                        SelfHealthy{MinimumDuration: 30 * time.Second, PollIntervalDuration: 2 * time.Second},
 		Active:                             Role{Command: "echo active"},
 		Passive:                            Role{Command: "echo passive"},
-		Peers:                              Peers{"v1": {IP: "1.2.3.4"}},
 	}
 
 	err := base.Validate()
@@ -102,10 +99,6 @@ func TestFailover_Validate(t *testing.T) {
 		},
 		Passive: Role{
 			Command: "systemctl stop solana",
-		},
-		Peers: Peers{
-			"validator-1": {IP: "192.168.1.10"},
-			"validator-2": {IP: "192.168.1.11"},
 		},
 	}
 
@@ -153,36 +146,15 @@ func TestFailover_Validate(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failover.passive.command must be defined")
 
-	// Test with no peers
+	// Test with legacy top-level peers
 	failover.Passive.Command = "systemctl stop solana"
-	failover.Peers = Peers{}
+	failover.Peers = Peers{"validator-1": {IP: "192.168.1.10"}}
 	err = failover.Validate()
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failover.peers - at least one peer must be defined")
-
-	// Test with invalid IP address
-	failover.Peers = Peers{
-		"validator-1": {IP: "invalid-ip"},
-	}
-	err = failover.Validate()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failover.peers - invalid IP address")
-
-	// Test with duplicate IP addresses
-	failover.Peers = Peers{
-		"validator-1": {IP: "192.168.1.10"},
-		"validator-2": {IP: "192.168.1.10"},
-	}
-	err = failover.Validate()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failover.peers - duplicate IP address")
+	assert.Contains(t, err.Error(), "failover.peers is no longer supported")
 
 	// Test with delinquent slot distance override enabled with zero value (should pass)
-	// Reset peers to valid values first
-	failover.Peers = Peers{
-		"validator-1": {IP: "192.168.1.10"},
-		"validator-2": {IP: "192.168.1.11"},
-	}
+	failover.Peers = nil
 	failover.DelinquentSlotDistanceOverride = DelinquentSlotDistanceOverride{
 		Enabled: true,
 		Value:   0,
@@ -219,82 +191,29 @@ func validFailoverBase() *Failover {
 		},
 		Active:  Role{Command: "systemctl start solana"},
 		Passive: Role{Command: "systemctl stop solana"},
-		Peers: Peers{
-			"validator-2": {IP: "192.168.1.11"},
-			"validator-3": {IP: "192.168.1.12"},
-		},
 	}
 }
 
-func TestFailover_ValidatePriority(t *testing.T) {
-	t.Run("no priorities is valid (backward compat)", func(t *testing.T) {
+func TestFailover_ValidateLegacyPeerFields(t *testing.T) {
+	t.Run("no legacy peer fields is valid", func(t *testing.T) {
 		f := validFailoverBase()
 		assert.NoError(t, f.Validate())
 	})
 
-	t.Run("all priorities set is valid", func(t *testing.T) {
+	t.Run("top-level priority is rejected", func(t *testing.T) {
 		f := validFailoverBase()
 		f.Priority = intPtr(0)
-		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(1)}
-		f.Peers["validator-3"] = Peer{IP: "192.168.1.12", Priority: intPtr(2)}
-		assert.NoError(t, f.Validate())
-	})
-
-	t.Run("partial priorities is an error", func(t *testing.T) {
-		f := validFailoverBase()
-		f.Priority = intPtr(0)
-		// peers have no priority
 		err := f.Validate()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "either all nodes")
+		assert.Contains(t, err.Error(), "failover.priority is no longer supported")
 	})
 
-	t.Run("peer has priority but self does not", func(t *testing.T) {
+	t.Run("top-level peers are rejected", func(t *testing.T) {
 		f := validFailoverBase()
-		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(1)}
+		f.Peers = Peers{"validator-2": {IP: "192.168.1.11"}}
 		err := f.Validate()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "either all nodes")
-	})
-
-	t.Run("duplicate priority between peers is an error", func(t *testing.T) {
-		f := validFailoverBase()
-		f.Priority = intPtr(0)
-		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(1)}
-		f.Peers["validator-3"] = Peer{IP: "192.168.1.12", Priority: intPtr(1)} // duplicate
-		err := f.Validate()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "already used by")
-	})
-
-	t.Run("duplicate priority between self and peer is an error", func(t *testing.T) {
-		f := validFailoverBase()
-		f.Priority = intPtr(0)
-		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(0)} // same as self
-		f.Peers["validator-3"] = Peer{IP: "192.168.1.12", Priority: intPtr(2)}
-		err := f.Validate()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "already used by self")
-	})
-
-	t.Run("negative self priority is an error", func(t *testing.T) {
-		f := validFailoverBase()
-		f.Priority = intPtr(-1)
-		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(1)}
-		f.Peers["validator-3"] = Peer{IP: "192.168.1.12", Priority: intPtr(2)}
-		err := f.Validate()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failover.priority must be non-negative")
-	})
-
-	t.Run("negative peer priority is an error", func(t *testing.T) {
-		f := validFailoverBase()
-		f.Priority = intPtr(0)
-		f.Peers["validator-2"] = Peer{IP: "192.168.1.11", Priority: intPtr(-1)}
-		f.Peers["validator-3"] = Peer{IP: "192.168.1.12", Priority: intPtr(2)}
-		err := f.Validate()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "priority must be non-negative")
+		assert.Contains(t, err.Error(), "failover.peers is no longer supported")
 	})
 }
 
@@ -401,9 +320,6 @@ func TestFailover_ValidateWithHooks(t *testing.T) {
 					{Name: "post-passive", Command: "echo 'post-passive'"},
 				},
 			},
-		},
-		Peers: Peers{
-			"validator-1": {IP: "192.168.1.10"},
 		},
 	}
 

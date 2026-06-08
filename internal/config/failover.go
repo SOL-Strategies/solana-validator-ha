@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"net"
 	"sort"
 	"time"
 )
@@ -23,22 +22,22 @@ type SelfHealthy struct {
 
 // Failover represents failover decision parameters
 type Failover struct {
-	DryRun                             bool                           `koanf:"dry_run"`
-	PollIntervalDuration               time.Duration                  `koanf:"poll_interval_duration"`
-	LeaderlessSamplesThreshold         int                            `koanf:"leaderless_samples_threshold"`
-	LeaderlessConfirmationPollDuration time.Duration                  `koanf:"leaderless_confirmation_poll_duration"`
+	DryRun                             bool          `koanf:"dry_run"`
+	PollIntervalDuration               time.Duration `koanf:"poll_interval_duration"`
+	LeaderlessSamplesThreshold         int           `koanf:"leaderless_samples_threshold"`
+	LeaderlessConfirmationPollDuration time.Duration `koanf:"leaderless_confirmation_poll_duration"`
 	// DelinquencyBypass, when true, skips the leaderless sample threshold if the active peer is
 	// declared delinquent by the network (and not due to low balance). Default false.
 	// ⚠️ See "Delinquency Fast-Path" in the README for the fork-recovery risk before enabling.
-	DelinquencyBypass                  bool                           `koanf:"delinquency_bypass"`
-	TakeoverJitterDuration             time.Duration                  `koanf:"takeover_jitter_duration"`
-	Priority                           *int                           `koanf:"priority"`
-	Active                             Role                           `koanf:"active"`
-	Passive                            Role                           `koanf:"passive"`
-	Peers                              Peers                          `koanf:"peers"`
-	DelinquentSlotDistanceOverride     DelinquentSlotDistanceOverride `koanf:"delinquent_slot_distance_override"`
-	SelfHealthy                        SelfHealthy                    `koanf:"self_healthy"`
-	Recording                          Recording                      `koanf:"recording"`
+	DelinquencyBypass              bool                           `koanf:"delinquency_bypass"`
+	TakeoverJitterDuration         time.Duration                  `koanf:"takeover_jitter_duration"`
+	Priority                       *int                           `koanf:"priority"`
+	Active                         Role                           `koanf:"active"`
+	Passive                        Role                           `koanf:"passive"`
+	Peers                          Peers                          `koanf:"peers"`
+	DelinquentSlotDistanceOverride DelinquentSlotDistanceOverride `koanf:"delinquent_slot_distance_override"`
+	SelfHealthy                    SelfHealthy                    `koanf:"self_healthy"`
+	Recording                      Recording                      `koanf:"recording"`
 }
 
 // leaderlessConfirmationPollFloor is the minimum allowed value for
@@ -53,6 +52,13 @@ type DelinquentSlotDistanceOverride struct {
 }
 
 func (f *Failover) Validate() error {
+	if f.Priority != nil {
+		return fmt.Errorf("failover.priority is no longer supported; move peer priorities under profiles.<name>.peers.<peer>.priority")
+	}
+	if len(f.Peers) > 0 {
+		return fmt.Errorf("failover.peers is no longer supported; move peers under profiles.<name>.peers")
+	}
+
 	// failover.poll_interval must be greater than zero
 	if f.PollIntervalDuration == 0 {
 		return fmt.Errorf("failover.poll_interval_duration must be greater than zero")
@@ -131,61 +137,8 @@ func (f *Failover) Validate() error {
 		}
 	}
 
-	// failover.peers must be at least 1
-	if len(f.Peers) == 0 {
-		return fmt.Errorf("failover.peers - at least one peer must be defined")
-	}
-
-	// failover.peers must have unique valid IP addresses
-	ips := make(map[string]bool)
-	for name, peer := range f.Peers {
-		if net.ParseIP(peer.IP) == nil || net.ParseIP(peer.IP).To4() == nil {
-			return fmt.Errorf("failover.peers - invalid IP address %s for peer %s", peer.IP, name)
-		}
-		if ips[peer.IP] {
-			return fmt.Errorf("failover.peers - duplicate IP address %s found for peer %s", peer.IP, name)
-		}
-		ips[peer.IP] = true
-	}
-
 	// Note: DelinquentSlotDistanceOverride.Value is uint64, so it cannot be negative
 	// No validation needed for negative values since uint64 cannot hold negative numbers
-
-	// Validate explicit failover priorities (all-or-nothing across self + all peers)
-	selfHasPriority := f.Priority != nil
-	peersWithPriority := 0
-	for _, peer := range f.Peers {
-		if peer.Priority != nil {
-			peersWithPriority++
-		}
-	}
-	totalWithPriority := peersWithPriority
-	if selfHasPriority {
-		totalWithPriority++
-	}
-	totalNodes := 1 + len(f.Peers) // self + peers
-	if totalWithPriority > 0 && totalWithPriority < totalNodes {
-		return fmt.Errorf("failover.priority - either all nodes (self + all peers) must declare a priority, or none should; %d of %d have one", totalWithPriority, totalNodes)
-	}
-	if selfHasPriority {
-		if *f.Priority < 0 {
-			return fmt.Errorf("failover.priority must be non-negative")
-		}
-		// priority value -> owner name, for duplicate detection
-		seen := map[int]string{*f.Priority: "self"}
-		for name, peer := range f.Peers {
-			if peer.Priority == nil {
-				continue
-			}
-			if *peer.Priority < 0 {
-				return fmt.Errorf("failover.peers.%s.priority must be non-negative", name)
-			}
-			if owner, exists := seen[*peer.Priority]; exists {
-				return fmt.Errorf("failover.peers.%s.priority %d is already used by %s", name, *peer.Priority, owner)
-			}
-			seen[*peer.Priority] = name
-		}
-	}
 
 	return nil
 }

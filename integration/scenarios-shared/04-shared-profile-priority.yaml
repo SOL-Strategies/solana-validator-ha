@@ -1,0 +1,30 @@
+name: shared-profile-priority
+description: >
+  Both active validators disconnect before a backup has promoted. The shared
+  backup should promote the lower-priority-numbered profile and leave the other
+  profile inactive.
+
+initial_state:
+  active_profiles:
+    main: validator-1
+    secondary: validator-3
+
+steps:
+  - name: disconnect main active validator
+    action: disconnect
+    target: validator-1
+
+  - name: disconnect secondary active validator
+    action: disconnect
+    target: validator-3
+
+  - name: shared backup chooses main by profile priority
+    action: assert
+    timeout: 60s
+    active_count: 1
+    active_profiles:
+      main: validator-2
+      secondary: ""
+    state:
+      validator-2:
+        role: active

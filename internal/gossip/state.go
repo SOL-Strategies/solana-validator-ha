@@ -38,6 +38,8 @@ type State struct {
 	peerStatesByName               map[string]PeerState // these are the peers that are currently in the solana network, keyed by their name
 	configPeers                    config.Peers
 	activePubkey                   string
+	votePubkey                     string
+	knownActivePubkeys             map[string]string
 	selfIP                         string
 	clusterRPC                     *rpc.Client
 	logger                         *log.Logger
@@ -80,6 +82,10 @@ type PeerState struct {
 	LastSeenAtUTC time.Time
 	// LastSeenActive is true if the peer was the active validator when it was last seen
 	LastSeenActive bool
+	// Role is one of "active", "passive", or "busy".
+	Role string
+	// BusyProfile is set when Role == "busy".
+	BusyProfile string
 	// IsRecentlyInGossip is true if the peer was recently in gossip
 	IsRecentlyInGossip bool
 }
@@ -89,6 +95,8 @@ type Options struct {
 	ClusterRPC                     *rpc.Client
 	DelinquentSlotDistanceOverride config.DelinquentSlotDistanceOverride
 	ActivePubkey                   string
+	VotePubkey                     string
+	KnownActivePubkeys             map[string]string
 	SelfIP                         string
 	ConfigPeers                    config.Peers
 	LogPrefix                      string
@@ -100,6 +108,8 @@ func NewState(opts Options) *State {
 		logger:                         logging.New(opts.LogPrefix, "gossip_state"),
 		clusterRPC:                     opts.ClusterRPC,
 		activePubkey:                   opts.ActivePubkey,
+		votePubkey:                     opts.VotePubkey,
+		knownActivePubkeys:             opts.KnownActivePubkeys,
 		selfIP:                         opts.SelfIP,
 		configPeers:                    opts.ConfigPeers,
 		peerStatesByName:               make(map[string]PeerState),
@@ -141,13 +151,20 @@ func (p *State) Refresh() {
 		"peers_count", len(p.configPeers),
 		"peers", p.configPeers.String(),
 		"active_pubkey", p.activePubkey,
+		"vote_pubkey", p.votePubkey,
 	)
 
 	// look through all the returned gossip nodes, looking for the ones that are in the config
 	isLeaderlessSample := true
 	for _, node := range clusterNodes {
 		nodeIP := strings.Split(*node.Gossip, ":")[0]
-		isActiveNode := node.Pubkey.String() == p.activePubkey
+		nodePubkey := node.Pubkey.String()
+		isActiveNode := nodePubkey == p.activePubkey
+		busyProfile, isBusyNode := p.knownActivePubkeys[nodePubkey]
+		if busyProfile == "" || isActiveNode {
+			isBusyNode = false
+			busyProfile = ""
+		}
 
 		// if the peer is not the config - enjoy the code stench of some nested if statements to figure shit out....
 		if p.isNonConfigDeclaredPeerWithIP(nodeIP) {
@@ -156,7 +173,7 @@ func (p *State) Refresh() {
 			// leaderless counter increment as normal so a legitimate failover can still fire
 			if isActiveNode {
 				if !p.isNodeActiveAndVoting(*node) {
-					p.logger.Warn("undeclared active peer appears in gossip but is not voting - ignoring to allow legitimate failover", "ip", nodeIP, "pubkey", node.Pubkey.String())
+					p.logger.Warn("undeclared active peer appears in gossip but is not voting - ignoring to allow legitimate failover", "ip", nodeIP, "pubkey", nodePubkey)
 					continue
 				}
 
@@ -165,12 +182,13 @@ func (p *State) Refresh() {
 				p.configUndeclaredActivePeer = PeerState{
 					Name:           undeclaredPeerName,
 					IP:             nodeIP,
-					Pubkey:         node.Pubkey.String(),
+					Pubkey:         nodePubkey,
 					LastSeenAtUTC:  time.Now().UTC(),
 					LastSeenActive: true,
+					Role:           "active",
 				}
 				p.activePeerLastSeenAt = p.configUndeclaredActivePeer.LastSeenAtUTC
-				p.logger.Debug("active node discovered not declared as peer in HA cluster config at failover.peers", "ip", nodeIP, "pubkey", node.Pubkey.String())
+				p.logger.Debug("active node discovered not declared as peer in HA cluster config at profile peers", "ip", nodeIP, "pubkey", nodePubkey)
 			}
 
 			// continue looking for peers declared in config
@@ -192,8 +210,15 @@ func (p *State) Refresh() {
 		// a borked active peer might appear in gossip but not actually be voting
 		// so we need to check for that and only proceed to add it to the state if it is not voting still
 		if isActiveNode && !p.isNodeActiveAndVoting(*node) {
-			p.logger.Debug("active peer appears in gossip but is not voting - excluding from state", "ip", nodeIP, "pubkey", node.Pubkey.String())
+			p.logger.Debug("active peer appears in gossip but is not voting - excluding from state", "ip", nodeIP, "pubkey", nodePubkey)
 			continue
+		}
+
+		role := "passive"
+		if isActiveNode {
+			role = "active"
+		} else if isBusyNode {
+			role = "busy"
 		}
 
 		// now we know the peer is in gossip and voting (if it is an active node) - so we can add it to the state
@@ -203,16 +228,19 @@ func (p *State) Refresh() {
 			Name:               peerName,
 			IP:                 nodeIP,
 			LastSeenAtUTC:      time.Now().UTC(),
-			Pubkey:             node.Pubkey.String(),
+			Pubkey:             nodePubkey,
 			LastSeenActive:     isActiveNode,
+			Role:               role,
+			BusyProfile:        busyProfile,
 			IsRecentlyInGossip: slices.Contains(p.missingGossipIPs, nodeIP),
 		}
 
-		// Active presence takes precedence: if this peer was already confirmed active in this
-		// refresh cycle (possible when both old and new CRDS identity entries briefly coexist
-		// during a gossip identity transition), don't overwrite it with the stale passive entry.
-		if existing, ok := latestPeerStatesByName[peerName]; ok && existing.LastSeenActive {
-			continue
+		// Active presence takes precedence, and busy active identities beat stale passive
+		// entries when multiple CRDS identity entries briefly coexist during transitions.
+		if existing, ok := latestPeerStatesByName[peerName]; ok {
+			if p.peerRoleRank(existing.Role) >= p.peerRoleRank(peerState.Role) {
+				continue
+			}
 		}
 
 		// register the peer state
@@ -332,9 +360,22 @@ func (p *State) Refresh() {
 	}
 }
 
+func (p *State) peerRoleRank(role string) int {
+	switch role {
+	case "active":
+		return 3
+	case "busy":
+		return 2
+	case "passive", "":
+		return 1
+	default:
+		return 0
+	}
+}
+
 // printStateEmojiKeyFormat prints the emoji legend once, called automatically on first Refresh.
 func (p *State) printStateEmojiKeyFormat() {
-	p.logger.Info("🟢=active 🟡=passive ❓=missing")
+	p.logger.Info("🟢=active 🟠=busy 🟡=passive ❓=missing")
 }
 
 // peersStateString returns a compact string representation of all configured peers for logging.
@@ -350,6 +391,8 @@ func (p *State) peersStateString() string {
 		ip          string
 		discovered  bool
 		active      bool
+		busy        bool
+		busyProfile string
 		isSelf      bool
 		pubkeyShort string
 	}
@@ -360,6 +403,8 @@ func (p *State) peersStateString() string {
 		if state, ok := p.peerStatesByName[name]; ok {
 			info.discovered = true
 			info.active = state.LastSeenActive
+			info.busy = state.Role == "busy"
+			info.busyProfile = state.BusyProfile
 			info.pubkeyShort = state.Pubkey[:7] // FN1Yjxx
 		}
 		peers = append(peers, info)
@@ -374,6 +419,8 @@ func (p *State) peersStateString() string {
 		if peer.discovered {
 			if peer.active {
 				emoji = "🟢"
+			} else if peer.busy {
+				emoji = "🟠"
 			} else {
 				emoji = "🟡"
 			}
@@ -382,7 +429,11 @@ func (p *State) peersStateString() string {
 		if peer.isSelf {
 			usThem = "(us) "
 		}
-		parts[i] = strings.TrimSpace(fmt.Sprintf("%s %s%s %s %s", emoji, usThem, peer.name, peer.ip, peer.pubkeyShort))
+		busySuffix := ""
+		if peer.busyProfile != "" {
+			busySuffix = " busy_for=" + peer.busyProfile
+		}
+		parts[i] = strings.TrimSpace(fmt.Sprintf("%s %s%s %s %s%s", emoji, usThem, peer.name, peer.ip, peer.pubkeyShort, busySuffix))
 	}
 
 	return strings.Join(parts, " | ")
@@ -453,11 +504,8 @@ func (p *State) cacheVotePubkey(voteAccount solanagorpc.VoteAccountsResult) {
 	p.logger.Debug("cached vote account pubkey", "vote_pubkey", voteAccount.VotePubkey.String(), "identity", identityKey)
 }
 
-// isNodeActiveAndVoting returns true if the node is active and voting.
-// On the first call for a given identity pubkey, getVoteAccounts is called unfiltered and the
-// discovered vote pubkey is cached. Subsequent calls use the votePubkey filter, reducing the
-// response from ~1500 entries to 1. If a filtered call returns empty (e.g. after a key rotation),
-// the cache entry is cleared and the call falls back to unfiltered for that cycle.
+// isNodeActiveAndVoting returns true only when the configured vote account is current and voting
+// for this profile's active identity.
 func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bool {
 	// Agave default: DELINQUENT_VALIDATOR_SLOT_DISTANCE = 128 — used by getVoteAccounts when no delinquentSlotDistance is passed.
 	// https://github.com/anza-xyz/agave/blob/master/rpc-client-types/src/request.rs
@@ -466,47 +514,24 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 	// Both thresholds agree. This variable is only used for the log line below;
 	// opts.DelinquentSlotDistance is only set when the override is enabled.
 	delinquentSlotDistance := uint64(128)
-	identityKey := node.Pubkey.String()
-
-	buildOpts := func(votePubkey *solana.PublicKey) solanagorpc.GetVoteAccountsOpts {
-		opts := solanagorpc.GetVoteAccountsOpts{
-			Commitment: solanagorpc.CommitmentProcessed,
-			VotePubkey: votePubkey,
-		}
-		if p.delinquentSlotDistanceOverride.Enabled {
-			delinquentSlotDistance = p.delinquentSlotDistanceOverride.Value
-			opts.DelinquentSlotDistance = &p.delinquentSlotDistanceOverride.Value
-		}
-		return opts
+	votePubkey, err := solana.PublicKeyFromBase58(p.votePubkey)
+	if err != nil {
+		p.logger.Error("invalid configured vote pubkey", "error", err, "vote_pubkey", p.votePubkey)
+		return false
+	}
+	opts := solanagorpc.GetVoteAccountsOpts{
+		Commitment: solanagorpc.CommitmentProcessed,
+		VotePubkey: &votePubkey,
+	}
+	if p.delinquentSlotDistanceOverride.Enabled {
+		delinquentSlotDistance = p.delinquentSlotDistanceOverride.Value
+		opts.DelinquentSlotDistance = &p.delinquentSlotDistanceOverride.Value
 	}
 
-	// attempt a filtered call if we have a cached vote pubkey for this identity
-	var voteAccounts *solanagorpc.GetVoteAccountsResult
-	if cached, ok := p.votePubkeyCache[identityKey]; ok {
-		opts := buildOpts(&cached)
-		result, err := p.clusterRPC.GetVoteAccounts(context.Background(), &opts)
-		if err != nil {
-			p.logger.Error("failed to get vote accounts", "error", err)
-			return true // forgive rpc error and assume innocence lest we trigger a false-positive failover
-		}
-		if len(result.Current) == 0 && len(result.Delinquent) == 0 {
-			// cached vote pubkey is stale (key rotation?) - clear and fall back to unfiltered
-			p.logger.Warn("cached vote pubkey returned empty result, re-discovering", "identity_pubkey", identityKey)
-			delete(p.votePubkeyCache, identityKey)
-		} else {
-			voteAccounts = result
-		}
-	}
-
-	// unfiltered call - used on first call or after cache eviction; also discovers and caches vote pubkey
-	if voteAccounts == nil {
-		opts := buildOpts(nil)
-		result, err := p.clusterRPC.GetVoteAccounts(context.Background(), &opts)
-		if err != nil {
-			p.logger.Error("failed to get vote accounts", "error", err)
-			return true // forgive rpc error and assume innocence lest we trigger a false-positive failover
-		}
-		voteAccounts = result
+	voteAccounts, err := p.clusterRPC.GetVoteAccounts(context.Background(), &opts)
+	if err != nil {
+		p.logger.Error("failed to get vote accounts", "error", err)
+		return true // forgive rpc error and assume innocence lest we trigger a false-positive failover
 	}
 
 	// if the node is in the delinquent list - it is not voting, but forgive delinquency due to low balance
@@ -515,8 +540,9 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 		if !delinquentVoteAccount.NodePubkey.Equals(node.Pubkey) {
 			continue
 		}
-
-		p.cacheVotePubkey(delinquentVoteAccount)
+		if !delinquentVoteAccount.VotePubkey.Equals(votePubkey) {
+			continue
+		}
 
 		// ok we might be legit delinquent but let's check if the node's identity balance is below the rent-exempt balance
 		balance, err := p.clusterRPC.GetBalance(context.Background(), delinquentVoteAccount.NodePubkey)
@@ -568,7 +594,9 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 		if !voteAccount.NodePubkey.Equals(node.Pubkey) {
 			continue
 		}
-		p.cacheVotePubkey(voteAccount)
+		if !voteAccount.VotePubkey.Equals(votePubkey) {
+			continue
+		}
 		found = true
 		nodeVoteAccount = &voteAccount
 		break
@@ -640,6 +668,16 @@ func (p *State) HasPeers(ip string) bool {
 	// if the self IP is in the gossip state, we have peers
 	for _, peer := range p.peerStatesByName {
 		if peer.IP != ip {
+			return true
+		}
+	}
+	return false
+}
+
+// HasAvailablePeers returns true if any non-self peer is visible and not busy serving another profile.
+func (p *State) HasAvailablePeers(ip string) bool {
+	for _, peer := range p.peerStatesByName {
+		if peer.IP != ip && peer.Role != "busy" {
 			return true
 		}
 	}

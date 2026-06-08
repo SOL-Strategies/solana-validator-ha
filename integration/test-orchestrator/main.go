@@ -20,15 +20,16 @@ import (
 
 // Scenario is a single test scenario loaded from a YAML file.
 type Scenario struct {
-	Name        string       `yaml:"name"`
-	Description string       `yaml:"description"`
+	Name         string       `yaml:"name"`
+	Description  string       `yaml:"description"`
 	InitialState InitialState `yaml:"initial_state"`
-	Steps       []Step       `yaml:"steps"`
+	Steps        []Step       `yaml:"steps"`
 }
 
 // InitialState describes the cluster state to establish before the scenario runs.
 type InitialState struct {
-	ActiveValidator string `yaml:"active_validator"`
+	ActiveValidator string            `yaml:"active_validator"`
+	ActiveProfiles  map[string]string `yaml:"active_profiles"`
 }
 
 // Step is a single action or assertion within a scenario.
@@ -40,12 +41,14 @@ type Step struct {
 	Duration string `yaml:"duration,omitempty"`
 
 	// used by: set_active, disconnect, reconnect, set_unhealthy, set_healthy
-	Target string `yaml:"target,omitempty"`
+	Target  string `yaml:"target,omitempty"`
+	Profile string `yaml:"profile,omitempty"`
 
 	// used by: assert
-	Timeout     string                       `yaml:"timeout,omitempty"`
-	State       map[string]ValidatorExpected `yaml:"state,omitempty"`
-	ActiveCount *int                         `yaml:"active_count,omitempty"`
+	Timeout        string                       `yaml:"timeout,omitempty"`
+	State          map[string]ValidatorExpected `yaml:"state,omitempty"`
+	ActiveCount    *int                         `yaml:"active_count,omitempty"`
+	ActiveProfiles map[string]string            `yaml:"active_profiles,omitempty"`
 }
 
 // ValidatorExpected is the expected state of a single validator in an assert step.
@@ -105,8 +108,13 @@ func loadScenarios(dir string) ([]Scenario, error) {
 
 // ── Mock control ──────────────────────────────────────────────────────────────
 
-func (o *Orchestrator) callAction(action, target string) error {
-	body, _ := json.Marshal(map[string]string{"action": action, "target": target})
+func (o *Orchestrator) callAction(action, target, profile string, activeProfiles map[string]string) error {
+	body, _ := json.Marshal(map[string]any{
+		"action":          action,
+		"target":          target,
+		"profile":         profile,
+		"active_profiles": activeProfiles,
+	})
 	resp, err := http.Post(o.mockURL+"/action", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("POST /action %s %s: %w", action, target, err)
@@ -119,12 +127,38 @@ func (o *Orchestrator) callAction(action, target string) error {
 }
 
 // resetState brings the cluster to a clean initial state before each scenario.
-func (o *Orchestrator) resetState(initialActive string) error {
-	if err := o.callAction("reset", initialActive); err != nil {
+func (o *Orchestrator) resetState(initial InitialState) error {
+	if err := o.callAction("reset", initial.ActiveValidator, "", initial.ActiveProfiles); err != nil {
 		return fmt.Errorf("reset: %w", err)
 	}
-	log.Printf("[reset] cluster reset: active_validator=%q", initialActive)
+	if len(initial.ActiveProfiles) > 0 {
+		log.Printf("[reset] cluster reset: active_profiles=%v", initial.ActiveProfiles)
+	} else {
+		log.Printf("[reset] cluster reset: active_validator=%q", initial.ActiveValidator)
+	}
 	return nil
+}
+
+func (o *Orchestrator) getActiveProfiles() (map[string]string, error) {
+	resp, err := http.Get(o.mockURL + "/state")
+	if err != nil {
+		return nil, fmt.Errorf("GET /state: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET /state: status %d", resp.StatusCode)
+	}
+
+	var body struct {
+		ActiveProfiles map[string]string `json:"active_profiles"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("decode /state: %w", err)
+	}
+	if body.ActiveProfiles == nil {
+		body.ActiveProfiles = map[string]string{}
+	}
+	return body.ActiveProfiles, nil
 }
 
 // ── Metrics polling ───────────────────────────────────────────────────────────
@@ -150,15 +184,35 @@ func (o *Orchestrator) getValidatorStatus(name string) (*ValidatorStatus, error)
 		return &ValidatorStatus{Online: false}, nil
 	}
 	metrics := string(body)
-
-	role := "unknown"
-	if strings.Contains(metrics, `validator_role="active"`) {
-		role = "active"
-	} else if strings.Contains(metrics, `validator_role="passive"`) {
-		role = "passive"
-	}
+	role := validatorRoleFromMetrics(metrics)
 
 	return &ValidatorStatus{Role: role, Online: true}, nil
+}
+
+func validatorRoleFromMetrics(metrics string) string {
+	for _, line := range strings.Split(metrics, "\n") {
+		if !strings.HasPrefix(line, "solana_validator_ha_metadata{") {
+			continue
+		}
+		if role := metricLabelValue(line, "validator_role"); role != "" {
+			return role
+		}
+	}
+	return "unknown"
+}
+
+func metricLabelValue(line, label string) string {
+	prefix := label + `="`
+	start := strings.Index(line, prefix)
+	if start < 0 {
+		return ""
+	}
+	start += len(prefix)
+	end := strings.Index(line[start:], `"`)
+	if end < 0 {
+		return ""
+	}
+	return line[start : start+end]
 }
 
 func (o *Orchestrator) getAllStatuses() map[string]*ValidatorStatus {
@@ -186,7 +240,7 @@ func (o *Orchestrator) executeStep(step Step) error {
 		return nil
 
 	case "set_active", "disconnect", "reconnect", "set_unhealthy", "set_healthy":
-		return o.callAction(step.Action, step.Target)
+		return o.callAction(step.Action, step.Target, step.Profile, nil)
 
 	case "assert":
 		return o.executeAssert(step)
@@ -209,6 +263,10 @@ func (o *Orchestrator) executeAssert(step Step) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		statuses := o.getAllStatuses()
+		activeProfiles, err := o.getActiveProfiles()
+		if err != nil {
+			return err
+		}
 
 		// Check active_count condition
 		activeCountOK := true
@@ -232,11 +290,22 @@ func (o *Orchestrator) executeAssert(step Step) error {
 			}
 		}
 
-		if activeCountOK && stateOK {
+		activeProfilesOK := true
+		for profile, expectedValidator := range step.ActiveProfiles {
+			if activeProfiles[profile] != expectedValidator {
+				activeProfilesOK = false
+				break
+			}
+		}
+
+		if activeCountOK && stateOK && activeProfilesOK {
 			// Log final passing state
 			var parts []string
 			for name, s := range statuses {
 				parts = append(parts, fmt.Sprintf("%s=%s", name, s.Role))
+			}
+			if len(step.ActiveProfiles) > 0 {
+				parts = append(parts, fmt.Sprintf("active_profiles=%v", activeProfiles))
 			}
 			sort.Strings(parts)
 			log.Printf("  assert passed: %s", strings.Join(parts, " "))
@@ -262,6 +331,9 @@ func (o *Orchestrator) executeAssert(step Step) error {
 			}
 			parts = append(parts, fmt.Sprintf("active_count=%d(want %d)", count, *step.ActiveCount))
 		}
+		for profile, expectedValidator := range step.ActiveProfiles {
+			parts = append(parts, fmt.Sprintf("active_profile[%s]=%s(want %s)", profile, activeProfiles[profile], expectedValidator))
+		}
 		log.Printf("  waiting... %s", strings.Join(parts, " "))
 		time.Sleep(2 * time.Second)
 	}
@@ -285,7 +357,7 @@ func (o *Orchestrator) runScenario(s Scenario) error {
 	}
 
 	// Reset cluster to a clean initial state before the scenario starts.
-	if err := o.resetState(s.InitialState.ActiveValidator); err != nil {
+	if err := o.resetState(s.InitialState); err != nil {
 		return fmt.Errorf("initial reset failed: %w", err)
 	}
 

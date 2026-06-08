@@ -5,8 +5,7 @@ validator:
   public_ip_service_urls:
     - http://localhost:8989/validator-2/public-ip
   identities:
-    active: active-identity.json
-    passive: passive-identity.json
+    passive_pubkey: EhH5vaRnSvYKeYpNkDeFh3x1RgqqsTUsYmkrFZ2iv8mE
 
 cluster:
   name: mainnet-beta
@@ -23,8 +22,17 @@ failover:
   passive:
     command: ../set-identity.sh
     args: ["2", passive]
-  peers:
-    validator-1:
-      ip: 192.168.1.101
-    validator-3:
-      ip: 192.168.1.103
+profiles:
+  main:
+    priority: 0
+    identities:
+      active_pubkey: 7TCCEYMNjpRRdVQiMMYkNWJ9ECVThcUaw8mp11AWhTKe
+    vote_pubkey: 7TCCEYMNjpRRdVQiMMYkNWJ9ECVThcUaw8mp11AWhTKe
+    authorized_voter: 7TCCEYMNjpRRdVQiMMYkNWJ9ECVThcUaw8mp11AWhTKe
+    peers:
+      validator-1:
+        ip: 192.168.1.101
+      validator-2:
+        ip: 192.168.1.102
+      validator-3:
+        ip: 192.168.1.103

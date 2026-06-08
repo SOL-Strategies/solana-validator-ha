@@ -28,16 +28,22 @@ The integration test validates the following scenarios:
 ### Scenario 3: Multiple Passive Peers Compete
 - **Initial State**: Validator-1 is active, Validator-2 and Validator-3 are passive
 - **Action**: Disconnect Validator-1, causing both passive peers to attempt becoming active
-- **Expected Behavior**: Only one validator becomes active (first responder wins)
+- **Expected Behavior**: Only one validator becomes active, with configured peer priority or IP ranking resolving the race
 - **Validation**: Confirms that only one validator becomes active despite multiple candidates
+
+### Shared Backup Suite
+- **Initial State**: Two profiles are active on different validators, with one shared backup eligible for both
+- **Expected Behavior**: The shared backup can take one failed profile, but never serves two active profiles at once
+- **Validation**: Confirms profile holder tracking, local-busy blocking, profile-priority selection, and multiple backups inside one profile
 
 ## Failover Logic
 
-The current system uses a **first-responder wins** approach:
+The current system uses a **ranked first-responder** approach:
 
 1. **Leaderless Detection**: If no active peer is found for `leaderless_samples_threshold` consecutive samples
-2. **Race Condition**: The first healthy, passive validator to detect the leaderless state becomes active
-3. **No Priority System**: It's a race condition where the fastest validator wins
+2. **Peer Ranking**: Eligible peers wait according to their configured peer priority, or by public IP order when no peer priorities are configured
+3. **Profile Selection**: When one daemon sees multiple profiles eligible at once, it promotes the lowest `profiles.<name>.priority` value
+4. **Single Local Active Identity**: A daemon already active for one profile is treated as busy and will not promote another profile
 
 ## Running Tests
 
@@ -50,6 +56,15 @@ make integration-test
 # Or directly from the integration directory
 cd integration
 ./run-tests.sh
+
+# Run the shared-backup profile suite
+./run-tests.sh --shared
+```
+
+The shared-backup suite is also available from the project root:
+
+```bash
+make integration-test-shared
 ```
 
 ### Manual Testing
@@ -73,22 +88,32 @@ Each validator has its own configuration file in `configs/`:
 - `validator-1.yaml`: First validator
 - `validator-2.yaml`: Second validator
 - `validator-3.yaml`: Third validator
+- `shared-validator-1.yaml`: First validator with `main` and `secondary` profiles
+- `shared-validator-2.yaml`: Shared backup validator with `main` and `secondary` profiles
+- `shared-validator-3.yaml`: Third validator with `main` and `secondary` profiles
 
 ### Identity Setup
 
-All validators share the same **active keypair** but have different **passive keypairs**:
+The mock network reports one fixed active identity and fixed passive identities for each validator. Each validator config declares one `profiles.main` HA group with the same active identity, vote account, authorized voter, and self-inclusive peer map:
 
-- **Shared Active Identity**: `active-identity.json` (used by all validators)
-- **Individual Passive Identities**: 
-  - `passive-identity-1.json` (validator-1)
-  - `passive-identity-2.json` (validator-2)
-  - `passive-identity-3.json` (validator-3)
+- **Active identity / vote account**: `ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H`
+- **Passive identities**:
+  - `AP4JyZq2vuN4u64FGFHTwdG11xHu1vZWVYQj21MPLrnw` (validator-1)
+  - `DJ7w4p8Ve7qdSAmkpA3sviSbsd1HPUxd43x7MTH72JHT` (validator-2)
+  - `5dXttfrjFEEExmZhVmVAdw2LzepNAhFYJTUgPCDk8CYD` (validator-3)
 
 All validators use:
-- **Dry Run Mode**: Commands are logged but not executed
+- **Mock Role Commands**: Active/passive commands call the mock control API instead of touching real validator identities
 - **Fast Polling**: 3-second intervals for quick testing
 - **Mock Solana RPC**: Points to the mock network
 - **Mock Public IP Service**: Returns the container's network IP
+
+The shared-backup compose file swaps in `configs/shared-validator-*.yaml`.
+Those configs declare:
+
+- `profiles.main`: active identity `ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H`
+- `profiles.secondary`: active identity `SysvarC1ock11111111111111111111111111111111`
+- `validator-2` as the shared backup for both profiles
 
 ## Network Topology
 
@@ -123,6 +148,7 @@ The mock server provides:
 - **Public IP Service**: `http://localhost:8899/public-ip` returns the caller's IP
 - **Network Control**: `http://localhost:8899/network` for simulating disconnections
 - **Active Validator Control**: `http://localhost:8899/control` for setting active validator
+- **Profile State**: `http://localhost:8899/state` for the current `active_profiles` map
 
 ### Test Orchestrator
 
@@ -230,8 +256,8 @@ docker compose run test-orchestrator
 
 ### Adding New Test Scenarios
 
-1. Add a new method to `test-orchestrator/main.go`
-2. Update the `runAllScenarios()` function to include the new scenario
+1. Add a YAML file under `scenarios/` or `scenarios-shared/`
+2. Use `active_profiles` assertions for profile-specific shared-backup behavior
 3. Update this README with the new scenario description
 
 ### Modifying Mock Services

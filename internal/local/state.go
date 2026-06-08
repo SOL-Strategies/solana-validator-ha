@@ -22,31 +22,51 @@ type State struct {
 	consecutiveUnhealthyCount int
 	rpc                       *rpc.Client
 	cfg                       config.SelfHealthy
-	activePubkey              string
+	passivePubkey             string
+	activePubkeysByProfile    map[string]string
 	logger                    *log.Logger
 	ctx                       context.Context
 	// forceHealthyForTest, when true, makes checkHealth() return (true, nil) without an RPC call.
 	// Set via SetForceHealthyForTest; intended for unit tests only.
 	forceHealthyForTest bool
+	// identityForTest, when set, makes Identity() return this pubkey without an RPC call.
+	// Set via SetIdentityForTest; intended for unit tests only.
+	identityForTest string
 }
 
 // Options are the options for creating a new local State.
 type Options struct {
-	RPC          *rpc.Client
-	Cfg          config.SelfHealthy
-	ActivePubkey string
-	Ctx          context.Context
-	LogPrefix    string
+	RPC                    *rpc.Client
+	Cfg                    config.SelfHealthy
+	PassivePubkey          string
+	ActivePubkeysByProfile map[string]string
+	Ctx                    context.Context
+	LogPrefix              string
+}
+
+type OccupancyStatus string
+
+const (
+	OccupancyFree    OccupancyStatus = "free"
+	OccupancyActive  OccupancyStatus = "active"
+	OccupancyUnknown OccupancyStatus = "unknown"
+)
+
+type Occupancy struct {
+	Status  OccupancyStatus
+	Profile string
+	Pubkey  string
 }
 
 // NewState creates a new local State.
 func NewState(opts Options) *State {
 	return &State{
-		rpc:          opts.RPC,
-		cfg:          opts.Cfg,
-		activePubkey: opts.ActivePubkey,
-		logger:       logging.New(opts.LogPrefix, "local_state"),
-		ctx:          opts.Ctx,
+		rpc:                    opts.RPC,
+		cfg:                    opts.Cfg,
+		passivePubkey:          opts.PassivePubkey,
+		activePubkeysByProfile: opts.ActivePubkeysByProfile,
+		logger:                 logging.New(opts.LogPrefix, "local_state"),
+		ctx:                    opts.Ctx,
 	}
 }
 
@@ -143,24 +163,50 @@ func (s *State) IsSelfHealthy() bool {
 	return healthy
 }
 
-// IsSelfActive returns true if the validator is running with the active identity.
-func (s *State) IsSelfActive() bool {
+// Identity returns the local validator identity pubkey.
+func (s *State) Identity() (string, error) {
+	if s.identityForTest != "" {
+		return s.identityForTest, nil
+	}
 	identity, err := s.rpc.GetIdentity(s.ctx)
 	if err != nil {
 		s.logger.Debug("GetIdentity failed", "error", err)
-		return false
+		return "", err
 	}
-	return identity.Identity.String() == s.activePubkey
+	return identity.Identity.String(), nil
 }
 
-// IsSelfPassive returns true if the validator is running with the passive identity.
-func (s *State) IsSelfPassive() bool {
-	identity, err := s.rpc.GetIdentity(s.ctx)
+// Occupancy returns what configured identity the local validator is currently using.
+func (s *State) Occupancy() Occupancy {
+	pubkey, err := s.Identity()
 	if err != nil {
-		s.logger.Debug("GetIdentity failed", "error", err)
-		return false
+		return Occupancy{Status: OccupancyUnknown}
 	}
-	return identity.Identity.String() != s.activePubkey
+	if pubkey == s.passivePubkey {
+		return Occupancy{Status: OccupancyFree, Pubkey: pubkey}
+	}
+	for profile, activePubkey := range s.activePubkeysByProfile {
+		if pubkey == activePubkey {
+			return Occupancy{Status: OccupancyActive, Profile: profile, Pubkey: pubkey}
+		}
+	}
+	return Occupancy{Status: OccupancyUnknown, Pubkey: pubkey}
+}
+
+// IsSelfActive returns true if the validator is running with the given profile's active identity.
+func (s *State) IsSelfActive(profile string) bool {
+	occupancy := s.Occupancy()
+	return occupancy.Status == OccupancyActive && occupancy.Profile == profile
+}
+
+// IsSelfPassive returns true if the validator is running with the shared passive identity.
+func (s *State) IsSelfPassive() bool {
+	return s.Occupancy().Status == OccupancyFree
+}
+
+// SetIdentityForTest forces Identity() to return pubkey without an RPC call.
+func (s *State) SetIdentityForTest(pubkey string) {
+	s.identityForTest = pubkey
 }
 
 // checkHealth performs a raw health check against the local RPC.

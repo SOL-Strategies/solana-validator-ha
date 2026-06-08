@@ -30,6 +30,8 @@ type Config struct {
 	Prometheus Prometheus `koanf:"prometheus"`
 	// Failover is the failover decision parameters
 	Failover Failover `koanf:"failover"`
+	// Profiles is the canonical set of HA profiles this daemon monitors and may promote.
+	Profiles Profiles `koanf:"profiles"`
 	// Update holds update-check settings
 	Update Update `koanf:"update"`
 	// File is the file that the config was loaded from
@@ -135,25 +137,16 @@ func (c *Config) Initialize() error {
 	// Set defaults
 	c.setDefaults()
 
-	// load identity key pair files
-	if err := c.Validator.Identities.Load(); err != nil {
+	// load global passive identity and profile active identities
+	if err := c.Validator.Identities.LoadPassive(); err != nil {
+		return err
+	}
+	if err := c.Profiles.Load(); err != nil {
 		return err
 	}
 
 	// validate configuration (after identity files are loaded)
 	if err := c.validate(); err != nil {
-		return err
-	}
-
-	// render failover commands, args and hooks
-	err := c.Failover.RenderRoleCommands(RoleCommandTemplateData{
-		ActiveIdentityKeypairFile:  c.Validator.Identities.ActiveKeyPairFile,
-		ActiveIdentityPubkey:       c.Validator.Identities.ActivePubkey(),
-		PassiveIdentityKeypairFile: c.Validator.Identities.PassiveKeyPairFile,
-		PassiveIdentityPubkey:      c.Validator.Identities.PassivePubkey(),
-		SelfName:                   c.Validator.Name,
-	})
-	if err != nil {
 		return err
 	}
 
@@ -184,6 +177,10 @@ func (c *Config) validate() error {
 
 	err = c.Failover.Validate()
 	if err != nil {
+		return err
+	}
+
+	if err := c.Profiles.Validate(); err != nil {
 		return err
 	}
 

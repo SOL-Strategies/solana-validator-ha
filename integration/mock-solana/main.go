@@ -6,16 +6,30 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	activePubkey     = "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
-	activeVotePubkey = "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
-	currentSlot      = uint64(1000)
+	mainProfileName       = "main"
+	activePubkey          = "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
+	activeVotePubkey      = "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
+	secondaryActivePubkey = "SysvarC1ock11111111111111111111111111111111"
+	secondaryVotePubkey   = "SysvarC1ock11111111111111111111111111111111"
+	currentSlot           = uint64(1000)
 )
+
+type profileMeta struct {
+	activePubkey string
+	votePubkey   string
+}
+
+var profiles = map[string]profileMeta{
+	mainProfileName: {activePubkey: activePubkey, votePubkey: activeVotePubkey},
+	"secondary":     {activePubkey: secondaryActivePubkey, votePubkey: secondaryVotePubkey},
+}
 
 // validatorMeta holds the fixed metadata for each known validator in the test network.
 var validatorMeta = map[string]struct {
@@ -31,17 +45,21 @@ var validatorMeta = map[string]struct {
 // MockSolanaServer simulates a Solana RPC node and exposes a control API for test scenarios.
 type MockSolanaServer struct {
 	mu               sync.RWMutex
-	activeValidator  string          // which validator currently holds the active identity
-	disconnected     map[string]bool // validators removed from gossip
-	unhealthy        map[string]bool // validators whose local health check returns unhealthy
-	callingValidator string          // populated from ?validator= query param per request
+	activeProfiles   map[string]string // profile name -> validator currently holding that profile identity
+	disconnected     map[string]bool   // validators removed from gossip
+	unhealthy        map[string]bool   // validators whose local health check returns unhealthy
+	callingValidator string            // populated from ?validator= query param per request
 }
 
 func NewMockSolanaServer() *MockSolanaServer {
+	activeProfiles := map[string]string{}
+	if activeValidator := os.Getenv("ACTIVE_VALIDATOR"); activeValidator != "" {
+		activeProfiles[mainProfileName] = activeValidator
+	}
 	return &MockSolanaServer{
-		activeValidator: os.Getenv("ACTIVE_VALIDATOR"),
-		disconnected:    make(map[string]bool),
-		unhealthy:       make(map[string]bool),
+		activeProfiles: activeProfiles,
+		disconnected:   make(map[string]bool),
+		unhealthy:      make(map[string]bool),
 	}
 }
 
@@ -69,7 +87,7 @@ type VoteAccount struct {
 }
 
 type VoteAccountsResult struct {
-	Current   []VoteAccount `json:"current"`
+	Current    []VoteAccount `json:"current"`
 	Delinquent []VoteAccount `json:"delinquent"`
 }
 
@@ -85,8 +103,10 @@ type BalanceResult struct {
 // ControlAction is the unified control request accepted by the /action endpoint.
 // Actions: set_active, set_passive, disconnect, reconnect, set_unhealthy, set_healthy, reset.
 type ControlAction struct {
-	Action string `json:"action"`
-	Target string `json:"target"` // validator name; empty for reset/set_active with no target
+	Action         string            `json:"action"`
+	Target         string            `json:"target"`          // validator name; empty for reset/set_active with no target
+	Profile        string            `json:"profile"`         // defaults to "main"
+	ActiveProfiles map[string]string `json:"active_profiles"` // used by reset
 }
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
@@ -153,31 +173,37 @@ func (s *MockSolanaServer) handleAction(w http.ResponseWriter, r *http.Request) 
 	}
 
 	s.mu.Lock()
+	profile := action.Profile
+	if profile == "" {
+		profile = mainProfileName
+	}
 	switch action.Action {
 	case "set_active":
-		s.activeValidator = action.Target
-		log.Printf("[control] set_active: %q", action.Target)
+		s.activeProfiles[profile] = action.Target
+		log.Printf("[control] set_active: profile=%q validator=%q", profile, action.Target)
 
 	case "set_passive":
 		// Only clear the active validator if this specific validator is currently active.
 		// Idempotent: if it was already passive, this is a no-op.
-		if s.activeValidator == action.Target {
-			s.activeValidator = ""
-			log.Printf("[control] set_passive: %q (was active, cleared)", action.Target)
+		if s.activeProfiles[profile] == action.Target {
+			delete(s.activeProfiles, profile)
+			log.Printf("[control] set_passive: profile=%q validator=%q (was active, cleared)", profile, action.Target)
 		} else {
-			log.Printf("[control] set_passive: %q (already passive, no-op)", action.Target)
+			log.Printf("[control] set_passive: profile=%q validator=%q (already passive, no-op)", profile, action.Target)
 		}
 
 	case "disconnect":
 		s.disconnected[action.Target] = true
 		// If the disconnected validator was active, clear the active slot —
 		// simulating the reality that an offline node is no longer serving blocks.
-		if s.activeValidator == action.Target {
-			s.activeValidator = ""
-			log.Printf("[control] disconnect: %q (was active, cleared)", action.Target)
-		} else {
-			log.Printf("[control] disconnect: %q", action.Target)
+		cleared := []string{}
+		for profileName, validator := range s.activeProfiles {
+			if validator == action.Target {
+				delete(s.activeProfiles, profileName)
+				cleared = append(cleared, profileName)
+			}
 		}
+		log.Printf("[control] disconnect: %q cleared_profiles=%v", action.Target, cleared)
 
 	case "reconnect":
 		delete(s.disconnected, action.Target)
@@ -195,8 +221,17 @@ func (s *MockSolanaServer) handleAction(w http.ResponseWriter, r *http.Request) 
 		// Reconnect all validators, clear all unhealthy state, set initial active.
 		s.disconnected = make(map[string]bool)
 		s.unhealthy = make(map[string]bool)
-		s.activeValidator = action.Target
-		log.Printf("[control] reset: active=%q", action.Target)
+		s.activeProfiles = make(map[string]string)
+		if len(action.ActiveProfiles) > 0 {
+			for profileName, validator := range action.ActiveProfiles {
+				if validator != "" {
+					s.activeProfiles[profileName] = validator
+				}
+			}
+		} else if action.Target != "" {
+			s.activeProfiles[mainProfileName] = action.Target
+		}
+		log.Printf("[control] reset: active_profiles=%v", s.activeProfiles)
 
 	default:
 		s.mu.Unlock()
@@ -207,6 +242,21 @@ func (s *MockSolanaServer) handleAction(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *MockSolanaServer) handleState(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	activeProfiles := make(map[string]string, len(s.activeProfiles))
+	for profile, validator := range s.activeProfiles {
+		activeProfiles[profile] = validator
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"active_profiles": activeProfiles,
+	})
 }
 
 // handlePublicIP returns a stable public IP for each validator based on their Docker network IP.
@@ -258,8 +308,8 @@ func (s *MockSolanaServer) getClusterNodes() []ClusterNode {
 		}
 
 		pubkey := meta.passivePubkey
-		if name == s.activeValidator {
-			pubkey = activePubkey
+		if profileName, ok := s.activeProfileForValidatorLocked(name); ok {
+			pubkey = profiles[profileName].activePubkey
 		}
 
 		nodes = append(nodes, ClusterNode{
@@ -281,8 +331,8 @@ func (s *MockSolanaServer) getIdentity() map[string]any {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.callingValidator == s.activeValidator && s.activeValidator != "" {
-		return map[string]any{"identity": activePubkey}
+	if profileName, ok := s.activeProfileForValidatorLocked(s.callingValidator); ok {
+		return map[string]any{"identity": profiles[profileName].activePubkey}
 	}
 
 	// Return the passive pubkey for this validator
@@ -311,28 +361,45 @@ func (s *MockSolanaServer) getVoteAccounts() VoteAccountsResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.activeValidator == "" || s.disconnected[s.activeValidator] {
-		return VoteAccountsResult{
-			Current:   []VoteAccount{},
-			Delinquent: []VoteAccount{},
+	current := []VoteAccount{}
+	for profileName, validator := range s.activeProfiles {
+		if validator == "" || s.disconnected[validator] {
+			continue
 		}
+		profile, ok := profiles[profileName]
+		if !ok {
+			continue
+		}
+		current = append(current, VoteAccount{
+			VotePubkey:       profile.votePubkey,
+			NodePubkey:       profile.activePubkey,
+			ActivatedStake:   1_000_000_000,
+			EpochVoteAccount: true,
+			Commission:       0,
+			LastVote:         currentSlot - 2, // recent vote, well within delinquency threshold
+			EpochCredits:     [][]uint64{},
+			RootSlot:         currentSlot - 32,
+		})
 	}
 
 	return VoteAccountsResult{
-		Current: []VoteAccount{
-			{
-				VotePubkey:       activeVotePubkey,
-				NodePubkey:       activePubkey,
-				ActivatedStake:   1_000_000_000,
-				EpochVoteAccount: true,
-				Commission:       0,
-				LastVote:         currentSlot - 2, // recent vote, well within delinquency threshold
-				EpochCredits:     [][]uint64{},
-				RootSlot:         currentSlot - 32,
-			},
-		},
+		Current:    current,
 		Delinquent: []VoteAccount{},
 	}
+}
+
+func (s *MockSolanaServer) activeProfileForValidatorLocked(name string) (string, bool) {
+	profileNames := make([]string, 0, len(s.activeProfiles))
+	for profileName, validator := range s.activeProfiles {
+		if validator == name {
+			profileNames = append(profileNames, profileName)
+		}
+	}
+	sort.Strings(profileNames)
+	if len(profileNames) == 0 {
+		return "", false
+	}
+	return profileNames[0], true
 }
 
 // getBalance returns a high lamport balance — well above the rent-exempt minimum (890,880).
@@ -360,7 +427,10 @@ func (s *MockSolanaServer) handleControl(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.mu.Lock()
-	s.activeValidator = body.ActiveValidator
+	s.activeProfiles = map[string]string{}
+	if body.ActiveValidator != "" {
+		s.activeProfiles[mainProfileName] = body.ActiveValidator
+	}
 	s.mu.Unlock()
 	log.Printf("[control/legacy] set active_validator=%q", body.ActiveValidator)
 	w.Header().Set("Content-Type", "application/json")
@@ -384,8 +454,10 @@ func (s *MockSolanaServer) handleNetwork(w http.ResponseWriter, r *http.Request)
 	s.mu.Lock()
 	if body.DisconnectValidator != "" {
 		s.disconnected[body.DisconnectValidator] = true
-		if s.activeValidator == body.DisconnectValidator {
-			s.activeValidator = ""
+		for profileName, validator := range s.activeProfiles {
+			if validator == body.DisconnectValidator {
+				delete(s.activeProfiles, profileName)
+			}
 		}
 		log.Printf("[network/legacy] disconnected %q", body.DisconnectValidator)
 	}
@@ -403,6 +475,7 @@ func main() {
 
 	http.HandleFunc("/", server.handleRPC)
 	http.HandleFunc("/action", server.handleAction)
+	http.HandleFunc("/state", server.handleState)
 	http.HandleFunc("/public-ip", server.handlePublicIP)
 	// Legacy endpoints kept for backward compatibility
 	http.HandleFunc("/control", server.handleControl)
@@ -410,7 +483,7 @@ func main() {
 
 	port := ":8899"
 	log.Printf("mock-solana starting on %s", port)
-	log.Printf("initial active validator: %q", server.activeValidator)
+	log.Printf("initial active profiles: %v", server.activeProfiles)
 	log.Printf("started at %s", time.Now().Format(time.RFC3339))
 
 	if err := http.ListenAndServe(port, nil); err != nil {

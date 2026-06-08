@@ -19,7 +19,7 @@ Active node (`validator-1`) detecting it has dropped from gossip and stepping do
 
 ## How it works
 
-`solana-validator-ha` provides a simple, low-dependency HA solution for running 2 or more Solana validators together, where one is `active` (voting) and the rest are `passive` (non-voting). All peers share the same `active` keypair identity and each has its own unique `passive` keypair identity.
+`solana-validator-ha` provides a simple, low-dependency HA solution for running 2 or more Solana validators together, where one is `active` (voting) and the rest are `passive` (non-voting). Each HA group is declared as a `profile` with one active identity, one vote account, one authorized voter, and a self-inclusive peer map. A daemon may opt into multiple profiles so one passive node can back up multiple validators, while still serving at most one active profile at a time.
 
 Each peer runs `solana-validator-ha` independently. It monitors the Solana gossip network to detect whether any peer is currently active and voting. When no active peer has been seen for a configurable number of consecutive samples (the _leaderless threshold_), a failover is triggered. Each peer makes this decision independently using the same gossip data, with a rank-based delay to prevent multiple peers from racing to become active simultaneously.
 
@@ -41,6 +41,7 @@ failover:
     command: "set-identity-with-rollback.sh"
     args: [
       "--active-identity-file", "{{ .ActiveIdentityKeypairFile }}",
+      "--authorized-voter-pubkey", "{{ .AuthorizedVoterPubkey }}",
       "--passive-identity-file", "{{ .PassiveIdentityKeypairFile }}",
     ]
 ```
@@ -69,7 +70,8 @@ failover:
 - **🛡️ Startup Health Protection**: Requires a configurable minimum continuous healthy streak before a node can become a failover candidate
 - **🪝 Hooks**: Pre/Post failover hook support for role transitions
 - **📊 Prometheus Metrics**: Rich metrics collection for monitoring and alerting
-- **🏁 First-Responder Failover**: Race-based failover with deterministic rank-based delay so the highest-priority eligible passive validator assumes the active role. Default ordering is ascending IP sort; operators can override with explicit `failover.priority` per node
+- **🏁 First-Responder Failover**: Race-based failover with deterministic rank-based delay so the highest-priority eligible passive validator assumes the active role. Default ordering is ascending IP sort; operators can override with explicit `profiles.<name>.peers.<peer>.priority`
+- **🔁 Shared Backup Profiles**: One daemon can monitor multiple active identities and promote itself for the highest-priority eligible profile, while treating peers already active for another profile as busy
 - **📼 Failover Recording**: Optionally writes a timestamped JSON file per failover with pre-failover gossip context, decision timeline, and outcome — for post-incident diagnosis and replay
 
 ## Installation
@@ -100,6 +102,9 @@ Download and install the latest [release](https://github.com/SOL-Strategies/sola
 
 ## Configuration
 
+This release uses profile-based configuration only. For upgrades from the old
+single-profile layout, see [Profile Config Migration](docs/profile-migration.md).
+
 ```yaml
 log:
 
@@ -128,15 +133,6 @@ validator:
 
   identities:
 
-    # required: true (or set active_pubkey)
-    # Path to the active keypair file — shared across all HA peers.
-    # Takes precedence over active_pubkey if both are set.
-    active: "/path/to/active-identity.json"
-
-    # required: true (or set active)
-    # Base58-encoded active pubkey. Used when the keypair file is not available on this node.
-    active_pubkey: 111111ActivePubkey1111111111111111111111111
-
     # required: true (or set passive_pubkey)
     # Path to the passive keypair file — unique per peer.
     # Takes precedence over passive_pubkey if both are set.
@@ -144,7 +140,7 @@ validator:
 
     # required: true (or set passive)
     # Base58-encoded passive pubkey. Used when the keypair file is not available on this node.
-    passive_pubkey: 111111PassivePubkey1111111111111111111111111
+    passive_pubkey: SysvarC1ock11111111111111111111111111111111
 
 prometheus:
 
@@ -291,27 +287,14 @@ failover:
     # If omitted, files land next to the config file.
     output_dir: "/var/log/solana-validator-ha/recordings"
 
-  # required: true | min: 1
-  # Map of HA peers, excluding this node — it is added automatically at startup.
-  # Keys are vanity names used in logging and metrics. IPs must be valid, unique IPv4 addresses.
-  peers:
-    backup-validator-1:
-      ip: 192.168.1.11
-    backup-validator-2:
-      ip: 192.168.1.12
-
-  # required: false
-  # Explicit failover priority for this node. Lower value = higher priority (takes over first).
-  # When set, every peer in failover.peers must also declare a priority, and all values must be
-  # unique and non-negative. If omitted (default), peers are ranked by ascending IP address.
-  # All nodes in the HA cluster should declare the same priority ordering to avoid races.
-  # See "Failover Priority" below for details.
-  priority: 0
-
   # required: true
   # Commands and hooks to run when this node should become active.
   # command, args, and env values support Go template strings:
-  #   {{ .ActiveIdentityKeypairFile }}  — absolute path to validator.identities.active
+  #   {{ .ProfileName }}                — selected profile name
+  #   {{ .ProfilePriority }}            — selected profile priority
+  #   {{ .VoteAccountPubkey }}          — selected profile vote account
+  #   {{ .AuthorizedVoterPubkey }}      — selected profile authorized voter
+  #   {{ .ActiveIdentityKeypairFile }}  — absolute path to profiles.<name>.identities.active
   #   {{ .PassiveIdentityKeypairFile }} — absolute path to validator.identities.passive
   #   {{ .ActiveIdentityPubkey }}       — active pubkey string
   #   {{ .PassiveIdentityPubkey }}      — passive pubkey string
@@ -329,6 +312,7 @@ failover:
     args: [
       "active",
       "--active-identity-file",  "{{ .ActiveIdentityKeypairFile }}",
+      "--authorized-voter-pubkey", "{{ .AuthorizedVoterPubkey }}",
       "--passive-identity-file", "{{ .PassiveIdentityKeypairFile }}",
     ]
 
@@ -343,7 +327,7 @@ failover:
           env: {}
           args: [
             "--channel", "#save-my-bacon",
-            "--message", "solana-validator-ha promoting {{ .SelfName }} to active ({{ .PassiveIdentityPubkey }} -> {{ .ActiveIdentityPubkey }})"
+            "--message", "solana-validator-ha promoting {{ .SelfName }} for profile {{ .ProfileName }} ({{ .PassiveIdentityPubkey }} -> {{ .ActiveIdentityPubkey }})"
           ]
 
       post:
@@ -352,7 +336,7 @@ failover:
           env: {}
           args: [
             "--channel", "#saved-my-bacon",
-            "--message", "solana-validator-ha promoted {{ .SelfName }} to active with identity {{ .ActiveIdentityPubkey }}"
+            "--message", "solana-validator-ha promoted {{ .SelfName }} for profile {{ .ProfileName }} with identity {{ .ActiveIdentityPubkey }}"
           ]
 
   # required: true
@@ -390,6 +374,53 @@ failover:
             "--channel", "#postmortem-shelf",
             "--message", "solana-validator-ha demoted {{ .SelfName }} to passive with identity {{ .PassiveIdentityPubkey }}"
           ]
+
+profiles:
+
+  # required: true
+  # Each profile describes one active validator identity this daemon monitors and may assume.
+  # A normal 1:1 primary/backup setup still declares exactly one profile.
+  main:
+
+    # required: true
+    # Lower value = higher cross-profile priority when more than one profile needs failover
+    # at the same time on this daemon.
+    priority: 0
+
+    identities:
+
+      # required: true (or set active_pubkey)
+      # Path to the profile's active identity keypair. Takes precedence over active_pubkey.
+      active: "/path/to/active-identity.json"
+
+      # required: true (or set active)
+      # Base58-encoded active identity pubkey. Use this when the keypair file is not
+      # available on this node and the active command resolves the keypair another way.
+      active_pubkey: 11111111111111111111111111111111
+
+    # required: true
+    # Vote account this profile expects the active identity to be voting with.
+    vote_pubkey: Vote111111111111111111111111111111111111111
+
+    # required: true
+    # Authorized voter expected for this profile. Role commands can use this as
+    # {{ .AuthorizedVoterPubkey }} and should ensure the local validator has the matching voter.
+    authorized_voter: Stake11111111111111111111111111111111111111
+
+    # required: true | min: 1
+    # Self-inclusive HA group for this profile. The map must include validator.name and
+    # its IP must match this node's discovered public IP. Shared backups appear in multiple
+    # profiles' peer maps.
+    peers:
+      primary-validator:
+        ip: 192.168.1.10
+        priority: 0
+      backup-validator-1:
+        ip: 192.168.1.11
+        priority: 1
+      backup-validator-2:
+        ip: 192.168.1.12
+        priority: 2
 
 update:
 
@@ -483,38 +514,47 @@ The delinquency threshold used for detection is `failover.delinquent_slot_distan
 
 By default, when multiple passive nodes are all eligible to take over, they use their public IP addresses (ascending sort) to break the tie. The node with the lowest IP gets rank 0 and takes over immediately; higher-ranked nodes wait `rank × poll_interval_duration` before attempting takeover.
 
-Operators can override this ordering with explicit priorities:
+Operators can override this ordering with explicit priorities under each profile's self-inclusive peer map:
 
 ```yaml
 # On the node that should take over first (highest priority):
-failover:
-  priority: 0
-  peers:
-    backup-validator-1:
-      ip: 192.168.1.11
-      priority: 1
-    backup-validator-2:
-      ip: 192.168.1.12
-      priority: 2
+profiles:
+  main:
+    priority: 0
+    peers:
+      primary-validator:
+        ip: 192.168.1.10
+        priority: 0
+      backup-validator-1:
+        ip: 192.168.1.11
+        priority: 1
+      backup-validator-2:
+        ip: 192.168.1.12
+        priority: 2
 
 # On backup-validator-1:
-failover:
-  priority: 1
-  peers:
-    primary-validator:
-      ip: 192.168.1.10
-      priority: 0
-    backup-validator-2:
-      ip: 192.168.1.12
-      priority: 2
+profiles:
+  main:
+    priority: 0
+    peers:
+      primary-validator:
+        ip: 192.168.1.10
+        priority: 0
+      backup-validator-1:
+        ip: 192.168.1.11
+        priority: 1
+      backup-validator-2:
+        ip: 192.168.1.12
+        priority: 2
 ```
 
 **Rules:**
 
 - Lower `priority` value = higher priority (rank 0 = takes over immediately).
-- If any node declares a `priority`, **all** nodes (self + every entry in `failover.peers`) must declare one. A partially-configured cluster is rejected at startup.
-- Priority values must be unique across self and all peers. Duplicates are rejected at startup.
-- All nodes in the cluster should agree on the same priority ordering to avoid races. `solana-validator-ha` cannot enforce cross-node consistency, but logs the effective rank and ranking source (`config priority` vs `IP address`) at takeover time so mismatches are easy to spot.
+- If any peer in a profile declares a `priority`, **all** peers in that profile, including self, must declare one. A partially-configured profile is rejected at startup.
+- Peer priority values must be unique within a profile. Duplicates are rejected at startup.
+- All nodes participating in the same profile should agree on the same peer map and priority ordering to avoid races. `solana-validator-ha` cannot enforce cross-node consistency, but logs the effective rank and ranking source (`config priority` vs `IP address`) at takeover time so mismatches are easy to spot.
+- `profiles.<name>.priority` is separate: it decides which profile this daemon chooses if multiple active identities need failover at the same time.
 
 ## Failover Recording
 
