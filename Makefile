@@ -5,6 +5,7 @@ BINARY_NAME := solana-validator-ha
 BUILD_DIR := bin
 SMOKE_BINARY := $(BUILD_DIR)/.smoke/$(BINARY_NAME)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+ARTIFACT_VERSION ?= $(patsubst v%,%,$(VERSION))
 COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -ldflags="-s -w -X github.com/sol-strategies/solana-validator-ha/cmd.version=$(VERSION) -X github.com/sol-strategies/solana-validator-ha/cmd.buildCommit=$(COMMIT) -X github.com/sol-strategies/solana-validator-ha/cmd.buildTime=$(BUILD_TIME)"
@@ -29,23 +30,23 @@ build:
 build-docker:
 	@echo "Building $(BINARY_NAME) for Docker..."
 	@mkdir -p $(BUILD_DIR)
-	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-$(VERSION)-linux-amd64 ./cmd/solana-validator-ha
+	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-$(ARTIFACT_VERSION)-linux-amd64 ./cmd/solana-validator-ha
 
 # Cross-platform build for all platforms
 .PHONY: build-all
 build-all:
 	@echo "Building $(BINARY_NAME) for all platforms..."
 	@mkdir -p $(BUILD_DIR)
-	@set -e; VERSION='$(VERSION)'; \
+	@set -e; ARTIFACT_VERSION='$(ARTIFACT_VERSION)'; \
 	for platform in $(PLATFORMS); do \
 		OS=$$(echo $$platform | cut -d'/' -f1); \
 		ARCH=$$(echo $$platform | cut -d'/' -f2); \
-		OUTPUT_NAME=$(BINARY_NAME)-$$VERSION-$$OS-$$ARCH; \
+		OUTPUT_NAME=$(BINARY_NAME)-$$ARTIFACT_VERSION-$$OS-$$ARCH; \
 		echo "Building for $$OS/$$ARCH..."; \
 		CGO_ENABLED=0 GOOS=$$OS GOARCH=$$ARCH go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$$OUTPUT_NAME ./cmd/solana-validator-ha; \
 	done
 	@HOST_OS=$$(go env GOHOSTOS); HOST_ARCH=$$(go env GOHOSTARCH); \
-	HOST_BINARY=$(BUILD_DIR)/$(BINARY_NAME)-$(VERSION)-$$HOST_OS-$$HOST_ARCH; \
+	HOST_BINARY=$(BUILD_DIR)/$(BINARY_NAME)-$(ARTIFACT_VERSION)-$$HOST_OS-$$HOST_ARCH; \
 	if [ -x "$$HOST_BINARY" ]; then \
 		"$$HOST_BINARY" --help | grep -q 'Version: $(VERSION)' && \
 		"$$HOST_BINARY" version | grep -q 'commit: $(COMMIT)' && \
