@@ -20,11 +20,11 @@ Files from the same failover event share the same active identity pubkey prefix 
 their filename and can be replayed together:
 
   solana-validator-ha replay \
-    svha-<pubkey>-<timestamp>-185_26_11_91-recording.json \
-    svha-<pubkey>-<timestamp>-186_233_187_141-recording.json`,
-	Args:             cobra.MinimumNArgs(1),
-	SilenceUsage:     true,
-	SilenceErrors:    true,
+    svha-<pubkey>-<timestamp>-185_26_11_91-<incident-id>-recording.json \
+    svha-<pubkey>-<timestamp>-186_233_187_141-<incident-id>-recording.json`,
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	// Override the root PersistentPreRun — replay needs no config file.
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {},
 	RunE: func(cmd *cobra.Command, args []string) error {

@@ -70,7 +70,7 @@ failover:
 - **🪝 Hooks**: Pre/Post failover hook support for role transitions
 - **📊 Prometheus Metrics**: Rich metrics collection for monitoring and alerting
 - **🏁 First-Responder Failover**: Race-based failover with deterministic rank-based delay so the highest-priority eligible passive validator assumes the active role. Default ordering is ascending IP sort; operators can override with explicit `failover.priority` per node
-- **📼 Failover Recording**: Optionally writes a timestamped JSON file per failover with pre-failover gossip context, decision timeline, and outcome — for post-incident diagnosis and replay
+- **📼 Incident Recording**: Optionally checkpoints timestamped JSON from the first anomalous network observation through recovery, demotion, or takeover — for multi-node diagnosis and replay
 
 ## Installation
 
@@ -279,11 +279,11 @@ failover:
     # Set to 0 to disable grace (any failure resets immediately — original behaviour).
     unhealthy_grace_count: 1
 
-  # Failover recording: writes a JSON file per failover for post-incident diagnosis.
+  # Incident recording: writes JSON for network anomalies and failover decisions.
   recording:
 
     # required: false | default: false
-    # When true, a JSON recording file is written to output_dir after every failover.
+    # When true, a JSON recording is checkpointed from the first anomaly through its outcome.
     enabled: false
 
     # required: false | default: directory of the loaded config file
@@ -516,23 +516,26 @@ failover:
 - Priority values must be unique across self and all peers. Duplicates are rejected at startup.
 - All nodes in the cluster should agree on the same priority ordering to avoid races. `solana-validator-ha` cannot enforce cross-node consistency, but logs the effective rank and ranking source (`config priority` vs `IP address`) at takeover time so mismatches are easy to spot.
 
-## Failover Recording
+## Incident Recording
 
-When `failover.recording.enabled: true`, `solana-validator-ha` writes a JSON file to disk after every failover. The file captures everything needed for post-incident diagnosis: the gossip samples leading up to the failover, the full decision timeline, and the outcome.
+When `failover.recording.enabled: true`, `solana-validator-ha` starts a recording on the first leaderless sample, gossip RPC error, self-gossip absence, or delinquency signal. It checkpoints the incident until the network recovers or the node reaches a terminal failover decision. This records the former active node's view as well as the takeover candidates' views without requiring shared infrastructure.
+
+While an incident is open, the latest state is stored atomically as `*.json.partial`. On the next start, a valid partial is finalized with the `interrupted` outcome so a process crash does not erase the available timeline. Recording failures are logged but never block an HA decision.
 
 ### File naming
 
 ```
-svha-<pubkey>-<timestamp>-<producer-ip>-recording.json
+svha-<pubkey>-<timestamp-with-milliseconds>-<producer-ip>-<incident-id>-recording.json
 ```
 
 | Segment | Description |
 |---------|-------------|
 | `<pubkey>` | Active identity pubkey — shared across all HA peers, so files from different nodes for the same failover event share this prefix |
-| `<timestamp>` | UTC time the failover was detected, formatted as `20060102T150405Z` |
+| `<timestamp>` | UTC time the incident was detected, formatted as `20060102T150405.000Z` |
 | `<producer-ip>` | Public IP of the node that wrote the file, with dots replaced by underscores (e.g. `185_26_11_91`) |
+| `<incident-id>` | Process-local unique identifier that prevents collisions between recordings beginning in the same millisecond |
 
-Example: `svha-VotePubkey1111111111111111111111111111111111-20260331T143022Z-185_26_11_91-recording.json`
+Example: `svha-VotePubkey1111111111111111111111111111111111-20260331T143022.127Z-185_26_11_91-18e...-1-recording.json`
 
 Because the timestamp is derived from each node's independent poll cycle, files from two nodes for the same failover event will have slightly different timestamps (up to one poll interval apart). Sort by `<pubkey>` first, then `<timestamp>` to find the matching pair.
 
@@ -544,9 +547,9 @@ Each recording file contains a single JSON object with:
 - **`node`** — identity of the node that wrote the file (name, public IP, passive pubkey)
 - **`config`** — relevant configuration snapshot (poll interval, leaderless threshold, delinquency bypass, etc.)
 - **`detected_at`** — UTC timestamp when the leaderless condition was first detected
-- **`gossip_samples`** — up to the last 20 gossip samples collected before the failover, each with a timestamp, active/passive peer snapshots (IP, pubkey, vote slot), and the leaderless count at that point
-- **`timeline`** — ordered list of decision events with timestamps and details (e.g. "delinquency bypass triggered", "takeover delay rank=1", "peer took over during delay — aborting")
-- **`outcome`** — what happened: `became_active`, `aborted_peer_took_over`, `aborted_self_not_healthy`, or `aborted_other`
+- **`gossip_samples`** — pre-incident and live samples with peer state, RPC status, local role/health, self-gossip presence, and elapsed incident time
+- **`timeline`** — ordered decisions and actions, including ranking, guardrails, hooks, commands, durations, and identity confirmation
+- **`outcome`** — recovery, demotion, promotion, guardrail, abort, failure, or interruption result for this node
 
 ### Configuration
 
@@ -565,11 +568,42 @@ The `solana-validator-ha replay` command accepts one or more recording files and
 
 ```bash
 solana-validator-ha replay \
-  svha-VotePubkey111111111111111111111111111111111-20260331T143022Z-185_26_11_91-recording.json \
-  svha-VotePubkey111111111111111111111111111111111-20260331T143025Z-186_233_187_141-recording.json
+  svha-VotePubkey111111111111111111111111111111111-20260331T143022.127Z-185_26_11_91-<incident-id>-recording.json \
+  svha-VotePubkey111111111111111111111111111111111-20260331T143025.402Z-186_233_187_141-<incident-id>-recording.json
 ```
 
 To find the matching file from the other node, filter by the shared `<pubkey>` prefix — all recordings for the same HA cluster carry the same pubkey. The timestamps will differ by a few seconds (each node detects the failover at a different point in its own poll cycle), so sort chronologically within that prefix to find the pair.
+
+Replay accepts schema v1 and v2 recordings. It prints each producer's schema, binary version, local observations, time to first leaderless, action results, and terminal outcome. A warning is emitted when files appear to come from different clusters or their incident start times suggest clock skew.
+
+The replay timeline is rendered as `timestamp / TTFL / peer / role / log`. Timestamps are UTC with millisecond precision. TTFL means "time to first leaderless": negative values are pre-incident context, zero is the peer's first leaderless or otherwise anomalous observation, and positive values are time since that observation. Because each peer detects and records an incident independently, TTFL is relative to that peer's own `detected_at`. Schema v1 recordings do not contain local-role observations, so their role is shown as `unknown`.
+
+### Previewing replay output
+
+The repository includes deterministic recording files that pass through the same JSON loader and renderer as production recordings. Review the two-node display before changing its format:
+
+```bash
+make replay-preview
+```
+
+Review winner/loser correlation with three inputs:
+
+```bash
+make replay-preview REPLAY_SCENARIO=three-node
+```
+
+Additional two-input review scenarios are `partition-recovery`, `last-node-standing`, `delinquency-bypass`, and `command-failure`, selected with the same `REPLAY_SCENARIO` variable.
+
+The golden-output test intentionally fails when the two-node layout changes, requiring the new display to be reviewed before its snapshot is updated.
+
+### Binary provenance
+
+```bash
+solana-validator-ha --version  # concise version
+solana-validator-ha version    # version, commit, build time, Go version, OS/architecture
+```
+
+Root help also includes the binary version and lists the `run`, `replay`, and `version` commands. These commands do not load HA configuration or access the network.
 
 ## Development and testing
 
@@ -588,6 +622,7 @@ The application exposes Prometheus metrics on the configured port (default: 9090
 - **`solana_validator_ha_self_in_gossip`**: Whether this validator appears in gossip (1=yes, 0=no)
 - **`solana_validator_ha_failover_status`**: Current failover status
 - **`solana_validator_ha_update_available`**: Whether a newer release is available (1=yes, 0=no). Updated on startup and periodically per `update.check_interval_duration`
+- **`solana_validator_ha_recording_write_failures_total`**: Number of failed recording checkpoints or final writes
 
 ### Metric Labels
 - `validator_name`: Configured validator name

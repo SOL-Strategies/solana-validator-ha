@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 )
 
-// Recording holds configuration for post-failover recording.
+// Recording holds configuration for network anomaly and failover incident recording.
 type Recording struct {
-	// Enabled controls whether failover events are written to disk. Default false.
+	// Enabled controls whether incident timelines are written to disk. Default false.
 	Enabled bool `koanf:"enabled"`
 	// OutputDir is the directory where recording files are written.
 	// If empty, defaults to the directory containing the loaded config file.

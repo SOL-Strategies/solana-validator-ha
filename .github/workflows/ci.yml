@@ -62,21 +62,13 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
-      - name: Build for multiple platforms
+      - name: Smoke-test binary provenance and replay
         run: |
-          mkdir -p bin
-          GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -ldflags="-s -w" -o bin/${BINARY_NAME}-linux-amd64 ./cmd/solana-validator-ha
-          GOOS=linux GOARCH=arm64 go build -a -installsuffix cgo -ldflags="-s -w" -o bin/${BINARY_NAME}-linux-arm64 ./cmd/solana-validator-ha
-          GOOS=darwin GOARCH=amd64 go build -a -installsuffix cgo -ldflags="-s -w" -o bin/${BINARY_NAME}-darwin-amd64 ./cmd/solana-validator-ha
-          GOOS=darwin GOARCH=arm64 go build -a -installsuffix cgo -ldflags="-s -w" -o bin/${BINARY_NAME}-darwin-arm64 ./cmd/solana-validator-ha
-          GOOS=windows GOARCH=amd64 go build -a -installsuffix cgo -ldflags="-s -w" -o bin/${BINARY_NAME}-windows-amd64.exe ./cmd/solana-validator-ha
+          make smoke-test VERSION="$(git describe --tags --always --dirty)" COMMIT="${GITHUB_SHA::12}"
 
-      - name: Generate checksums
+      - name: Build packaged artifacts
         run: |
-          cd bin
-          for file in ${BINARY_NAME}-*; do
-            sha256sum "$file" > "${file}.sha256"
-          done
+          make build-all VERSION="$(git describe --tags --always --dirty)" COMMIT="${GITHUB_SHA::12}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -107,16 +99,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            bin/${BINARY_NAME}-linux-amd64
-            bin/${BINARY_NAME}-linux-amd64.sha256
-            bin/${BINARY_NAME}-linux-arm64
-            bin/${BINARY_NAME}-linux-arm64.sha256
-            bin/${BINARY_NAME}-darwin-amd64
-            bin/${BINARY_NAME}-darwin-amd64.sha256
-            bin/${BINARY_NAME}-darwin-arm64
-            bin/${BINARY_NAME}-darwin-arm64.sha256
-            bin/${BINARY_NAME}-windows-amd64.exe
-            bin/${BINARY_NAME}-windows-amd64.exe.sha256
+            bin/*
           draft: false
           prerelease: false
           generate_release_notes: true

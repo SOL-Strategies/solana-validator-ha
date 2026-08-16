@@ -2,7 +2,7 @@ package recording
 
 import "time"
 
-const SchemaVersion = "1"
+const SchemaVersion = "2"
 
 // NodeInfo identifies the node that produced this recording.
 type NodeInfo struct {
@@ -10,6 +10,7 @@ type NodeInfo struct {
 	IP            string `json:"ip"`
 	ActivePubkey  string `json:"active_pubkey"`
 	PassivePubkey string `json:"passive_pubkey"`
+	BinaryVersion string `json:"binary_version,omitempty"`
 }
 
 // ConfigSnapshot captures the failover-relevant config values at the time of the event.
@@ -39,13 +40,20 @@ type GossipSample struct {
 	LeaderlessSamplesCount int            `json:"leaderless_samples_count"`
 	ActivePeerDelinquent   bool           `json:"active_peer_delinquent"`
 	RPCError               bool           `json:"rpc_error"`
+	LocalRole              string         `json:"local_role,omitempty"`
+	LocalPubkey            string         `json:"local_pubkey,omitempty"`
+	LocalHealthy           bool           `json:"local_healthy"`
+	SelfInGossip           bool           `json:"self_in_gossip"`
+	GossipPubkey           string         `json:"gossip_pubkey,omitempty"`
+	ElapsedMillis          int64          `json:"elapsed_millis,omitempty"`
 }
 
 // TimelineEntry records a single decision or action during a failover.
 type TimelineEntry struct {
-	At     time.Time `json:"at"`
-	Event  string    `json:"event"`
-	Detail string    `json:"detail,omitempty"`
+	At            time.Time `json:"at"`
+	Event         string    `json:"event"`
+	Detail        string    `json:"detail,omitempty"`
+	ElapsedMillis int64     `json:"elapsed_millis,omitempty"`
 }
 
 // Outcome describes what happened at the end of the failover attempt on this node.
@@ -61,10 +69,12 @@ type Outcome struct {
 // FailoverEvent is the top-level structure serialised to the recording file.
 type FailoverEvent struct {
 	SchemaVersion string          `json:"schema_version"`
+	IncidentID    string          `json:"incident_id,omitempty"`
 	Node          NodeInfo        `json:"node"`
 	Config        ConfigSnapshot  `json:"config"`
 	DetectedAt    time.Time       `json:"detected_at"`
 	GossipSamples []GossipSample  `json:"gossip_samples"`
 	Timeline      []TimelineEntry `json:"timeline"`
 	Outcome       *Outcome        `json:"outcome,omitempty"`
+	CompletedAt   *time.Time      `json:"completed_at,omitempty"`
 }
