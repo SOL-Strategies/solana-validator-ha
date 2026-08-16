@@ -49,11 +49,11 @@ jobs:
 
       - name: Smoke-test release binary
         run: |
-          make smoke-test VERSION=${{ steps.version.outputs.tag }} COMMIT=${GITHUB_SHA::12}
+          make smoke-test VERSION=${{ steps.version.outputs.tag }} ARTIFACT_VERSION=${{ steps.version.outputs.version }} COMMIT=${GITHUB_SHA::12}
 
       - name: Build binaries for all platforms
         run: |
-          make build-all VERSION=${{ steps.version.outputs.tag }} COMMIT=${GITHUB_SHA::12}
+          make build-all VERSION=${{ steps.version.outputs.tag }} ARTIFACT_VERSION=${{ steps.version.outputs.version }} COMMIT=${GITHUB_SHA::12}
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
