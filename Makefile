@@ -3,7 +3,11 @@
 # Variables
 BINARY_NAME := solana-validator-ha
 BUILD_DIR := bin
-LDFLAGS := -ldflags="-s -w"
+SMOKE_BINARY := $(BUILD_DIR)/.smoke/$(BINARY_NAME)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -ldflags="-s -w -X github.com/sol-strategies/solana-validator-ha/cmd.version=$(VERSION) -X github.com/sol-strategies/solana-validator-ha/cmd.buildCommit=$(COMMIT) -X github.com/sol-strategies/solana-validator-ha/cmd.buildTime=$(BUILD_TIME)"
 export COMPOSE_BAKE := true
 
 # Build targets
@@ -18,7 +22,6 @@ all: build
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	@go mod tidy
 	@CGO_ENABLED=0 go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/solana-validator-ha
 
 # Docker build (linux-amd64)
@@ -26,22 +29,14 @@ build:
 build-docker:
 	@echo "Building $(BINARY_NAME) for Docker..."
 	@mkdir -p $(BUILD_DIR)
-	@go mod tidy
-	@VERSION=$$(cat cmd/version.txt | tr -d '\n'); \
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-$$VERSION-linux-amd64 ./cmd/solana-validator-ha
+	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-$(VERSION)-linux-amd64 ./cmd/solana-validator-ha
 
 # Cross-platform build for all platforms
 .PHONY: build-all
 build-all:
 	@echo "Building $(BINARY_NAME) for all platforms..."
-	@echo "Debug: Current directory: $$(pwd)"
-	@echo "Debug: Contents of cmd/:"
-	@ls -la cmd/ || echo "cmd/ directory not found"
-	@echo "Debug: Contents of cmd/solana-validator-ha/:"
-	@ls -la cmd/solana-validator-ha/ || echo "cmd/solana-validator-ha/ directory not found"
 	@mkdir -p $(BUILD_DIR)
-	@go mod tidy
-	@VERSION=$$(cat cmd/version.txt | tr -d '\n'); \
+	@set -e; VERSION='$(VERSION)'; \
 	for platform in $(PLATFORMS); do \
 		OS=$$(echo $$platform | cut -d'/' -f1); \
 		ARCH=$$(echo $$platform | cut -d'/' -f2); \
@@ -49,12 +44,19 @@ build-all:
 		echo "Building for $$OS/$$ARCH..."; \
 		CGO_ENABLED=0 GOOS=$$OS GOARCH=$$ARCH go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$$OUTPUT_NAME ./cmd/solana-validator-ha; \
 	done
+	@HOST_OS=$$(go env GOHOSTOS); HOST_ARCH=$$(go env GOHOSTARCH); \
+	HOST_BINARY=$(BUILD_DIR)/$(BINARY_NAME)-$(VERSION)-$$HOST_OS-$$HOST_ARCH; \
+	if [ -x "$$HOST_BINARY" ]; then \
+		"$$HOST_BINARY" --help | grep -q 'Version: $(VERSION)' && \
+		"$$HOST_BINARY" version | grep -q 'commit: $(COMMIT)' && \
+		NO_COLOR=1 "$$HOST_BINARY" replay internal/recording/testdata/two-node/*.json >/dev/null; \
+	fi
 	@echo "Compressing binaries..."
 	@cd $(BUILD_DIR) && \
 	for binary in $(BINARY_NAME)-*; do \
-		if [ -f "$$binary" ] && [ "$${binary##*.}" != "sha256" ]; then \
+		if [ -f "$$binary" ] && [ "$${binary##*.}" != "sha256" ] && [ "$${binary##*.}" != "gz" ]; then \
 			echo "Compressing $$binary..."; \
-			gzip "$$binary"; \
+			gzip -f "$$binary"; \
 		fi; \
 	done
 	@echo "Generating checksums..."
@@ -66,6 +68,24 @@ build-all:
 		fi; \
 	done
 	@echo "Build complete. Compressed binaries and checksums are in $(BUILD_DIR)/"
+
+.PHONY: replay-preview
+replay-preview:
+	@go run ./cmd/solana-validator-ha replay internal/recording/testdata/$(or $(REPLAY_SCENARIO),two-node)/*.json
+
+.PHONY: smoke-test
+smoke-test:
+	@echo "Building smoke-test binary..."
+	@mkdir -p $(dir $(SMOKE_BINARY))
+	@CGO_ENABLED=0 go build -mod=mod $(LDFLAGS) -o $(SMOKE_BINARY) ./cmd/solana-validator-ha
+	@$(SMOKE_BINARY) >/dev/null
+	@$(SMOKE_BINARY) --help | grep -q 'Version: $(VERSION)'
+	@$(SMOKE_BINARY) --help | grep -q 'replay'
+	@$(SMOKE_BINARY) --help | grep -q 'version'
+	@$(SMOKE_BINARY) --version | grep -q '$(VERSION)'
+	@$(SMOKE_BINARY) version | grep -q 'commit: $(COMMIT)'
+	@$(SMOKE_BINARY) replay --help >/dev/null
+	@NO_COLOR=1 $(SMOKE_BINARY) replay internal/recording/testdata/two-node/*.json >/dev/null
 
 # Run tests
 test:
@@ -130,13 +150,6 @@ gifs: build
 	@vhs integration/tapes/active-node.tape
 	@echo "GIFs saved to docs/"
 
-
-# Clean build artifacts
-clean:
-	@echo "Cleaning build artifacts..."
-	rm -f bin/${BINARY_NAME}*
-	rm -f bin/*.sha256
-	rm -f coverage.out coverage.html
 
 # Install dependencies
 deps:
@@ -215,6 +228,8 @@ help:
 	@echo "  build-docker   - Build for Docker (linux-amd64)"
 	@echo "  clean          - Clean build artifacts"
 	@echo "  test           - Run tests"
+	@echo "  replay-preview - Render real JSON fixtures (set REPLAY_SCENARIO; default two-node)"
+	@echo "  smoke-test     - Verify binary help, version, and replay commands"
 	@echo "  test-coverage  - Run tests with coverage"
 	@echo "  integration-test - Run integration tests"
 	@echo "  integration      - Start integration docker compose environment"

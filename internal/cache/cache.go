@@ -12,6 +12,7 @@ type State struct {
 	Hostname      string
 	PublicIP      string
 	Role          string // "active", "passive", "unknown"
+	RuntimePubkey string
 	Status        string // "healthy", "unhealthy", "unknown"
 
 	// Peer information

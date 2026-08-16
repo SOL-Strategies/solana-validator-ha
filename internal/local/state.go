@@ -145,22 +145,30 @@ func (s *State) IsSelfHealthy() bool {
 
 // IsSelfActive returns true if the validator is running with the active identity.
 func (s *State) IsSelfActive() bool {
-	identity, err := s.rpc.GetIdentity(s.ctx)
+	identity, err := s.SelfIdentity()
 	if err != nil {
-		s.logger.Debug("GetIdentity failed", "error", err)
 		return false
 	}
-	return identity.Identity.String() == s.activePubkey
+	return identity == s.activePubkey
 }
 
 // IsSelfPassive returns true if the validator is running with the passive identity.
 func (s *State) IsSelfPassive() bool {
+	identity, err := s.SelfIdentity()
+	if err != nil {
+		return false
+	}
+	return identity != s.activePubkey
+}
+
+// SelfIdentity returns the validator's current runtime identity pubkey.
+func (s *State) SelfIdentity() (string, error) {
 	identity, err := s.rpc.GetIdentity(s.ctx)
 	if err != nil {
 		s.logger.Debug("GetIdentity failed", "error", err)
-		return false
+		return "", err
 	}
-	return identity.Identity.String() != s.activePubkey
+	return identity.Identity.String(), nil
 }
 
 // checkHealth performs a raw health check against the local RPC.

@@ -2,12 +2,16 @@ package ha
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	solanago "github.com/gagliardetto/solana-go"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
 	"github.com/sol-strategies/solana-validator-ha/internal/gossip"
+	"github.com/sol-strategies/solana-validator-ha/internal/recording"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,6 +19,50 @@ import (
 // mockPublicIPFunc is a mock function for getting public IP
 func mockPublicIPFunc() (string, error) {
 	return "192.168.1.100", nil
+}
+
+func TestObserveRecording_CapturesTransientRPCIncident(t *testing.T) {
+	dir := t.TempDir()
+	cfg := createTestConfig()
+	cfg.Failover.Recording.Enabled = true
+	cfg.Failover.Recording.OutputDir = dir
+	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+	require.NoError(t, manager.initialize())
+
+	detectedAt := time.Date(2026, 8, 17, 1, 2, 3, 0, time.UTC)
+	anomaly := recording.GossipSample{
+		SampledAt: detectedAt, RPCError: true, LocalRole: "active",
+		LocalHealthy: true, SelfInGossip: false,
+	}
+	manager.ring.Add(anomaly)
+	assert.True(t, manager.observeRecording(anomaly, false))
+	require.NotNil(t, manager.activeRecorder)
+
+	recovered := recording.GossipSample{
+		SampledAt: detectedAt.Add(5 * time.Second), LocalRole: "active",
+		LocalHealthy: true, SelfInGossip: true,
+	}
+	assert.False(t, manager.observeRecording(recovered, false))
+	assert.Nil(t, manager.activeRecorder)
+
+	var path string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		matches, _ := filepath.Glob(filepath.Join(dir, "*-recording.json"))
+		if len(matches) == 1 {
+			path = matches[0]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NotEmpty(t, path)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var event recording.FailoverEvent
+	require.NoError(t, json.Unmarshal(raw, &event))
+	require.NotNil(t, event.Outcome)
+	assert.Equal(t, "recovered_no_failover", event.Outcome.Result)
+	assert.Len(t, event.GossipSamples, 2)
 }
 
 // mockPublicIPFuncError is a mock function that returns an error

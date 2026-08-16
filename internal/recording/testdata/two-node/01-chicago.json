@@ -1,0 +1,19 @@
+{
+  "schema_version": "2",
+  "node": {"name":"chicago","ip":"186.233.187.141","active_pubkey":"ActivePubkey111111111111111111111111111111","passive_pubkey":"ChicagoPassive1111111111111111111111111111","binary_version":"v0.1.21-preview"},
+  "config": {"poll_interval_duration":"5s","leaderless_samples_threshold":2,"leaderless_confirmation_poll_duration":"1s","delinquency_bypass":false},
+  "detected_at": "2026-03-31T14:30:15Z",
+  "gossip_samples": [
+    {"sampled_at":"2026-03-31T14:30:10Z","peers":[{"name":"london","ip":"185.26.11.91","role":"passive"}],"leaderless_samples_count":0,"active_peer_delinquent":false,"rpc_error":false,"local_role":"active","local_healthy":true,"self_in_gossip":true,"gossip_pubkey":"ActivePubkey111111111111111111111111111111"},
+    {"sampled_at":"2026-03-31T14:30:15Z","peers":[],"leaderless_samples_count":0,"active_peer_delinquent":false,"rpc_error":true,"local_role":"active","local_healthy":true,"self_in_gossip":false,"elapsed_millis":0}
+  ],
+  "timeline": [
+    {"at":"2026-03-31T14:30:15.001Z","event":"incident_started","detail":"rpc_error=true leaderless_count=0 self_in_gossip=false delinquent=false undeclared_active=false","elapsed_millis":1},
+    {"at":"2026-03-31T14:30:15.002Z","event":"ensure_passive_start","detail":"passive_pubkey=ChicagoPassive1111111111111111111111111111","elapsed_millis":2},
+    {"at":"2026-03-31T14:30:15.003Z","event":"passive_command_start","elapsed_millis":3},
+    {"at":"2026-03-31T14:30:15.220Z","event":"passive_command_complete","detail":"duration=218ms result=ok","elapsed_millis":220},
+    {"at":"2026-03-31T14:30:15.310Z","event":"passive_identity_confirmed","detail":"pubkey=ChicagoPassive1111111111111111111111111111","elapsed_millis":310}
+  ],
+  "outcome":{"result":"demoted_passive","from_node":"chicago","to_node":"unknown"},
+  "completed_at":"2026-03-31T14:30:15.311Z"
+}

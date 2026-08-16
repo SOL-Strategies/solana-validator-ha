@@ -40,11 +40,12 @@ type Metrics struct {
 	commonLabelNames []string
 
 	// Metrics
-	metadata        *prometheus.GaugeVec
-	peerCount       *prometheus.GaugeVec
-	selfInGossip    *prometheus.GaugeVec
-	failoverStatus  *prometheus.GaugeVec
-	updateAvailable *prometheus.GaugeVec
+	metadata               *prometheus.GaugeVec
+	peerCount              *prometheus.GaugeVec
+	selfInGossip           *prometheus.GaugeVec
+	failoverStatus         *prometheus.GaugeVec
+	updateAvailable        *prometheus.GaugeVec
+	recordingWriteFailures prometheus.Counter
 }
 
 // Options for creating a new Metrics instance
@@ -131,6 +132,10 @@ func (m *Metrics) initMetrics() {
 		},
 		m.commonLabelNames,
 	)
+	m.recordingWriteFailures = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: metricsNamespacePrefix + "recording_write_failures_total",
+		Help: "Total failover recording checkpoint or finalization write failures",
+	})
 
 	// Register all metrics
 	m.registry.MustRegister(m.metadata)
@@ -138,8 +143,14 @@ func (m *Metrics) initMetrics() {
 	m.registry.MustRegister(m.selfInGossip)
 	m.registry.MustRegister(m.failoverStatus)
 	m.registry.MustRegister(m.updateAvailable)
+	m.registry.MustRegister(m.recordingWriteFailures)
 
 	m.logger.Debug("initialized Prometheus metrics")
+}
+
+// IncRecordingWriteFailure records a failed recording checkpoint or finalization.
+func (m *Metrics) IncRecordingWriteFailure() {
+	m.recordingWriteFailures.Inc()
 }
 
 // StartServer starts the Prometheus metrics HTTP server

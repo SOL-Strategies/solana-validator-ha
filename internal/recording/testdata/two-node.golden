@@ -1,0 +1,34 @@
+────────────────────────────────────────────────────────────────────────────────
+  solana-validator-ha failover replay
+  identity: ActivePubkey111111111111111111111111111111
+  failover: chicago (186.233.187.141) → london (185.26.11.91)
+  downtime: ~5.311s
+  files:
+    - testdata/two-node/01-chicago.json [schema=2 binary=v0.1.21-preview]
+    - testdata/two-node/02-london.json [schema=2 binary=v0.1.21-preview]
+  outcomes:
+    chicago  demoted_passive  poll=5s threshold=2 delinquency_bypass=false
+    london   became_active    poll=5s threshold=2 delinquency_bypass=false
+
+  TTFL=time to first leaderless
+────────────────────────────────────────────────────────────────────────────────
+  timestamp                 TTFL     peer     role     log
+  2026-03-31T14:30:10.000Z  -5s      chicago  active   gossip  local=active healthy=true self_in_gossip=true leaderless=0  [london:passive]
+  2026-03-31T14:30:10.000Z  -5s      london   passive  gossip  local=passive healthy=true self_in_gossip=true leaderless=0  [chicago:active]
+  2026-03-31T14:30:15.000Z  +0s      chicago  active   gossip  local=active healthy=true self_in_gossip=false leaderless=0  rpc_error=true  []
+  2026-03-31T14:30:15.000Z  +0s      london   passive  gossip  local=passive healthy=true self_in_gossip=true leaderless=1  [chicago:missing]
+  2026-03-31T14:30:15.001Z  +1ms     chicago  active   incident_started  rpc_error=true leaderless_count=0 self_in_gossip=false delinquent=false undeclared_active=false
+  2026-03-31T14:30:15.001Z  +1ms     london   passive  incident_started  rpc_error=false leaderless_count=1 self_in_gossip=true delinquent=false undeclared_active=false
+  2026-03-31T14:30:15.002Z  +2ms     chicago  active   ensure_passive_start  passive_pubkey=ChicagoPassive1111111111111111111111111111
+  2026-03-31T14:30:15.003Z  +3ms     chicago  active   passive_command_start
+  2026-03-31T14:30:15.220Z  +220ms   chicago  active   passive_command_complete  duration=218ms result=ok
+  2026-03-31T14:30:15.310Z  +310ms   chicago  passive  passive_identity_confirmed  pubkey=ChicagoPassive1111111111111111111111111111
+  2026-03-31T14:30:20.000Z  +5s      london   passive  gossip  local=passive healthy=true self_in_gossip=true leaderless=2  [chicago:missing]
+  2026-03-31T14:30:20.001Z  +5.001s  london   passive  threshold_reached  leaderless_count=2 threshold=2
+  2026-03-31T14:30:20.002Z  +5.002s  london   passive  rank_0_no_delay
+  2026-03-31T14:30:20.003Z  +5.003s  london   passive  ensure_active_start
+  2026-03-31T14:30:20.004Z  +5.004s  london   passive  active_command_start
+  2026-03-31T14:30:20.250Z  +5.25s   london   passive  active_command_complete  duration=247ms result=ok
+  2026-03-31T14:30:20.310Z  +5.31s   london   active   active_identity_confirmed  pubkey=ActivePubkey111111111111111111111111111111
+  2026-03-31T14:30:20.311Z  +5.311s  london   active   confirmed_active  duration=308ms
+────────────────────────────────────────────────────────────────────────────────

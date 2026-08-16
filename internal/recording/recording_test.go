@@ -140,7 +140,9 @@ func TestRecorder_WriteAsync_FileCreated(t *testing.T) {
 	for time.Now().Before(deadline) {
 		entries, _ := os.ReadDir(dir)
 		for _, e := range entries {
-			files = append(files, e.Name())
+			if strings.HasSuffix(e.Name(), "-recording.json") {
+				files = append(files, e.Name())
+			}
 		}
 		if len(files) > 0 {
 			break
@@ -161,8 +163,8 @@ func TestRecorder_WriteAsync_FileCreated(t *testing.T) {
 	if !strings.Contains(name, "ActivePubkey") {
 		t.Errorf("filename should contain active pubkey, got %s", name)
 	}
-	if !strings.Contains(name, "20260331T143022Z") {
-		t.Errorf("filename should contain timestamp 20260331T143022Z, got %s", name)
+	if !strings.Contains(name, "20260331T143022.000Z") {
+		t.Errorf("filename should contain millisecond timestamp, got %s", name)
 	}
 	if !strings.Contains(name, "185_26_11_91") {
 		t.Errorf("filename should contain producer IP (dots as underscores), got %s", name)
@@ -179,8 +181,13 @@ func TestRecorder_WriteAsync_ValidJSON(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		entries, _ := os.ReadDir(dir)
-		if len(entries) > 0 {
-			path = filepath.Join(dir, entries[0].Name())
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), "-recording.json") {
+				path = filepath.Join(dir, entry.Name())
+				break
+			}
+		}
+		if path != "" {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -227,5 +234,73 @@ func TestRecorder_RingSnapshotPreserved(t *testing.T) {
 	rec := New(node, cfg, time.Now().UTC(), ring)
 	if len(rec.event.GossipSamples) != 2 {
 		t.Fatalf("expected 2 ring samples seeded, got %d", len(rec.event.GossipSamples))
+	}
+}
+
+func TestRecoverPartials(t *testing.T) {
+	dir := t.TempDir()
+	rec := makeRecorder()
+	rec.AddEvent("incident_started", "rpc_error=true")
+	rec.CheckpointAsync(dir, func(err error) { t.Errorf("checkpoint failed: %v", err) })
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		matches, _ := filepath.Glob(filepath.Join(dir, "*.partial"))
+		if len(matches) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	recovered, err := RecoverPartials(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered) != 1 {
+		t.Fatalf("expected one recovered recording, got %v", recovered)
+	}
+	raw, err := os.ReadFile(recovered[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event FailoverEvent
+	if err := json.Unmarshal(raw, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Outcome == nil || event.Outcome.Result != "interrupted" {
+		t.Fatalf("unexpected recovered outcome: %#v", event.Outcome)
+	}
+}
+
+func TestRecorder_SameMillisecondDoesNotCollide(t *testing.T) {
+	dir := t.TempDir()
+	first := makeRecorder()
+	second := makeRecorder()
+	outcome := Outcome{Result: "recovered_no_failover", FromNode: "unknown", ToNode: "unknown"}
+	first.WriteAsync(dir, outcome)
+	second.WriteAsync(dir, outcome)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		matches, _ := filepath.Glob(filepath.Join(dir, "*-recording.json"))
+		if len(matches) == 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "*-recording.json"))
+	t.Fatalf("expected two distinct recordings, got %v", matches)
+}
+
+func TestRecorder_ReportsWriteFailure(t *testing.T) {
+	rec := makeRecorder()
+	errCh := make(chan error, 1)
+	rec.CheckpointAsync(filepath.Join(t.TempDir(), "missing"), func(err error) { errCh <- err })
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected a write error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for asynchronous write failure")
 	}
 }

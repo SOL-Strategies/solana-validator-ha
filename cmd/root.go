@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	_ "embed"
-	"strings"
+	"fmt"
+	"runtime"
 
 	"github.com/charmbracelet/log"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
@@ -10,10 +10,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-//go:embed version.txt
-var versionFile string
-
-var version = strings.TrimSpace(strings.Split(versionFile, "\n")[0])
+var (
+	version     = "dev"
+	buildCommit = "unknown"
+	buildTime   = "unknown"
+)
 
 var (
 	configFile   string
@@ -25,8 +26,10 @@ var rootCmd = &cobra.Command{
 	Use:     "solana-validator-ha",
 	Short:   "High availability manager for Solana validators",
 	Version: version,
-	Long: `Solana Validator HA is a high availability manager for Solana validators.
-It monitors peers and manages failover decisions to ensure continuous validator operation.`,
+	Long: fmt.Sprintf(`Solana Validator HA is a high availability manager for Solana validators.
+It monitors peers and manages failover decisions to ensure continuous validator operation.
+
+Version: %s`, version),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -47,6 +50,17 @@ It monitors peers and manages failover decisions to ensure continuous validator 
 	},
 }
 
+var versionCmd = &cobra.Command{
+	Use:              "version",
+	Short:            "Show detailed binary build information",
+	Args:             cobra.NoArgs,
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {},
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Fprintf(cmd.OutOrStdout(), "version: %s\ncommit: %s\nbuilt: %s\ngo: %s\nplatform: %s/%s\n",
+			version, buildCommit, buildTime, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	},
+}
+
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() error {
 	return rootCmd.Execute()
@@ -60,4 +74,5 @@ func init() {
 	// Add subcommands here
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(replayCmd)
+	rootCmd.AddCommand(versionCmd)
 }

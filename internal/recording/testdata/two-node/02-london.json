@@ -1,0 +1,23 @@
+{
+  "schema_version": "2",
+  "node": {"name":"london","ip":"185.26.11.91","active_pubkey":"ActivePubkey111111111111111111111111111111","passive_pubkey":"LondonPassive11111111111111111111111111111","binary_version":"v0.1.21-preview"},
+  "config": {"poll_interval_duration":"5s","leaderless_samples_threshold":2,"leaderless_confirmation_poll_duration":"1s","delinquency_bypass":false},
+  "detected_at": "2026-03-31T14:30:15Z",
+  "gossip_samples": [
+    {"sampled_at":"2026-03-31T14:30:10Z","peers":[{"name":"chicago","ip":"186.233.187.141","pubkey":"ActivePubkey111111111111111111111111111111","role":"active"}],"leaderless_samples_count":0,"active_peer_delinquent":false,"rpc_error":false,"local_role":"passive","local_healthy":true,"self_in_gossip":true},
+    {"sampled_at":"2026-03-31T14:30:15Z","peers":[{"name":"chicago","ip":"186.233.187.141","role":"missing"}],"leaderless_samples_count":1,"active_peer_delinquent":false,"rpc_error":false,"local_role":"passive","local_healthy":true,"self_in_gossip":true},
+    {"sampled_at":"2026-03-31T14:30:20Z","peers":[{"name":"chicago","ip":"186.233.187.141","role":"missing"}],"leaderless_samples_count":2,"active_peer_delinquent":false,"rpc_error":false,"local_role":"passive","local_healthy":true,"self_in_gossip":true,"elapsed_millis":5000}
+  ],
+  "timeline": [
+    {"at":"2026-03-31T14:30:15.001Z","event":"incident_started","detail":"rpc_error=false leaderless_count=1 self_in_gossip=true delinquent=false undeclared_active=false","elapsed_millis":1},
+    {"at":"2026-03-31T14:30:20.001Z","event":"threshold_reached","detail":"leaderless_count=2 threshold=2","elapsed_millis":5001},
+    {"at":"2026-03-31T14:30:20.002Z","event":"rank_0_no_delay","elapsed_millis":5002},
+    {"at":"2026-03-31T14:30:20.003Z","event":"ensure_active_start","elapsed_millis":5003},
+    {"at":"2026-03-31T14:30:20.004Z","event":"active_command_start","elapsed_millis":5004},
+    {"at":"2026-03-31T14:30:20.250Z","event":"active_command_complete","detail":"duration=247ms result=ok","elapsed_millis":5250},
+    {"at":"2026-03-31T14:30:20.310Z","event":"active_identity_confirmed","detail":"pubkey=ActivePubkey111111111111111111111111111111","elapsed_millis":5310},
+    {"at":"2026-03-31T14:30:20.311Z","event":"confirmed_active","detail":"duration=308ms","elapsed_millis":5311}
+  ],
+  "outcome":{"result":"became_active","from_node":"chicago","to_node":"london"},
+  "completed_at":"2026-03-31T14:30:20.312Z"
+}
