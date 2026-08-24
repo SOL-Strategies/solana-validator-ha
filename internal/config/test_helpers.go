@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	solanago "github.com/gagliardetto/solana-go"
+	solanago "github.com/solana-foundation/solana-go/v2"
 )
 
 // createTempIdentityFile creates a temporary identity file for testing

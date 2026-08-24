@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/log"
-	solanago "github.com/gagliardetto/solana-go"
+	solanago "github.com/solana-foundation/solana-go/v2"
 )
 
 var publicIPServices = []string{
