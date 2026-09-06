@@ -73,11 +73,17 @@ func TestCluster_Validate(t *testing.T) {
 		assert.NoError(t, err, "Cluster name %s should be valid", clusterName)
 	}
 
-	// Test with invalid cluster name
-	cluster := &Cluster{Name: "invalid-cluster"}
-	err := cluster.Validate()
+	// Any non-empty name is valid (including custom/alpenglow clusters)
+	err := validCluster("alpenglow").Validate()
+	assert.NoError(t, err)
+	err = validCluster("my-private-cluster").Validate()
+	assert.NoError(t, err)
+
+	// Empty name is not valid
+	cluster := validCluster("")
+	err = cluster.Validate()
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "cluster name must be one of")
+	assert.Contains(t, err.Error(), "cluster.name must not be empty")
 
 	// Test with empty RPC URLs
 	cluster = validCluster(solanagorpc.TestNet.Name)
