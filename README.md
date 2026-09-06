@@ -166,10 +166,14 @@ prometheus:
 cluster:
 
   # required: true
-  # Solana cluster this validator is running on. One of: mainnet-beta, devnet, testnet
+  # Solana cluster this validator is running on. Any non-empty name is accepted.
+  # For the known clusters (mainnet-beta, devnet, testnet) rpc_urls defaults to the
+  # public RPC URL of that cluster; any other name (e.g. a custom or Alpenglow
+  # cluster) requires rpc_urls to be set explicitly.
   name: "mainnet-beta"
 
-  # required: false | default: cluster default RPC URL for cluster.name
+  # required: only for custom cluster names | default: cluster default RPC URL for
+  # known cluster.name values (mainnet-beta, devnet, testnet), no default otherwise
   # RPC URLs used to query gossip state. Supplying multiple URLs provides resilience
   # against individual RPC drop-outs. URLs that return 403/429/503 are automatically
   # deprioritised for rpc_url_cooldown_duration before being retried.
