@@ -3,8 +3,6 @@ package config
 import (
 	"fmt"
 	"net/url"
-	"slices"
-	"strings"
 	"time"
 
 	solanagorpc "github.com/gagliardetto/solana-go/rpc"
@@ -24,16 +22,10 @@ type Cluster struct {
 
 // Validate validates the cluster configuration
 func (c *Cluster) Validate() error {
-	// cluster.name must be one of mainnet-beta, testnet, devnet
-	var validClusterNames = []string{
-		solanagorpc.MainNetBeta.Name,
-		solanagorpc.DevNet.Name,
-		solanagorpc.TestNet.Name,
-	}
-
-	// cluster.name must be one of the valid cluster names
-	if !slices.Contains(validClusterNames, c.Name) {
-		return fmt.Errorf("cluster name must be one of %s", strings.Join(validClusterNames, ", "))
+	// cluster.name must be set; any non-empty name is accepted (including custom
+	// or future clusters such as Alpenglow), since RPC URLs are validated below.
+	if c.Name == "" {
+		return fmt.Errorf("cluster.name must not be empty")
 	}
 
 	// cluster.rpc_urls must be a non-empty list of valid RPC URLs
