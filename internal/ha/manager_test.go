@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	solanago "github.com/solana-foundation/solana-go/v2"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
 	"github.com/sol-strategies/solana-validator-ha/internal/gossip"
 	"github.com/sol-strategies/solana-validator-ha/internal/recording"
+	solanago "github.com/solana-foundation/solana-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
+	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/solana-foundation/solana-go/v2"
 	"github.com/solana-foundation/solana-go/v2/rpc"
 	"github.com/solana-foundation/solana-go/v2/rpc/jsonrpc"
-	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 )
 
 // defaultTimeout is the default per-call RPC timeout.

@@ -615,7 +615,7 @@ func newGossipMockRPCServer(t *testing.T, responses map[string]interface{}) *htt
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Method string `json:"method"`
-			ID     int    `json:"id"`
+			ID     any    `json:"id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 

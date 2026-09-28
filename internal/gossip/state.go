@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
-	solana "github.com/solana-foundation/solana-go/v2"
-	solanagorpc "github.com/solana-foundation/solana-go/v2/rpc"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
 	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
+	solana "github.com/solana-foundation/solana-go/v2"
+	solanagorpc "github.com/solana-foundation/solana-go/v2/rpc"
 )
 
 // DelinquencyDetail holds the slot-distance data captured when the active peer is declared
