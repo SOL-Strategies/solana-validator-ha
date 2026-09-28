@@ -187,6 +187,11 @@ func (c *Config) validate() error {
 		return err
 	}
 
+	err = c.Cluster.Consensus.Validate()
+	if err != nil {
+		return err
+	}
+
 	// cluster.rpc_urls may contain the local validator RPC URL, but only when HA peers
 	// are configured as mutual --entrypoint flags (enabling direct CRDS gossip exchange).
 	// Without mutual --entrypoints, local gossip data for peers may be stale. It is safe
