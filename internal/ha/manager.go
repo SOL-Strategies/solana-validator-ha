@@ -55,6 +55,8 @@ type Manager struct {
 	// per streak rather than one per sample.
 	lastLeaderlessReason string
 	warnedBypassIgnored  bool
+	// isolation detects that this node, while active, has lost the network.
+	isolation *isolationMonitor
 	// demotedWithLocalRPCDown is set when the passive command succeeded but the local RPC did
 	// not answer, i.e. the validator was stopped. It stops the passive command from being re-run
 	// on every poll until the local RPC answers again.
@@ -201,16 +203,22 @@ func (m *Manager) initialize() error {
 		Alpenglow:                      m.cfg.Failover.Alpenglow,
 	})
 
-	// create consensus detector; it gets its own local RPC client because the local state's
-	// client is used by the health tracker goroutine
+	// the consensus detector and the isolation monitor get their own local RPC client, shared on
+	// the HA monitor goroutine, because the local state's client is used by the health tracker
+	// goroutine
+	localRPC := rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL)
+
+	// create consensus detector
 	m.logger.Debug("creating consensus detector", "mode", m.cfg.Cluster.Consensus.Mode)
 	m.detector = consensus.NewDetector(consensus.Options{
 		Mode:              m.cfg.Cluster.Consensus.Mode,
 		DetectionInterval: m.cfg.Cluster.Consensus.DetectionIntervalDuration,
 		ClusterRPC:        clusterRPC,
-		LocalRPC:          rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL),
+		LocalRPC:          localRPC,
 		LogPrefix:         m.logPrefix,
 	})
+
+	m.isolation = newIsolationMonitor(localRPC, m.cfg.Failover.LeaderlessSamplesThreshold, m.cfg.Failover.Isolation.LocalSlotStallDuration)
 
 	// create local state
 	m.logger.Debug("creating local state")
@@ -563,6 +571,10 @@ func (m *Manager) ensureHAState() {
 		return
 	}
 
+	if m.demoteIfIsolated() {
+		return
+	}
+
 	// if there is an active peer found in the last failover.leaderless_samples_threshold - we are good
 	// having a lookback grace period is important to allow for RPC glitches and other issues
 	if !m.gossipState.LeaderlessSamplesExceedsThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
@@ -865,6 +877,34 @@ func (m *Manager) delinquencyBypassAllowed() bool {
 		m.warnedBypassIgnored = true
 	}
 	return false
+}
+
+// demoteIfIsolated runs the passive command when this node is active and has lost the network:
+// the cluster RPC has failed for failover.leaderless_samples_threshold consecutive polls and the
+// local processed slot has not moved for failover.isolation.local_slot_stall_duration. It
+// returns true when it acted. A cluster RPC outage alone, with the local slot still moving,
+// leaves the node alone, so an RPC provider outage cannot take a healthy active offline.
+func (m *Manager) demoteIfIsolated() bool {
+	if !m.cfg.Failover.Isolation.Enabled {
+		return false
+	}
+	m.isolation.observe(m.ctx, m.gossipState.LastRefreshHadRPCError())
+	if !m.isolation.isolated() || !m.localState.IsSelfActive() {
+		return false
+	}
+
+	m.logger.Error("cluster RPC unreachable and our local slot has stopped - we appear to have lost the network, ensuring we are passive",
+		"cluster_rpc_failures", m.isolation.clusterRPCFailures,
+		"local_slot", m.isolation.localSlot,
+		"local_slot_stalled_for", m.isolation.localSlotStalledFor().Round(time.Second),
+	)
+	if m.activeRecorder != nil {
+		m.activeRecorder.AddEvent("isolation_detected", fmt.Sprintf("cluster_rpc_failures=%d local_slot=%d local_slot_stalled_for=%s",
+			m.isolation.clusterRPCFailures, m.isolation.localSlot, m.isolation.localSlotStalledFor().Round(time.Second)))
+		m.checkpointRecording()
+	}
+	m.finishRecording(m.ensurePassive(), m.cfg.Validator.Name, "unknown")
+	return true
 }
 
 // alreadyDemotedWithLocalRPCDown reports whether an earlier demotion succeeded while the local

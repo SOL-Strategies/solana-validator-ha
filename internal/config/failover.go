@@ -41,6 +41,8 @@ type Failover struct {
 	Recording                      Recording                      `koanf:"recording"`
 	// Alpenglow holds the vote-evidence settings used once the cluster runs Alpenglow consensus.
 	Alpenglow Alpenglow `koanf:"alpenglow"`
+	// Isolation controls when an active node that has lost the network demotes itself.
+	Isolation Isolation `koanf:"isolation"`
 }
 
 // leaderlessConfirmationPollFloor is the minimum allowed value for
@@ -261,6 +263,7 @@ func (f *Failover) SetDefaults() {
 	}
 
 	f.Alpenglow.SetDefaults(f.PollIntervalDuration)
+	f.Isolation.SetDefaults(f.PollIntervalDuration)
 
 	// Set role names
 	f.Active.Name = "active"

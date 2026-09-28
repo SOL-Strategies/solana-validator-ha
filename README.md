@@ -321,6 +321,18 @@ failover:
     # How often the ratio above is recomputed (one unfiltered getVoteAccounts call).
     network_stake_check_interval_duration: 60s
 
+  # When an active node that has lost the network demotes itself. See "Network isolation" below.
+  isolation:
+
+    # required: false | default: true
+    # Demote this node when it is active, the cluster RPC has failed for leaderless_samples_threshold
+    # consecutive polls, and its local processed slot has not moved for local_slot_stall_duration.
+    enabled: true
+
+    # required: false | default: 15s, or poll_interval_duration if longer | min: poll_interval_duration
+    # How long the local processed slot (read over loopback) may stand still.
+    local_slot_stall_duration: 15s
+
   # Incident recording: writes JSON for network anomalies and failover decisions.
   recording:
 
@@ -560,6 +572,21 @@ Under Alpenglow, a validator restores its vote history for the new identity on `
 If you ran the previous, observe-only release on an Alpenglow cluster, check its flight hours before upgrading: `solana_validator_ha_alpenglow_vote_verdicts_total{verdict="not_voting"}` should only have grown while the active was genuinely failing, and `solana_validator_ha_active_vote_lag_slots` should stay well below `vote_lag_slots_threshold`.
 
 Keep `cluster.consensus.mode: auto`. Check that your `cluster.rpc_urls` answer `getAgGenesisCert`; the local validator is used when they do not. To try the new behaviour without acting on it, run a second instance with `failover.dry_run: true` and a separate metrics port, and compare `solana_validator_ha_active_vote_lag_slots` against `vote_lag_slots_threshold`.
+
+## Network isolation
+
+An active node that loses the network cannot see gossip, so it never counts leaderless samples and would otherwise stay staked until the network returns — then run alongside the peer that replaced it, until Agave's duplicate-instance check shuts one of them down.
+
+From the node's side, "I lost the network" and "my RPC provider is down" look the same: cluster RPC calls fail. The difference is that an isolated node also stops receiving blocks. So with `failover.isolation.enabled` (the default), an **active** node demotes itself when both hold:
+
+1. the cluster RPC has failed for `leaderless_samples_threshold` consecutive polls, and
+2. its local processed slot, read from `validator.rpc_url` over loopback, has not moved for `failover.isolation.local_slot_stall_duration`.
+
+A cluster RPC outage with the local slot still moving changes nothing, so a provider outage cannot take a healthy active offline. If the local RPC cannot be read, the node is never demoted on this path. The demotion is recorded with an `isolation_detected` timeline event. The passive command must work without network access (for example `set-identity` over the local admin socket).
+
+Local `/health` does not help here: under Alpenglow it stayed `ok` for a node that had been fully cut off.
+
+To reduce the chance that an RPC outage and a local stall coincide, configure two or more independent `cluster.rpc_urls`.
 
 ## Failover Priority
 
