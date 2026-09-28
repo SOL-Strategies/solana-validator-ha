@@ -1,0 +1,28 @@
+────────────────────────────────────────────────────────────────────────────────
+  solana-validator-ha failover replay
+  identity: ActivePubkey111111111111111111111111111111
+  failover:  () →  ()
+  downtime: ~10s
+  files:
+    - testdata/alpenglow-stall/01-chicago.json [schema=3 binary=v0.2.0-alpenglow.1]
+    - testdata/alpenglow-stall/02-london.json [schema=3 binary=v0.2.0-alpenglow.1]
+  outcomes:
+    chicago  recovered_no_failover  poll=5s threshold=3 delinquency_bypass=false consensus_mode=auto vote_lag_threshold=32
+    london   recovered_no_failover  poll=5s threshold=3 delinquency_bypass=false consensus_mode=auto vote_lag_threshold=32
+
+  TTFL=time to first leaderless
+────────────────────────────────────────────────────────────────────────────────
+  timestamp                 TTFL     peer     role     log
+  2026-09-25T15:00:00.000Z  -5s      chicago  active   gossip  local=active healthy=true self_in_gossip=true leaderless=0  phase=alpenglow  live=true finalized=438020000  [chicago:active  london:passive]
+  2026-09-25T15:00:00.000Z  -5s      london   passive  gossip  local=passive healthy=true self_in_gossip=true leaderless=0  phase=alpenglow  live=true finalized=438020000  [chicago:active  london:passive]
+  2026-09-25T15:00:05.000Z  +0s      chicago  active   gossip  local=active healthy=true self_in_gossip=false leaderless=1 reason=vote_lag  phase=alpenglow  live=true finalized=438020011  delinquent=true  [chicago:missing slot_distance=34  london:passive]
+  2026-09-25T15:00:05.000Z  +0s      london   passive  gossip  local=passive healthy=true self_in_gossip=true leaderless=1 reason=vote_lag  phase=alpenglow  live=true finalized=438020011  delinquent=true  [chicago:missing slot_distance=34  london:passive]
+  2026-09-25T15:00:05.001Z  +1ms     chicago  active   incident_started  rpc_error=false leaderless_count=1 self_in_gossip=false delinquent=true undeclared_active=false
+  2026-09-25T15:00:05.001Z  +1ms     london   passive  incident_started  rpc_error=false leaderless_count=1 self_in_gossip=true delinquent=true undeclared_active=false
+  2026-09-25T15:00:05.002Z  +2ms     chicago  active   alpenglow_vote_lag_exceeded  vote_lag_slots=34 threshold=32
+  2026-09-25T15:00:05.002Z  +2ms     london   passive  alpenglow_vote_lag_exceeded  vote_lag_slots=34 threshold=32
+  2026-09-25T15:00:10.000Z  +5s      chicago  active   gossip  local=active healthy=true self_in_gossip=true leaderless=0  phase=alpenglow  live=false finalized=438020011  veto=cluster_stalled  [chicago:active  london:passive]
+  2026-09-25T15:00:10.000Z  +5s      london   passive  gossip  local=passive healthy=true self_in_gossip=true leaderless=0  phase=alpenglow  live=false finalized=438020011  veto=cluster_stalled  [chicago:active  london:passive]
+  2026-09-25T15:00:10.001Z  +5.001s  chicago  active   network_recovered  veto=cluster_stalled
+  2026-09-25T15:00:10.001Z  +5.001s  london   passive  network_recovered  veto=cluster_stalled
+────────────────────────────────────────────────────────────────────────────────

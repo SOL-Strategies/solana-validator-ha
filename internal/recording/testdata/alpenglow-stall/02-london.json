@@ -1,0 +1,144 @@
+{
+  "schema_version": "3",
+  "node": {
+    "name": "london",
+    "ip": "185.26.11.91",
+    "active_pubkey": "ActivePubkey111111111111111111111111111111",
+    "passive_pubkey": "LondonPassive111",
+    "binary_version": "v0.2.0-alpenglow.1"
+  },
+  "config": {
+    "poll_interval_duration": "5s",
+    "leaderless_samples_threshold": 3,
+    "leaderless_confirmation_poll_duration": "5s",
+    "delinquency_bypass": false,
+    "consensus_mode": "auto",
+    "vote_lag_slots_threshold": 32,
+    "warmup_slots": 64,
+    "finalization_stall_duration": "15s",
+    "network_current_stake_ratio_min": 0.85
+  },
+  "detected_at": "2026-09-25T15:00:05Z",
+  "gossip_samples": [
+    {
+      "sampled_at": "2026-09-25T15:00:00Z",
+      "peers": [
+        {
+          "name": "chicago",
+          "ip": "186.233.187.141",
+          "pubkey": "ActivePubkey111111111111111111111111111111",
+          "role": "active"
+        },
+        {
+          "name": "london",
+          "ip": "185.26.11.91",
+          "pubkey": "LondonPassive111",
+          "role": "passive"
+        }
+      ],
+      "leaderless_samples_count": 0,
+      "active_peer_delinquent": false,
+      "rpc_error": false,
+      "local_role": "passive",
+      "local_healthy": true,
+      "self_in_gossip": true,
+      "consensus_phase": "alpenglow",
+      "alpenglow_genesis_slot": 438000000,
+      "local_genesis_match": true,
+      "finalized_slot": 438020000,
+      "cluster_live": true,
+      "network_stake_ratio": 0.97,
+      "elapsed_millis": -5000
+    },
+    {
+      "sampled_at": "2026-09-25T15:00:05Z",
+      "peers": [
+        {
+          "name": "chicago",
+          "ip": "186.233.187.141",
+          "role": "missing",
+          "last_vote_slot": 438020011,
+          "current_slot": 438020045,
+          "slot_distance": 34
+        },
+        {
+          "name": "london",
+          "ip": "185.26.11.91",
+          "pubkey": "LondonPassive111",
+          "role": "passive"
+        }
+      ],
+      "leaderless_samples_count": 1,
+      "active_peer_delinquent": true,
+      "rpc_error": false,
+      "local_role": "passive",
+      "local_healthy": true,
+      "self_in_gossip": true,
+      "consensus_phase": "alpenglow",
+      "alpenglow_genesis_slot": 438000000,
+      "local_genesis_match": true,
+      "finalized_slot": 438020011,
+      "cluster_live": true,
+      "network_stake_ratio": 0.97,
+      "leaderless_reason": "vote_lag",
+      "elapsed_millis": 0
+    },
+    {
+      "sampled_at": "2026-09-25T15:00:10Z",
+      "peers": [
+        {
+          "name": "chicago",
+          "ip": "186.233.187.141",
+          "pubkey": "ActivePubkey111111111111111111111111111111",
+          "role": "active"
+        },
+        {
+          "name": "london",
+          "ip": "185.26.11.91",
+          "pubkey": "LondonPassive111",
+          "role": "passive"
+        }
+      ],
+      "leaderless_samples_count": 0,
+      "active_peer_delinquent": false,
+      "rpc_error": false,
+      "local_role": "passive",
+      "local_healthy": true,
+      "self_in_gossip": true,
+      "consensus_phase": "alpenglow",
+      "alpenglow_genesis_slot": 438000000,
+      "local_genesis_match": true,
+      "finalized_slot": 438020011,
+      "cluster_live": false,
+      "network_stake_ratio": 0.97,
+      "veto": "cluster_stalled",
+      "elapsed_millis": 5000
+    }
+  ],
+  "timeline": [
+    {
+      "at": "2026-09-25T15:00:05.001Z",
+      "event": "incident_started",
+      "detail": "rpc_error=false leaderless_count=1 self_in_gossip=true delinquent=true undeclared_active=false",
+      "elapsed_millis": 1
+    },
+    {
+      "at": "2026-09-25T15:00:05.002Z",
+      "event": "alpenglow_vote_lag_exceeded",
+      "detail": "vote_lag_slots=34 threshold=32",
+      "elapsed_millis": 2
+    },
+    {
+      "at": "2026-09-25T15:00:10.001Z",
+      "event": "network_recovered",
+      "detail": "veto=cluster_stalled",
+      "elapsed_millis": 5001
+    }
+  ],
+  "outcome": {
+    "result": "recovered_no_failover",
+    "from_node": "unknown",
+    "to_node": "unknown"
+  },
+  "completed_at": "2026-09-25T15:00:10.010Z"
+}

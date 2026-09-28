@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"text/template"
@@ -82,7 +83,7 @@ func LoadReplayData(paths []string) (*ReplayData, []string, error) {
 		if ev.SchemaVersion == "" {
 			ev.SchemaVersion = "1"
 		}
-		if ev.SchemaVersion != "1" && ev.SchemaVersion != SchemaVersion {
+		if !slices.Contains(supportedSchemaVersions, ev.SchemaVersion) {
 			warnings = append(warnings, fmt.Sprintf("file %s uses unknown schema_version %s", p, ev.SchemaVersion))
 		}
 
@@ -413,6 +414,7 @@ func RenderReplay(data *ReplayData) (string, error) {
 		"PadTTFL":         padTTFL,
 		"Role":            roleStyle,
 		"FormatPeers":     formatPeers,
+		"Deref":           func(b *bool) bool { return b != nil && *b },
 		"IsEvent":         func(e MergedEntry) bool { return e.Kind == "event" },
 		"IsSample":        func(e MergedEntry) bool { return e.Kind == "sample" },
 		"FormatDuration": func(d *time.Duration) string {
@@ -443,12 +445,12 @@ const replayTemplate = `{{ HRule }}
   {{ Muted "files:" }}
 {{ range .Nodes }}    {{ Muted "-" }} {{ LightGrey .File }} {{ Muted (printf "[schema=%s binary=%s]" .SchemaVersion (ValueOrUnknown .Info.BinaryVersion)) }}
 {{ end }}  {{ Muted "outcomes:" }}
-{{ range .Nodes }}    {{ Node .Info.Name }}  {{ if .Outcome }}{{ Outcome .Outcome.Result }}{{ else }}{{ Outcome "incomplete" }}{{ end }}  {{ Muted (printf "poll=%s threshold=%d delinquency_bypass=%t" .Config.PollIntervalDuration .Config.LeaderlessSamplesThreshold .Config.DelinquencyBypass) }}
+{{ range .Nodes }}    {{ Node .Info.Name }}  {{ if .Outcome }}{{ Outcome .Outcome.Result }}{{ else }}{{ Outcome "incomplete" }}{{ end }}  {{ Muted (printf "poll=%s threshold=%d delinquency_bypass=%t" .Config.PollIntervalDuration .Config.LeaderlessSamplesThreshold .Config.DelinquencyBypass) }}{{ if .Config.ConsensusMode }} {{ Muted (printf "consensus_mode=%s vote_lag_threshold=%d" .Config.ConsensusMode .Config.VoteLagSlotsThreshold) }}{{ end }}
 {{ end }}
   {{ Muted "TTFL=time to first leaderless" }}
 {{ HRule }}
   {{ Muted (printf "%-24s  %s  %s  %-7s  %s" "timestamp" (PadTTFL "TTFL") (PadNode "peer") "role" "log") }}
-{{ range .Entries }}{{ if IsSample . }}  {{ LightGrey (FormatTimestamp .At) }}  {{ Muted (PadTTFL (FormatTTFL .TTFL)) }}  {{ Node .NodeName }}  {{ Role .Role }}  {{ Muted "gossip" }} {{ if eq .SchemaVersion "1" }} leaderless={{ .Sample.LeaderlessSamplesCount }}{{ else }} local={{ .Sample.LocalRole }}{{ if .Sample.LocalPubkey }} identity={{ TruncPubkey .Sample.LocalPubkey }}{{ end }} healthy={{ .Sample.LocalHealthy }} self_in_gossip={{ .Sample.SelfInGossip }} leaderless={{ .Sample.LeaderlessSamplesCount }}{{ end }}{{ if .Sample.ActivePeerDelinquent }}  {{ Muted "delinquent=true" }}{{ end }}{{ if .Sample.RPCError }}  {{ Muted "rpc_error=true" }}{{ end }}  {{ FormatPeers .Sample.Peers }}
+{{ range .Entries }}{{ if IsSample . }}  {{ LightGrey (FormatTimestamp .At) }}  {{ Muted (PadTTFL (FormatTTFL .TTFL)) }}  {{ Node .NodeName }}  {{ Role .Role }}  {{ Muted "gossip" }} {{ if eq .SchemaVersion "1" }} leaderless={{ .Sample.LeaderlessSamplesCount }}{{ else }} local={{ .Sample.LocalRole }}{{ if .Sample.LocalPubkey }} identity={{ TruncPubkey .Sample.LocalPubkey }}{{ end }} healthy={{ .Sample.LocalHealthy }} self_in_gossip={{ .Sample.SelfInGossip }} leaderless={{ .Sample.LeaderlessSamplesCount }}{{ end }}{{ if .Sample.LeaderlessReason }} reason={{ .Sample.LeaderlessReason }}{{ end }}{{ if .Sample.ConsensusPhase }}  {{ Muted (printf "phase=%s" .Sample.ConsensusPhase) }}{{ end }}{{ if .Sample.ClusterLive }}  {{ Muted (printf "live=%t finalized=%d" (Deref .Sample.ClusterLive) .Sample.FinalizedSlot) }}{{ end }}{{ if .Sample.Veto }}  {{ Muted (printf "veto=%s" .Sample.Veto) }}{{ end }}{{ if .Sample.ActivePeerDelinquent }}  {{ Muted "delinquent=true" }}{{ end }}{{ if .Sample.RPCError }}  {{ Muted "rpc_error=true" }}{{ end }}  {{ FormatPeers .Sample.Peers }}
 {{ else }}  {{ LightGrey (FormatTimestamp .At) }}  {{ Muted (PadTTFL (FormatTTFL .TTFL)) }}  {{ Node .NodeName }}  {{ Role .Role }}  {{ Muted .Event }}{{ if .Detail }}  {{ LightGrey .Detail }}{{ end }}
 {{ end }}{{ end }}{{ HRule }}
 `
