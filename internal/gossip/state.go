@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/log"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
+	"github.com/sol-strategies/solana-validator-ha/internal/consensus"
 	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
 	solana "github.com/solana-foundation/solana-go/v2"
@@ -50,7 +51,8 @@ type State struct {
 	configUndeclaredActivePeer     PeerState
 	// activePeerDelinquent is set to true during Refresh when the active peer is found in gossip
 	// but is declared delinquent by the network (via getVoteAccounts) and the delinquency is NOT
-	// due to low balance. It is reset to false at the start of every Refresh.
+	// due to low balance. In the Alpenglow phase it is set when the active's vote lag exceeds
+	// failover.alpenglow.vote_lag_slots_threshold instead. It is reset at the start of every Refresh.
 	activePeerDelinquent bool
 	// lastDelinquencyDetail holds slot-distance info from the most recent delinquency detection.
 	// Reset to nil at the start of every Refresh.
@@ -66,6 +68,24 @@ type State struct {
 	votePubkeyCache map[string]solana.PublicKey
 	// skipRefreshForTest, when true, makes Refresh a no-op so tests can seed state manually.
 	skipRefreshForTest bool
+
+	// consensus is the cluster's consensus phase, which decides what counts as voting evidence.
+	consensus    consensus.View
+	alpenglowCfg config.Alpenglow
+	finalization finalizationTracker
+	stakeRatio   stakeRatioSample
+	now          func() time.Time
+	// leaderlessReason says why the last Refresh found no active peer; empty when one was found.
+	leaderlessReason string
+	// streakHasGossipAbsent is true when any sample of the current leaderless streak had the
+	// active identity missing from gossip, as opposed to present but not voting.
+	streakHasGossipAbsent bool
+	// vetoReason is set when the last Refresh ignored the active's missing votes because a
+	// failover could not help. Empty otherwise.
+	vetoReason string
+	// activeVoteLag is the active's vote lag in slots from the last Refresh, when it was measured.
+	activeVoteLag      uint64
+	activeVoteLagKnown bool
 }
 
 // PeerState represents the state of a peer as seen by the solana network
@@ -92,6 +112,7 @@ type Options struct {
 	SelfIP                         string
 	ConfigPeers                    config.Peers
 	LogPrefix                      string
+	Alpenglow                      config.Alpenglow
 }
 
 // NewState creates a new gossip state
@@ -106,7 +127,16 @@ func NewState(opts Options) *State {
 		peerLastSeenAtByName:           make(map[string]time.Time),
 		votePubkeyCache:                make(map[string]solana.PublicKey),
 		delinquentSlotDistanceOverride: opts.DelinquentSlotDistanceOverride,
+		consensus:                      consensus.View{Phase: consensus.PhaseTower},
+		alpenglowCfg:                   opts.Alpenglow,
+		now:                            time.Now,
 	}
+}
+
+// SetConsensusView sets the consensus phase the next Refresh judges voting evidence by.
+// A new State assumes TowerBFT until told otherwise.
+func (p *State) SetConsensusView(view consensus.View) {
+	p.consensus = view
 }
 
 // Refresh the state of peers as seen by the solana network
@@ -123,6 +153,9 @@ func (p *State) Refresh() {
 	p.configUndeclaredActivePeer = PeerState{} // reset on every refresh
 	p.activePeerDelinquent = false             // reset on every refresh
 	p.lastDelinquencyDetail = nil              // reset on every refresh
+	p.leaderlessReason = ""
+	p.vetoReason = ""
+	p.activeVoteLagKnown = false
 
 	// get cluster nodes - if this fails we return an empty state, which should cause its consumer
 	// to check for failovers
@@ -135,6 +168,10 @@ func (p *State) Refresh() {
 		return
 	}
 	p.lastRefreshHadRPCError = false
+
+	if p.consensus.Phase == consensus.PhaseAlpenglow {
+		p.refreshAlpenglowSignals(context.Background())
+	}
 
 	p.logger.Debug("looking for peers in gossip",
 		"cluster_nodes_count", len(clusterNodes),
@@ -155,7 +192,7 @@ func (p *State) Refresh() {
 			// that will get you in the shit - but only if it is actually voting, otherwise let the
 			// leaderless counter increment as normal so a legitimate failover can still fire
 			if isActiveNode {
-				if !p.isNodeActiveAndVoting(*node) {
+				if !p.isActiveNodeVoting(*node) {
 					p.logger.Warn("undeclared active peer appears in gossip but is not voting - ignoring to allow legitimate failover", "ip", nodeIP, "pubkey", node.Pubkey.String())
 					continue
 				}
@@ -191,7 +228,7 @@ func (p *State) Refresh() {
 
 		// a borked active peer might appear in gossip but not actually be voting
 		// so we need to check for that and only proceed to add it to the state if it is not voting still
-		if isActiveNode && !p.isNodeActiveAndVoting(*node) {
+		if isActiveNode && !p.isActiveNodeVoting(*node) {
 			p.logger.Debug("active peer appears in gossip but is not voting - excluding from state", "ip", nodeIP, "pubkey", node.Pubkey.String())
 			continue
 		}
@@ -317,11 +354,14 @@ func (p *State) Refresh() {
 
 	// update state
 	if isLeaderlessSample {
-		p.LeaderlessSamplesCount++
+		p.recordLeaderlessSample()
 		p.logger.Warn("no active peer found",
-			"leaderless_samples_count", p.LeaderlessSamplesCount)
+			"leaderless_samples_count", p.LeaderlessSamplesCount,
+			"reason", p.leaderlessReason)
 	} else {
 		p.LeaderlessSamplesCount = 0
+		p.leaderlessReason = ""
+		p.streakHasGossipAbsent = false
 	}
 	p.missingGossipIPs = latestMissingGossipIPs
 	p.peerStatesByName = latestPeerStatesByName
@@ -463,7 +503,8 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 	// https://github.com/anza-xyz/agave/blob/master/rpc-client-types/src/request.rs
 	// Since Agave v2.0, --health-check-slot-distance also defaults to 128 via the same constant:
 	// https://github.com/anza-xyz/agave/blob/master/validator/src/commands/run/args/json_rpc_config.rs
-	// Both thresholds agree. This variable is only used for the log line below;
+	// Both thresholds agree under TowerBFT only; this function is not used in the Alpenglow phase,
+	// where getHealth compares against the finalized slot instead. This variable is only used for the log line below;
 	// opts.DelinquentSlotDistance is only set when the override is enabled.
 	delinquentSlotDistance := uint64(128)
 	identityKey := node.Pubkey.String()
@@ -535,11 +576,7 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 		}
 
 		// ohhh shit! we're delinquent - snitch on this guy!
-		nodeIP := strings.Split(*node.Gossip, ":")[0]
-		label := undeclaredPeerName + " " + nodeIP
-		if name, ok := p.peerNameFromIP(nodeIP); ok {
-			label = name + " " + nodeIP
-		}
+		label := p.nodeLabel(node)
 		distanceStr := fmt.Sprintf("behind %d slots or more", delinquentSlotDistance)
 		if currentSlot, err := p.clusterRPC.GetSlot(context.Background()); err == nil {
 			distance := currentSlot - delinquentVoteAccount.LastVote
@@ -554,6 +591,11 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 		p.logger.Error(fmt.Sprintf("‼️ %s delinquent (%s)", label, distanceStr),
 			"last_voted_at_slot", delinquentVoteAccount.LastVote,
 		)
+		if p.lastDelinquencyDetail != nil {
+			p.activeVoteLag = p.lastDelinquencyDetail.SlotDistance
+			p.activeVoteLagKnown = true
+		}
+		p.leaderlessReason = LeaderlessReasonDelinquent
 		// signal to ensureHAState that the network has authoritatively confirmed this peer is
 		// delinquent — failover can bypass the leaderless sample threshold
 		p.activePeerDelinquent = true
@@ -580,6 +622,7 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 			"gossip_address", *node.Gossip,
 			"pubkey", node.Pubkey.String(),
 		)
+		p.leaderlessReason = LeaderlessReasonNoVoteAccount
 		return false
 	}
 
@@ -591,6 +634,30 @@ func (p *State) isNodeActiveAndVoting(node solanagorpc.GetClusterNodesResult) bo
 	)
 
 	return true
+}
+
+// LeaderlessReason returns why the last Refresh found no active peer: one of the
+// LeaderlessReason* constants, or empty when an active peer was found.
+func (p *State) LeaderlessReason() string {
+	return p.leaderlessReason
+}
+
+// LeaderlessStreakIsVoteOnly returns true when there is a leaderless streak and the active
+// identity was present in gossip in every sample of it, so the streak rests on voting evidence alone.
+func (p *State) LeaderlessStreakIsVoteOnly() bool {
+	return p.LeaderlessSamplesCount > 0 && !p.streakHasGossipAbsent
+}
+
+// VetoReason returns why the last Refresh disregarded the active's missing votes (one of the
+// Veto* constants), or empty when it did not.
+func (p *State) VetoReason() string {
+	return p.vetoReason
+}
+
+// ActiveVoteLag returns how many slots the active's last vote trailed the reference slot in the
+// last Refresh. ok is false when the lag was not measured.
+func (p *State) ActiveVoteLag() (slots uint64, ok bool) {
+	return p.activeVoteLag, p.activeVoteLagKnown
 }
 
 // HasActivePeer returns true if any of the peers are the active validator
