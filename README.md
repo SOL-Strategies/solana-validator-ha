@@ -631,7 +631,7 @@ Each recording file contains a single JSON object with:
 - **`detected_at`** — UTC timestamp when the leaderless condition was first detected
 - **`gossip_samples`** — pre-incident and live samples with peer state, RPC status, local role/health, self-gossip presence, elapsed incident time, and (schema v3) the consensus phase, why the sample was leaderless, and any Alpenglow veto
 - **`timeline`** — ordered decisions and actions, including ranking, guardrails, hooks, commands, durations, and identity confirmation
-- **`outcome`** — recovery, demotion, promotion, guardrail, abort, failure, or interruption result for this node
+- **`outcome`** — recovery, demotion, promotion, guardrail, abort, failure, or interruption result for this node. A demotion whose passive command succeeded while the local validator was not answering RPC (for example because it was stopped) is recorded as `demoted_validator_down`, and the passive command is not re-run until the local RPC answers again
 
 ### Configuration
 
