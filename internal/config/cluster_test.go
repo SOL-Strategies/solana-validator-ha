@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	solanagorpc "github.com/gagliardetto/solana-go/rpc"
+	solanagorpc "github.com/solana-foundation/solana-go/v2/rpc"
 	"github.com/stretchr/testify/assert"
 )
 

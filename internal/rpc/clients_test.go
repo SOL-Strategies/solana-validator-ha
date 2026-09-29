@@ -20,7 +20,7 @@ func mockSolanaRPCServer(t *testing.T, responses map[string]interface{}) *httpte
 		var request struct {
 			Method string      `json:"method"`
 			Params interface{} `json:"params"`
-			ID     int         `json:"id"`
+			ID     interface{} `json:"id"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -67,7 +67,7 @@ func mockFailingServer(t *testing.T) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Parse the JSON-RPC request to get the ID
 		var request struct {
-			ID int `json:"id"`
+			ID interface{} `json:"id"`
 		}
 		json.NewDecoder(r.Body).Decode(&request)
 
@@ -97,8 +97,8 @@ func mockSlowServer(t *testing.T, delay time.Duration) *httptest.Server {
 		time.Sleep(delay)
 
 		var request struct {
-			Method string `json:"method"`
-			ID     int    `json:"id"`
+			Method string      `json:"method"`
+			ID     interface{} `json:"id"`
 		}
 		json.NewDecoder(r.Body).Decode(&request)
 
