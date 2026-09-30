@@ -169,19 +169,10 @@ func (p *State) inAlpenglowWarmup() bool {
 // isActiveNodeVoting judges whether the node holding the active identity is voting, using the
 // evidence the current consensus phase supports.
 func (p *State) isActiveNodeVoting(node solanagorpc.GetClusterNodesResult) bool {
-	alpenglowRules := p.consensus.Phase == consensus.PhaseAlpenglow && !p.inAlpenglowWarmup()
-	if p.observeOnly {
-		// TowerBFT rules decide in every phase, as before Alpenglow support. The Alpenglow rule is
-		// evaluated alongside, so its verdicts can be watched before they are acted on.
-		if alpenglowRules {
-			p.observeAlpenglowVerdict(node, p.evaluateAlpenglowVoting(node))
-		}
-		return p.isNodeActiveAndVoting(node)
-	}
 	switch {
 	case p.consensus.Phase == consensus.PhaseTower:
 		return p.isNodeActiveAndVoting(node)
-	case alpenglowRules:
+	case p.consensus.Phase == consensus.PhaseAlpenglow && !p.inAlpenglowWarmup():
 		return p.applyAlpenglowVerdict(node, p.evaluateAlpenglowVoting(node))
 	default:
 		// While the phase is unknown, during the migration and during the Alpenglow warm-up,
@@ -294,24 +285,6 @@ func (p *State) applyAlpenglowVerdict(node solanagorpc.GetClusterNodesResult, ve
 		"last_voted_at_slot", lag.LastVote,
 	)
 	return false
-}
-
-// observeAlpenglowVerdict records a verdict without acting on it, and logs what the Alpenglow
-// rule would have concluded when that differs from "voting".
-func (p *State) observeAlpenglowVerdict(node solanagorpc.GetClusterNodesResult, verdict alpenglowVerdict) {
-	p.recordAlpenglowVerdict(verdict)
-	keyvals := []any{"verdict", verdict.name, "vote_lag_slots", verdict.lag.Slots(), "threshold", p.alpenglowCfg.VoteLagSlotsThreshold}
-	if verdict.why != "" {
-		keyvals = append(keyvals, "why", verdict.why)
-	}
-	switch verdict.name {
-	case VerdictNotVoting:
-		p.logger.Warn(fmt.Sprintf("observe-only: under Alpenglow rules %s would count as not voting - no action taken", p.nodeLabel(node)), keyvals...)
-	case VerdictVoting:
-		p.logger.Debug("observe-only: under Alpenglow rules the active peer is voting", keyvals...)
-	default:
-		p.logger.Info("observe-only: under Alpenglow rules the active peer's missing votes would be vetoed or unknown - no action taken", keyvals...)
-	}
 }
 
 // recordAlpenglowVerdict keeps a verdict's name and measured vote lag for the last Refresh.

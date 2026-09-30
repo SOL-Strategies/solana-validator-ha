@@ -24,6 +24,7 @@ const (
 	selfInGossipLabelName    = "self_in_gossip"
 	consensusPhaseLabelName  = "phase"
 	verdictLabelName         = "verdict"
+	vetoReasonLabelName      = "reason"
 )
 
 var (
@@ -59,6 +60,7 @@ type Metrics struct {
 	clusterLive              *prometheus.GaugeVec
 	networkCurrentStakeRatio *prometheus.GaugeVec
 	alpenglowVerdicts        *prometheus.CounterVec
+	failoverVetoes           *prometheus.CounterVec
 }
 
 // Options for creating a new Metrics instance
@@ -168,6 +170,7 @@ func (m *Metrics) initMetrics() {
 	m.registry.MustRegister(m.clusterLive)
 	m.registry.MustRegister(m.networkCurrentStakeRatio)
 	m.registry.MustRegister(m.alpenglowVerdicts)
+	m.registry.MustRegister(m.failoverVetoes)
 
 	m.logger.Debug("initialized Prometheus metrics")
 }
@@ -191,10 +194,23 @@ func (m *Metrics) initConsensusMetrics() {
 	m.alpenglowVerdicts = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: metricsNamespacePrefix + "alpenglow_vote_verdicts_total",
-			Help: "Verdicts of the Alpenglow vote rule on the active peer, one per sample in the Alpenglow phase (observe-only: not acted on)",
+			Help: "Verdicts of the Alpenglow vote rule on the active peer, one per sample in the Alpenglow phase",
 		},
 		append([]string{verdictLabelName}, m.commonLabelNames...),
 	)
+	m.failoverVetoes = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: metricsNamespacePrefix + "failover_vetoes_total",
+			Help: "Samples or failover attempts where Alpenglow evidence was disregarded because a failover could not help, by reason",
+		},
+		append([]string{vetoReasonLabelName}, m.commonLabelNames...),
+	)
+}
+
+// IncFailoverVeto counts a sample or failover attempt vetoed for the given reason.
+func (m *Metrics) IncFailoverVeto(reason string) {
+	state := m.cache.GetState()
+	m.failoverVetoes.With(m.mergeLabels(prometheus.Labels{vetoReasonLabelName: reason}, m.getCommonLabels(&state))).Inc()
 }
 
 // IncAlpenglowVerdict counts one verdict of the Alpenglow vote rule on the active peer.

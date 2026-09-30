@@ -86,9 +86,6 @@ type State struct {
 	// activeVoteLag is the active's vote lag in slots from the last Refresh, when it was measured.
 	activeVoteLag      uint64
 	activeVoteLagKnown bool
-	// observeOnly keeps TowerBFT rules deciding in every phase; the Alpenglow rule only runs to
-	// record its verdict.
-	observeOnly bool
 	// alpenglowVerdict is the Alpenglow rule's verdict on the active peer in the last Refresh,
 	// empty when the rule did not run.
 	alpenglowVerdict string
@@ -119,9 +116,6 @@ type Options struct {
 	ConfigPeers                    config.Peers
 	LogPrefix                      string
 	Alpenglow                      config.Alpenglow
-	// ObserveOnly evaluates the Alpenglow vote rule without acting on it: TowerBFT rules keep
-	// deciding whether the active peer is voting, in every phase.
-	ObserveOnly bool
 }
 
 // NewState creates a new gossip state
@@ -138,7 +132,6 @@ func NewState(opts Options) *State {
 		delinquentSlotDistanceOverride: opts.DelinquentSlotDistanceOverride,
 		consensus:                      consensus.View{Phase: consensus.PhaseTower},
 		alpenglowCfg:                   opts.Alpenglow,
-		observeOnly:                    opts.ObserveOnly,
 		now:                            time.Now,
 	}
 }
@@ -666,8 +659,7 @@ func (p *State) VetoReason() string {
 }
 
 // AlpenglowVerdict returns the Alpenglow vote rule's verdict on the active peer in the last
-// Refresh: one of the Verdict* or Veto* constants, or empty when the rule did not run. In
-// observe-only mode the verdict is not acted on.
+// Refresh: one of the Verdict* or Veto* constants, or empty when the rule did not run.
 func (p *State) AlpenglowVerdict() string {
 	return p.alpenglowVerdict
 }

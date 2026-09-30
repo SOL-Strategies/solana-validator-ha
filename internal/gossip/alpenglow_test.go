@@ -236,52 +236,6 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 	}
 }
 
-func TestRefresh_ObserveOnlyRecordsVerdictWithoutActing(t *testing.T) {
-	state := newAlpenglowTestState(t, map[string]interface{}{
-		"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
-		"getSlot":         testProcessedSlot,
-		"getVoteAccounts": alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
-	})
-	state.observeOnly = true
-	state.finalization = liveFinalization()
-
-	state.Refresh()
-
-	if got := state.AlpenglowVerdict(); got != VerdictNotVoting {
-		t.Errorf("AlpenglowVerdict() = %q, want %q", got, VerdictNotVoting)
-	}
-	if lag, ok := state.ActiveVoteLag(); !ok || lag != 100 {
-		t.Errorf("ActiveVoteLag() = %d, %t; want 100, true", lag, ok)
-	}
-	// TowerBFT rules decide: the account is current, so the active is voting.
-	if state.LeaderlessSamplesCount != 0 || state.ActivePeerIsDelinquent() || state.VetoReason() != "" {
-		t.Errorf("observe-only acted on the verdict: leaderless %d, delinquent %t, veto %q",
-			state.LeaderlessSamplesCount, state.ActivePeerIsDelinquent(), state.VetoReason())
-	}
-}
-
-func TestRefresh_ObserveOnlyKeepsTowerRulesInEveryPhase(t *testing.T) {
-	for _, phase := range []consensus.Phase{consensus.PhaseUnknown, consensus.PhaseMigrating, consensus.PhaseAlpenglow} {
-		t.Run(phase.String(), func(t *testing.T) {
-			state := newAlpenglowTestState(t, map[string]interface{}{
-				"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
-				"getVoteAccounts": delinquentVoteAccountsResult([]string{testActivePubkey}, 100),
-				"getBalance":      balanceResult(10_000_000),
-				"getSlot":         500,
-			})
-			state.observeOnly = true
-			state.SetConsensusView(consensus.View{Phase: phase, GenesisSlot: 100})
-
-			state.Refresh()
-
-			if state.LeaderlessSamplesCount != 1 || state.LeaderlessReason() != LeaderlessReasonDelinquent {
-				t.Errorf("leaderless %d reason %q, want 1 %q: TowerBFT delinquency must still decide",
-					state.LeaderlessSamplesCount, state.LeaderlessReason(), LeaderlessReasonDelinquent)
-			}
-		})
-	}
-}
-
 func TestRefresh_AlpenglowVoteLagRecordsDelinquencyDetail(t *testing.T) {
 	state := newAlpenglowTestState(t, map[string]interface{}{
 		"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
