@@ -26,8 +26,9 @@ Each peer runs `solana-validator-ha` independently. It monitors the Solana gossi
 A node will only become active in a failover if:
 
 1. It appears in gossip (the validator process is running and reachable on the network);
-2. Its local RPC reports healthy; and
-3. It has been continuously healthy for at least `failover.self_healthy.minimum_duration` (guards against startup health flaps).
+2. Its local RPC reports healthy;
+3. It has been continuously healthy for at least `failover.self_healthy.minimum_duration` (guards against startup health flaps); and
+4. Once the cluster runs Alpenglow, it reports the same Alpenglow genesis as the cluster (see [Alpenglow](#alpenglow)).
 
 To make this work, two (‼️**VERY**‼️) important user-supplied commands are required:
 
@@ -197,7 +198,7 @@ cluster:
   # recovery window. Lower if your RPC provider recovers faster.
   rpc_url_cooldown_duration: 60s
 
-  # How the cluster's consensus protocol is determined. See "Alpenglow (observe-only)" below.
+  # How the cluster's consensus protocol is determined. See "Alpenglow" below.
   consensus:
 
     # required: false | default: auto
@@ -264,7 +265,7 @@ failover:
   # Under TowerBFT both thresholds agree — there is no gap between delinquency detection and
   # health status. If you set value below 128, add --health-check-slot-distance <value> to your
   # validator startup flags to keep the thresholds aligned — a startup warning will remind you if not.
-  # Under Alpenglow they no longer measure the same thing; see "Alpenglow (observe-only)".
+  # Under Alpenglow they no longer measure the same thing and this override is not used; see "Alpenglow".
   # Values <= 1 are clamped to 2 on startup.
   delinquent_slot_distance_override:
 
@@ -296,8 +297,7 @@ failover:
     # Set to 0 to disable grace (any failure resets immediately — original behaviour).
     unhealthy_grace_count: 1
 
-  # Thresholds of the Alpenglow vote rule. In this release the rule is only observed: its verdicts are
-  # exported as metrics and logs, and do not change failover decisions. See "Alpenglow (observe-only)".
+  # Vote evidence used once the cluster runs Alpenglow. Ignored under TowerBFT. See "Alpenglow".
   alpenglow:
 
     # required: false | default: 32 | min: 16
@@ -521,26 +521,40 @@ failover:
 
 The delinquency threshold used for detection is `failover.delinquent_slot_distance_override` (if configured) or the Agave default of 128 slots (~51 s).
 
-## Alpenglow (observe-only)
+The fast-path only applies while the cluster runs TowerBFT. Under Alpenglow it is ignored (with a warning), because vote-lag evidence replaces delinquency; see [Alpenglow](#alpenglow).
 
-Alpenglow replaces TowerBFT votes with BLS votes that are aggregated into certificates. Gossip presence still means the same thing, but the voting signals this tool relies on change meaning:
+## Alpenglow
+
+Alpenglow replaces TowerBFT votes with BLS votes that are aggregated into certificates. Gossip presence still means the same thing, but the voting signals change meaning:
 
 - **`lastVote`** in `getVoteAccounts` is only updated when a certificate that includes the validator lands in a block, so a healthy validator trails the tip by up to ~9 slots instead of ~1–3.
 - **`getHealth`** compares the local node against the highest *finalized* slot, and reports unknown until the node has seen a finalization. It no longer agrees with the 128-slot delinquency threshold.
-- **A cluster-wide stall** (no finalization) freezes every validator's `lastVote` at once.
+- **A cluster-wide stall** (no finalization) freezes every validator's `lastVote` at once. Failing over cannot help and adds equivocation risk.
 - **A vote account left out of the voter set** (for example unstaked, or missing its BLS key) cannot vote from any node.
 
-This release **observes** Alpenglow without changing any failover decision. Failover still follows the TowerBFT rules in every phase. Alongside, it:
+`solana-validator-ha` therefore tracks the cluster's consensus phase and judges the active peer by the rules of that phase:
 
-- **Detects the consensus phase.** With `cluster.consensus.mode: auto`, the phase (`tower`, `migrating`, `alpenglow`, or `unknown` until the first answer) is read from the Alpenglow feature gate account (`A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS`) and `getAgGenesisCert`. RPCs that do not implement `getAgGenesisCert` are skipped, and the local validator is asked instead. Once a genesis certificate is seen, the phase stays `alpenglow` for the life of the process.
-- **Evaluates the Alpenglow vote rule** in the `alpenglow` phase, after `failover.alpenglow.warmup_slots`. The rule reads the active's `lastVote` and the processed slot from the same RPC node. It would count the active as not voting when its vote lag exceeds `vote_lag_slots_threshold` while the cluster keeps finalizing close to the tip and at least `network_current_stake_ratio_min` of stake is current. A stalled cluster or an excluded vote account would be vetoed, since a failover cannot help.
-- **Checks the local genesis.** It records whether the local validator reports the cluster's Alpenglow genesis, which a later release will require before promoting a node.
+| Phase | How it is detected | Active counts as down when | Vetoes |
+|---|---|---|---|
+| `tower` | Alpenglow feature gate not active | missing from gossip, or delinquent / no vote account (unchanged) | none |
+| `migrating` / `unknown` | feature gate active but no Alpenglow genesis certificate yet / nothing answered | missing from gossip only; vote evidence is ignored | none |
+| `alpenglow` (warm-up) | `getAgGenesisCert` returned a certificate; finalized slot ≤ genesis + `warmup_slots` | missing from gossip only | none |
+| `alpenglow` | as above, after the warm-up | missing from gossip, or vote lag > `vote_lag_slots_threshold` while the cluster finalizes | stall, excluded vote account, local genesis |
 
-Each verdict is counted in `solana_validator_ha_alpenglow_vote_verdicts_total{verdict}`. A `not_voting`, vetoed or `unknown` verdict is also logged with an `observe-only:` prefix. Before a release activates the rule, watch on your cluster:
+- **Detection.** With `cluster.consensus.mode: auto`, the phase is read from the Alpenglow feature gate account (`A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS`) and `getAgGenesisCert`. RPCs that do not implement `getAgGenesisCert` are skipped, and the local validator is asked instead. Once a genesis certificate is seen, the phase stays `alpenglow` for the life of the process.
+- **Vote lag.** `lastVote` and the processed slot are read from the same RPC node, so the lag is not skewed by nodes at different heights. The active counts as not voting only while the cluster keeps finalizing (the finalized slot advanced within `finalization_stall_duration`) and at least `network_current_stake_ratio_min` of stake is current. A finalization certificate needs 60% of stake, so if the cluster finalizes and the active's votes still do not land, the fault is local to the active. At the defaults a zombie active is replaced in ~25–30 s, instead of ~66 s through delinquency.
+- **Vetoes.** A stalled cluster (the finalized slot stops advancing, trails the processed slot by more than the threshold, or too little stake is current) or an excluded vote account is logged, counted in `solana_validator_ha_failover_vetoes_total`, and does not count against the active. A leaderless streak in which the active was ever missing from gossip is never vetoed: a dead host is dead during a stall too.
+- **Local genesis.** Under Alpenglow a passive node is only promoted if its local validator reports the cluster's Alpenglow genesis slot, on top of the usual health checks. Otherwise the takeover is aborted (`aborted_local_not_migrated`) and the next-ranked peer takes over.
 
-- `solana_validator_ha_active_vote_lag_slots` against `vote_lag_slots_threshold`;
-- how often `not_voting` appears while the active is healthy (it should not);
-- how often `solana_validator_ha_cluster_live` drops to 0.
+### Vote history on failover
+
+Under Alpenglow, a validator restores its vote history for the new identity on `set-identity`, and starts a fresh one when there is none. The vote history file plays the role the tower file used to. If your active command copies the tower file to the new active before switching identity, copy the vote history file as well. `solana-validator-ha` does not move files itself.
+
+### Before the migration
+
+If you ran the previous, observe-only release on an Alpenglow cluster, check its flight hours before upgrading: `solana_validator_ha_alpenglow_vote_verdicts_total{verdict="not_voting"}` should only have grown while the active was genuinely failing, and `solana_validator_ha_active_vote_lag_slots` should stay well below `vote_lag_slots_threshold`.
+
+Keep `cluster.consensus.mode: auto`. Check that your `cluster.rpc_urls` answer `getAgGenesisCert`; the local validator is used when they do not. To try the new behaviour without acting on it, run a second instance with `failover.dry_run: true` and a separate metrics port, and compare `solana_validator_ha_active_vote_lag_slots` against `vote_lag_slots_threshold`.
 
 ## Failover Priority
 
@@ -610,7 +624,7 @@ Each recording file contains a single JSON object with:
 - **`node`** — identity of the node that wrote the file (name, public IP, passive pubkey)
 - **`config`** — relevant configuration snapshot (poll interval, leaderless threshold, delinquency bypass, consensus mode and Alpenglow thresholds, etc.)
 - **`detected_at`** — UTC timestamp when the leaderless condition was first detected
-- **`gossip_samples`** — pre-incident and live samples with peer state, RPC status, local role/health, self-gossip presence, elapsed incident time, and (schema v3) the consensus phase and why the sample was leaderless
+- **`gossip_samples`** — pre-incident and live samples with peer state, RPC status, local role/health, self-gossip presence, elapsed incident time, and (schema v3) the consensus phase, why the sample was leaderless, and any Alpenglow veto
 - **`timeline`** — ordered decisions and actions, including ranking, guardrails, hooks, commands, durations, and identity confirmation
 - **`outcome`** — recovery, demotion, promotion, guardrail, abort, failure, or interruption result for this node
 
@@ -691,7 +705,8 @@ The application exposes Prometheus metrics on the configured port (default: 9090
 - **`solana_validator_ha_consensus_phase{phase}`**: 1 for the current phase (`unknown`, `tower`, `migrating`, `alpenglow`), 0 for the others
 - **`solana_validator_ha_alpenglow_genesis_slot`**: Alpenglow genesis slot, 0 if unknown
 - **`solana_validator_ha_active_vote_lag_slots`**: Slots the active's last vote trailed the reference slot in the last sample, when measured
-- **`solana_validator_ha_alpenglow_vote_verdicts_total{verdict}`**: Verdicts of the Alpenglow vote rule on the active peer, one per sample in the Alpenglow phase (`voting`, `not_voting`, `unknown`, `cluster_stalled`, `vote_account_excluded`). Observe-only in this release
+- **`solana_validator_ha_alpenglow_vote_verdicts_total{verdict}`**: Verdicts of the Alpenglow vote rule on the active peer, one per sample in the Alpenglow phase (`voting`, `not_voting`, `unknown`, `cluster_stalled`, `vote_account_excluded`)
+- **`solana_validator_ha_failover_vetoes_total{reason}`**: Samples or takeovers where evidence was disregarded because a failover could not help (`cluster_stalled`, `vote_account_excluded`, `local_not_migrated`, `local_genesis_mismatch`)
 - Alpenglow phase only:
   - **`solana_validator_ha_local_alpenglow_genesis_match`**: Whether the local validator reports the cluster's Alpenglow genesis (1=yes, 0=no)
   - **`solana_validator_ha_cluster_finalized_slot`**: Highest finalized slot seen on the cluster RPCs
