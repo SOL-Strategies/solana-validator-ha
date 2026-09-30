@@ -1,7 +1,7 @@
 # Design: Alpenglow-aware failover
 
-Status: **proposed** · Verified against agave `v4.3.0-rc.1` (`2e10d67f90`) · A reference
-implementation has been tested on testnet (§11)
+Status: **in review** · Implementation: #64 (observe-only), #65 (activation); network isolation
+(§5) follows separately · Verified against agave `v4.3.0-rc.1` (`2e10d67f90`) · Tested on testnet (§11)
 
 ## 1. Problem
 
@@ -32,7 +32,7 @@ Consequences for the current code:
    slot `G`, so `lastVote` stalls for everyone for a while.
 6. solana-go v1.8.4 decodes `epochCredits` as `int64`. Alpenglow puts `u64::MAX` into the epoch
    credits of some delinquent vote accounts, which fails the whole `getVoteAccounts` call. This is
-   fixed by #62 (solana-go v2), which everything below builds on.
+   fixed by #62 (solana-go v2, merged), which everything below builds on.
 
 ## 2. Goals / non-goals
 
@@ -201,9 +201,19 @@ The local gossip peer count was considered as the local signal and rejected: in 
 for staked nodes survive 2 days without contact (`CRDS_GOSSIP_PURGE_DURATION`) and unstaked ones only
 15s, so the count barely drops on an isolated node.
 
+**Residual risk.** Isolation demotion does not change the takeover rule: a passive still takes over
+when the active is missing from, or not voting in, the view its cluster RPC returns. A cluster RPC
+whose gossip view is persistently incomplete can therefore still cause a (rare) false takeover, and
+the healthy active keeps running alongside the new one, because isolation demotion only acts when
+the active's own cluster RPC fails and its local slot stalls. Configuring several independent
+`cluster.rpc_urls` reduces this. Requiring several RPCs to agree before a gossip-absent sample counts
+would reduce it further, but no RPC-based view can rule it out.
+
 A related bug: `IsSelfPassive()` treats an unreachable local RPC as "not passive", so demoting a
-stopped validator was recorded as `demotion_failed` and re-run every poll. The passive command now
-reports `demoted_validator_down` in that case and is not re-run until the local RPC answers again.
+stopped validator is recorded as `demotion_failed` and re-run every poll. The passive command will
+report `demoted_validator_down` in that case and not re-run until the local RPC answers again.
+
+Both changes in this section ship in a separate PR after #65.
 
 ## 6. Configuration
 
@@ -254,7 +264,8 @@ Validation:
 | `solana_validator_ha_consensus_phase{phase}` | gauge | 1 for the current phase |
 | `solana_validator_ha_alpenglow_genesis_slot` | gauge | `G`, 0 if unknown |
 | `solana_validator_ha_active_vote_lag_slots` | gauge | last measured lag, removed when not measured |
-| `solana_validator_ha_failover_vetoes_total{reason}` | counter | |
+| `solana_validator_ha_alpenglow_vote_verdicts_total{verdict}` | counter | the Alpenglow rule's verdict per sample; in the observe-only release it is not acted on |
+| `solana_validator_ha_failover_vetoes_total{reason}` | counter | from the activation release |
 | `solana_validator_ha_local_alpenglow_genesis_match` | gauge | 1/0, Alpenglow phase only |
 | `solana_validator_ha_cluster_finalized_slot` | gauge | monotonic max, Alpenglow phase only |
 | `solana_validator_ha_cluster_live` | gauge | 1/0, Alpenglow phase only |
@@ -281,7 +292,7 @@ Values go through `cache.State`, like the existing metrics.
 | RPC | `internal/rpc/clients.go` | `GetAgGenesisCert` (raw `RPCCallForInto`, typed result, `ErrMethodNotFound` detection), `GetFeatureStatus`, `GetVoteLag` (pinned URL), `GetSlotWithCommitment` |
 | Consensus | **new** `internal/consensus/{detector,phase}.go` + tests | Phase enum, sticky state machine, local-genesis check |
 | Config | `internal/config/{cluster,failover,config}.go` + **new** `alpenglow.go`, `isolation.go` | Structs, defaults, validation, warnings |
-| Gossip state | `internal/gossip/state.go` + **new** `alpenglow.go` | `SetConsensusView`; keep `isNodeActiveAndVoting` for tower; Alpenglow vote evaluation, finalized-slot tracker, stake-ratio cache, `LeaderlessReason`, `VetoReason` |
+| Gossip state | `internal/gossip/state.go` + **new** `alpenglow.go` | `SetConsensusView`; keep `isNodeActiveAndVoting` for tower; Alpenglow vote evaluation returning a verdict (applied, or only observed in the observe-only release), finalized-slot tracker, stake-ratio cache, `LeaderlessReason`, `VetoReason`, `AlpenglowVerdict` |
 | Manager | `internal/ha/manager.go` + **new** `isolation.go` | Share one cluster RPC client; refresh the detector each poll; vetoes + local-genesis eligibility; isolation demotion; demotion outcomes |
 | Metrics / cache | `internal/prometheus/metrics.go`, `internal/cache/cache.go` | New gauges and counters |
 | Recording | `internal/recording/{event,replay}.go` | Schema v3 + replay rendering + goldens |
@@ -315,24 +326,23 @@ Values go through `cache.State`, like the existing metrics.
 
 ## 10. Delivery plan
 
-A stack of PRs, each building and passing tests on its own. Only PR 5 and the two fixes change
-failover behaviour.
+Delivered as releases, so the detection gets flight hours before it changes any decision:
 
-| # | PR | Behaviour change |
-|---|---|---|
-| 1 | solana-go v2 (#62) + gofmt and test-stub follow-up | fixes the `epochCredits` overflow |
-| 2 | Consensus phase detection: RPC methods, `internal/consensus`, `cluster.consensus` | none |
-| 3 | Alpenglow vote evidence in `gossip.State`, `failover.alpenglow` | none (the gossip state defaults to tower) |
-| 4 | Recording schema v3 + replay | none |
-| 5 | Manager wiring: detector, vetoes, eligibility, metrics | **yes** |
-| 6 | Mock-solana simulation + integration scenarios 05–11 | test only |
-| 7 | README + this document | none |
-| 8 | `demoted_validator_down` (§5) | yes (recording and log only) |
-| 9 | Network isolation of the active (§5) | yes |
+| Release | PR | Contents | Behaviour change |
+|---|---|---|---|
+| 0 | #62 (merged) | solana-go v2 | fixes the `epochCredits` overflow |
+| 1 | #64 | Phase detection, the Alpenglow vote rule, recording schema v3, consensus metrics, all in **observe-only** mode | none: TowerBFT rules decide in every phase; the rule's verdicts are exported (`alpenglow_vote_verdicts_total`) and logged |
+| 2 | #65 | Activation: decisions follow the detected phase; vetoes, local-genesis eligibility, `delinquency_bypass` gating, `failover_vetoes_total`; mock-solana simulation and integration scenarios 05–11; README | **yes** |
+| 3 | separate PR, later | Network isolation of the active and the `demoted_validator_down` outcome (§5) | yes |
+
+Between releases 1 and 2, operators on an Alpenglow cluster can compare the verdicts with reality:
+`not_voting` should only appear while the active is genuinely failing, and
+`active_vote_lag_slots` should stay well below `vote_lag_slots_threshold`.
 
 ## 11. Testnet results
 
-The reference implementation (PRs 1–7, before the §5 fixes) ran live on a two-node testnet pair,
+The reference implementation (the code of #64 and #65 with the Alpenglow rule active, before the §5
+changes) ran live on a two-node testnet pair,
 with testnet on Alpenglow. Settings: poll 5s, `leaderless_samples_threshold` 3, rank delay 5s. The
 validator unit always starts passive (an `ExecStartPre` points the identity at the unstaked key), so
 any restart hands the stake to the peer.
@@ -350,6 +360,7 @@ any restart hands the stake to the peer.
 Observations:
 - Both HA daemons ran in the alpenglow phase throughout, with vote evidence active.
 - Healthy Alpenglow vote lag stayed at 0–8 slots, well below the default threshold of 32.
-- In the full outage, the isolated active never demoted itself and stayed staked for 2m22s. §5 now
-  handles this. Local `/health` stayed `ok` throughout.
-- Demoting a stopped validator was recorded as `demotion_failed` and repeated every poll. Fixed (§5).
+- In the full outage, the isolated active never demoted itself and stayed staked for 2m22s. §5
+  addresses this. Local `/health` stayed `ok` throughout.
+- Demoting a stopped validator was recorded as `demotion_failed` and repeated every poll. Addressed
+  in §5.
