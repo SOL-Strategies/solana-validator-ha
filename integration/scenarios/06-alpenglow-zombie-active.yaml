@@ -1,0 +1,37 @@
+name: alpenglow-zombie-active
+description: >
+  Under Alpenglow the active stays in gossip but its votes stop landing while the cluster keeps
+  finalizing. One passive takes over, and the zombie demotes itself.
+
+initial_state:
+  active_validator: validator-1
+
+steps:
+  - name: switch the cluster to Alpenglow
+    action: set_phase
+    phase: alpenglow
+
+  - name: wait for detection and the warm-up
+    action: wait
+    duration: 12s
+
+  - name: assert initial state
+    action: assert
+    timeout: 30s
+    active_count: 1
+    state:
+      validator-1:
+        role: active
+
+  - name: active votes stop landing
+    action: set_vote_lag
+    target: validator-1
+    value: 200
+
+  - name: exactly one passive takes over
+    action: assert
+    timeout: 60s
+    active_count: 1
+    state:
+      validator-1:
+        role: passive

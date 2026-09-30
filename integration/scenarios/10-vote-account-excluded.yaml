@@ -1,0 +1,43 @@
+name: vote-account-excluded
+description: >
+  Under Alpenglow the active's vote account drops out of the vote accounts (for example it left
+  the voter set). Any node using it would fail the same way, so no failover happens and the
+  veto is counted.
+
+initial_state:
+  active_validator: validator-1
+
+steps:
+  - name: switch the cluster to Alpenglow
+    action: set_phase
+    phase: alpenglow
+
+  - name: wait for detection and the warm-up
+    action: wait
+    duration: 12s
+
+  - name: exclude the active vote account
+    action: exclude_vote_account
+
+  - name: wait longer than the leaderless threshold
+    action: wait
+    duration: 20s
+
+  - name: no failover
+    action: assert
+    timeout: 10s
+    active_count: 1
+    state:
+      validator-1:
+        role: active
+
+  - name: the exclusion was vetoed
+    action: assert_metric
+    target: validator-2
+    metric: solana_validator_ha_failover_vetoes_total
+    labels:
+      reason: vote_account_excluded
+    min_value: 1
+
+  - name: include the active vote account again
+    action: include_vote_account

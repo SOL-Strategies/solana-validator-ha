@@ -9,6 +9,9 @@ validator:
 cluster:
   name: "mainnet-beta"
   rpc_urls: ["http://mock-cluster:8899"]
+  consensus:
+    mode: "auto"
+    detection_interval_duration: "3s"  # short so scenarios see phase changes quickly (default 60s)
 
 prometheus:
   port: 9090
@@ -19,6 +22,9 @@ prometheus:
 failover:
   poll_interval_duration: "3s"
   leaderless_samples_threshold: 3
+
+  alpenglow:
+    warmup_slots: 8  # ~3s of mock slots after the genesis slot (default 64)
 
   self_healthy:
     minimum_duration: "5s"

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,7 +16,24 @@ import (
 const (
 	activePubkey     = "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
 	activeVotePubkey = "ArkzFExXXHaA6izkNhTJJ5zpXdQpynffjfRMJu4Yq6H"
-	currentSlot      = uint64(1000)
+	// networkPubkey is a vote account holding the rest of the network's stake, so the HA
+	// client's network stake ratio stays high unless a scenario says otherwise.
+	networkPubkey = "Vote111111111111111111111111111111111111111"
+
+	// The slot clock starts at startSlot and advances one slot per slotDuration.
+	startSlot    = uint64(1000)
+	slotDuration = 400 * time.Millisecond
+	// healthyVoteLag is how far a voting validator's lastVote trails the processed slot.
+	healthyVoteLag = uint64(2)
+	// delinquentSlotDistance matches Agave's getVoteAccounts default.
+	delinquentSlotDistance = uint64(128)
+	// towerFinalizedLag and alpenglowFinalizedLag are how far the finalized slot trails processed.
+	towerFinalizedLag     = uint64(32)
+	alpenglowFinalizedLag = uint64(2)
+
+	phaseTower     = "tower"
+	phaseMigrating = "migrating"
+	phaseAlpenglow = "alpenglow"
 )
 
 // validatorMeta holds the fixed metadata for each known validator in the test network.
@@ -35,6 +54,21 @@ type MockSolanaServer struct {
 	disconnected     map[string]bool // validators removed from gossip
 	unhealthy        map[string]bool // validators whose local health check returns unhealthy
 	callingValidator string          // populated from ?validator= query param per request
+	startedAt        time.Time       // origin of the slot clock
+
+	// Consensus state. The phase survives reset, like a real cluster's does. The activation and
+	// genesis slots are kept once set, so re-entering a phase reuses them.
+	phase              string
+	featureActivatedAt uint64 // 0 until the phase first leaves tower
+	genesisSlot        uint64 // 0 until the phase first becomes alpenglow
+	// stalledAt is the processed slot at which finalization stopped; 0 while finalizing.
+	stalledAt uint64
+	// voteLag is extra lag added to a validator's lastVote while it holds the active identity.
+	voteLag map[string]uint64
+	// voteAccountExcluded hides the active vote account, as if it were left out of the voter set.
+	voteAccountExcluded bool
+	// localGenesis overrides the genesis slot a validator's local RPC reports; 0 means none.
+	localGenesis map[string]uint64
 }
 
 func NewMockSolanaServer() *MockSolanaServer {
@@ -42,6 +76,10 @@ func NewMockSolanaServer() *MockSolanaServer {
 		activeValidator: os.Getenv("ACTIVE_VALIDATOR"),
 		disconnected:    make(map[string]bool),
 		unhealthy:       make(map[string]bool),
+		startedAt:       time.Now(),
+		phase:           phaseTower,
+		voteLag:         make(map[string]uint64),
+		localGenesis:    make(map[string]uint64),
 	}
 }
 
@@ -69,8 +107,23 @@ type VoteAccount struct {
 }
 
 type VoteAccountsResult struct {
-	Current   []VoteAccount `json:"current"`
+	Current    []VoteAccount `json:"current"`
 	Delinquent []VoteAccount `json:"delinquent"`
+}
+
+type AccountInfoResult struct {
+	Context struct {
+		Slot uint64 `json:"slot"`
+	} `json:"context"`
+	Value *AccountInfo `json:"value"`
+}
+
+type AccountInfo struct {
+	Data       []string `json:"data"`
+	Executable bool     `json:"executable"`
+	Lamports   uint64   `json:"lamports"`
+	Owner      string   `json:"owner"`
+	RentEpoch  uint64   `json:"rentEpoch"`
 }
 
 type BalanceResult struct {
@@ -83,10 +136,16 @@ type BalanceResult struct {
 // ── Control types ─────────────────────────────────────────────────────────────
 
 // ControlAction is the unified control request accepted by the /action endpoint.
-// Actions: set_active, set_passive, disconnect, reconnect, set_unhealthy, set_healthy, reset.
+// Actions: set_active, set_passive, disconnect, reconnect, set_unhealthy, set_healthy, reset,
+// set_phase, set_vote_lag, stall_finalization, resume_finalization, set_local_genesis,
+// exclude_vote_account, include_vote_account.
 type ControlAction struct {
 	Action string `json:"action"`
 	Target string `json:"target"` // validator name; empty for reset/set_active with no target
+	// Phase is used by set_phase: tower, migrating or alpenglow.
+	Phase string `json:"phase,omitempty"`
+	// Value is used by set_vote_lag (slots) and set_local_genesis (slot, 0 for none).
+	Value uint64 `json:"value,omitempty"`
 }
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
@@ -117,18 +176,27 @@ func (s *MockSolanaServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 	case "getHealth":
 		result = s.getHealth()
 	case "getSlot":
-		result = currentSlot
+		result = s.getSlot(commitmentParam(req["params"]))
 	case "getVoteAccounts":
 		result = s.getVoteAccounts()
 	case "getBalance":
 		result = s.getBalance()
+	case "getAccountInfo":
+		result = s.getFeatureAccountInfo()
+	case "getAgGenesisCert":
+		// Local validator RPC URLs carry ?validator=<name>; cluster RPC URLs do not.
+		result = s.getAgGenesisCert(r.URL.Query().Get("validator"))
 	default:
-		result = map[string]any{
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req["id"],
 			"error": map[string]any{
 				"code":    -32601,
 				"message": fmt.Sprintf("method not found: %s", method),
 			},
-		}
+		})
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -137,6 +205,20 @@ func (s *MockSolanaServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 		"id":      req["id"],
 		"result":  result,
 	})
+}
+
+// commitmentParam returns the commitment of a request whose first param is a config object,
+// e.g. getSlot [{"commitment":"finalized"}]. It defaults to processed.
+func commitmentParam(params any) string {
+	list, _ := params.([]any)
+	if len(list) == 0 {
+		return "processed"
+	}
+	config, _ := list[0].(map[string]any)
+	if commitment, ok := config["commitment"].(string); ok {
+		return commitment
+	}
+	return "processed"
 }
 
 // handleAction is the unified control endpoint used by test scenarios and validator commands.
@@ -192,11 +274,48 @@ func (s *MockSolanaServer) handleAction(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[control] set_healthy: %q", action.Target)
 
 	case "reset":
-		// Reconnect all validators, clear all unhealthy state, set initial active.
+		// Reconnect all validators, clear all faults, set initial active. The consensus phase is
+		// kept: the HA clients treat Alpenglow as final, so scenarios must not rely on going back.
 		s.disconnected = make(map[string]bool)
 		s.unhealthy = make(map[string]bool)
+		s.voteLag = make(map[string]uint64)
+		s.localGenesis = make(map[string]uint64)
+		s.voteAccountExcluded = false
+		s.stalledAt = 0
 		s.activeValidator = action.Target
-		log.Printf("[control] reset: active=%q", action.Target)
+		log.Printf("[control] reset: active=%q phase=%q", action.Target, s.phase)
+
+	case "set_phase":
+		if err := s.setPhase(action.Phase); err != nil {
+			s.mu.Unlock()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		log.Printf("[control] set_phase: %q feature_activated_at=%d genesis_slot=%d", s.phase, s.featureActivatedAt, s.genesisSlot)
+
+	case "set_vote_lag":
+		s.voteLag[action.Target] = action.Value
+		log.Printf("[control] set_vote_lag: %q lag=%d", action.Target, action.Value)
+
+	case "stall_finalization":
+		s.stalledAt = s.processedSlot()
+		log.Printf("[control] stall_finalization: at slot %d", s.stalledAt)
+
+	case "resume_finalization":
+		s.stalledAt = 0
+		log.Printf("[control] resume_finalization")
+
+	case "set_local_genesis":
+		s.localGenesis[action.Target] = action.Value
+		log.Printf("[control] set_local_genesis: %q slot=%d", action.Target, action.Value)
+
+	case "exclude_vote_account":
+		s.voteAccountExcluded = true
+		log.Printf("[control] exclude_vote_account")
+
+	case "include_vote_account":
+		s.voteAccountExcluded = false
+		log.Printf("[control] include_vote_account")
 
 	default:
 		s.mu.Unlock()
@@ -305,43 +424,160 @@ func (s *MockSolanaServer) getHealth() string {
 	return "ok"
 }
 
-// getVoteAccounts returns the active validator's pubkey in Current[].
-// This confirms to the HA manager that the active node is genuinely voting.
+// getVoteAccounts returns the active identity's vote account, current or delinquent depending on
+// its vote lag, plus a vote account holding the rest of the network's stake. The active account
+// is omitted when no validator is active or the account is excluded from the voter set.
 func (s *MockSolanaServer) getVoteAccounts() VoteAccountsResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.activeValidator == "" || s.disconnected[s.activeValidator] {
-		return VoteAccountsResult{
-			Current:   []VoteAccount{},
-			Delinquent: []VoteAccount{},
-		}
+	processed := s.processedSlot()
+	result := VoteAccountsResult{
+		Current:    []VoteAccount{s.voteAccount(networkPubkey, 9_000_000_000, s.lastVote(processed, 0))},
+		Delinquent: []VoteAccount{},
+	}
+	if s.activeValidator == "" || s.disconnected[s.activeValidator] || s.voteAccountExcluded {
+		return result
 	}
 
-	return VoteAccountsResult{
-		Current: []VoteAccount{
-			{
-				VotePubkey:       activeVotePubkey,
-				NodePubkey:       activePubkey,
-				ActivatedStake:   1_000_000_000,
-				EpochVoteAccount: true,
-				Commission:       0,
-				LastVote:         currentSlot - 2, // recent vote, well within delinquency threshold
-				EpochCredits:     [][]uint64{},
-				RootSlot:         currentSlot - 32,
-			},
-		},
-		Delinquent: []VoteAccount{},
+	lastVote := s.lastVote(processed, s.voteLag[s.activeValidator])
+	active := s.voteAccount(activeVotePubkey, 1_000_000_000, lastVote)
+	active.NodePubkey = activePubkey
+	if processed-lastVote >= delinquentSlotDistance {
+		result.Delinquent = append(result.Delinquent, active)
+	} else {
+		result.Current = append(result.Current, active)
+	}
+	return result
+}
+
+func (s *MockSolanaServer) voteAccount(pubkey string, stake, lastVote uint64) VoteAccount {
+	return VoteAccount{
+		VotePubkey:       pubkey,
+		NodePubkey:       pubkey,
+		ActivatedStake:   stake,
+		EpochVoteAccount: true,
+		LastVote:         lastVote,
+		EpochCredits:     [][]uint64{},
+		RootSlot:         lastVote - min(lastVote, towerFinalizedLag),
 	}
 }
 
 // getBalance returns a high lamport balance — well above the rent-exempt minimum (890,880).
 // This prevents the delinquency-due-to-low-balance code path from triggering.
 func (s *MockSolanaServer) getBalance() BalanceResult {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var result BalanceResult
-	result.Context.Slot = currentSlot
+	result.Context.Slot = s.processedSlot()
 	result.Value = 10_000_000_000
 	return result
+}
+
+// ── Consensus simulation ──────────────────────────────────────────────────────
+// Callers hold s.mu.
+
+// processedSlot is the slot clock: it advances one slot per slotDuration.
+func (s *MockSolanaServer) processedSlot() uint64 {
+	return startSlot + uint64(time.Since(s.startedAt)/slotDuration)
+}
+
+// voteSlot is the slot votes and finalization refer to: frozen at the stall point while the
+// cluster is stalled, otherwise the processed slot.
+func (s *MockSolanaServer) voteSlot(processed uint64) uint64 {
+	if s.stalledAt != 0 {
+		return s.stalledAt
+	}
+	return processed
+}
+
+// lastVote is a validator's last vote given the extra lag it was configured with.
+func (s *MockSolanaServer) lastVote(processed, extraLag uint64) uint64 {
+	behind := healthyVoteLag + extraLag
+	voteSlot := s.voteSlot(processed)
+	return voteSlot - min(voteSlot, behind)
+}
+
+func (s *MockSolanaServer) getSlot(commitment string) uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	processed := s.processedSlot()
+	if commitment != "finalized" {
+		return processed
+	}
+	finalizedLag := towerFinalizedLag
+	if s.phase == phaseAlpenglow {
+		finalizedLag = alpenglowFinalizedLag
+	}
+	voteSlot := s.voteSlot(processed)
+	return voteSlot - min(voteSlot, finalizedLag)
+}
+
+// setPhase moves the cluster to phase. Setting tower after alpenglow makes the RPC answer as a
+// TowerBFT cluster would, which lets scenarios check that the HA clients never leave alpenglow.
+func (s *MockSolanaServer) setPhase(phase string) error {
+	processed := s.processedSlot()
+	switch phase {
+	case phaseTower:
+	case phaseMigrating:
+		if s.featureActivatedAt == 0 {
+			s.featureActivatedAt = processed
+		}
+	case phaseAlpenglow:
+		if s.featureActivatedAt == 0 {
+			s.featureActivatedAt = processed
+		}
+		if s.genesisSlot == 0 {
+			s.genesisSlot = processed
+		}
+	default:
+		return fmt.Errorf("unknown phase: %q", phase)
+	}
+	s.phase = phase
+	return nil
+}
+
+// getFeatureAccountInfo answers getAccountInfo for the Alpenglow feature gate, the only account
+// the HA client reads: a bincode Feature { activated_at: Some(slot) }, or no account.
+func (s *MockSolanaServer) getFeatureAccountInfo() AccountInfoResult {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result AccountInfoResult
+	result.Context.Slot = s.processedSlot()
+	if s.phase == phaseTower {
+		return result
+	}
+	data := make([]byte, 9)
+	data[0] = 1
+	binary.LittleEndian.PutUint64(data[1:], s.featureActivatedAt)
+	result.Value = &AccountInfo{
+		Data:     []string{base64.StdEncoding.EncodeToString(data), "base64"},
+		Lamports: 1_000_000,
+		Owner:    "Feature111111111111111111111111111111111111",
+	}
+	return result
+}
+
+// getAgGenesisCert returns the Alpenglow genesis certificate, or nil before Alpenglow. A
+// validator's local RPC reports the cluster's certificate unless set_local_genesis overrode it.
+func (s *MockSolanaServer) getAgGenesisCert(validator string) any {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var slot uint64
+	if s.phase == phaseAlpenglow {
+		slot = s.genesisSlot
+	}
+	if override, ok := s.localGenesis[validator]; ok && validator != "" {
+		slot = override
+	}
+	if slot == 0 {
+		return nil
+	}
+	return map[string]any{"block": map[string]any{"slot": slot}}
 }
 
 // ── Backward-compatible legacy endpoints ──────────────────────────────────────
