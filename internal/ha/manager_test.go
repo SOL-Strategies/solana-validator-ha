@@ -83,6 +83,8 @@ func createTestConfig() *config.Config {
 		Cluster: config.Cluster{
 			Name:    "mainnet-beta",
 			RPCURLs: []string{"https://api.mainnet-beta.solana.com"},
+			// pinned so the existing tests exercise TowerBFT behaviour without phase detection
+			Consensus: config.Consensus{Mode: config.ConsensusModeTower},
 		},
 		Failover: config.Failover{
 			PollIntervalDuration:       5 * time.Second,

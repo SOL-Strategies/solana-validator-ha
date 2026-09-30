@@ -10,6 +10,7 @@ import (
 
 	"github.com/sol-strategies/solana-validator-ha/internal/cache"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
+	"github.com/sol-strategies/solana-validator-ha/internal/consensus"
 )
 
 const (
@@ -21,6 +22,8 @@ const (
 	failoverStatusLabelName  = "status"
 	peerCountLabelName       = "peer_count"
 	selfInGossipLabelName    = "self_in_gossip"
+	consensusPhaseLabelName  = "phase"
+	verdictLabelName         = "verdict"
 )
 
 var (
@@ -46,6 +49,16 @@ type Metrics struct {
 	failoverStatus         *prometheus.GaugeVec
 	updateAvailable        *prometheus.GaugeVec
 	recordingWriteFailures prometheus.Counter
+
+	// Consensus metrics
+	consensusPhase           *prometheus.GaugeVec
+	alpenglowGenesisSlot     *prometheus.GaugeVec
+	localAlpenglowGenesis    *prometheus.GaugeVec
+	activeVoteLagSlots       *prometheus.GaugeVec
+	clusterFinalizedSlot     *prometheus.GaugeVec
+	clusterLive              *prometheus.GaugeVec
+	networkCurrentStakeRatio *prometheus.GaugeVec
+	alpenglowVerdicts        *prometheus.CounterVec
 }
 
 // Options for creating a new Metrics instance
@@ -137,6 +150,8 @@ func (m *Metrics) initMetrics() {
 		Help: "Total failover recording checkpoint or finalization write failures",
 	})
 
+	m.initConsensusMetrics()
+
 	// Register all metrics
 	m.registry.MustRegister(m.metadata)
 	m.registry.MustRegister(m.peerCount)
@@ -145,7 +160,47 @@ func (m *Metrics) initMetrics() {
 	m.registry.MustRegister(m.updateAvailable)
 	m.registry.MustRegister(m.recordingWriteFailures)
 
+	m.registry.MustRegister(m.consensusPhase)
+	m.registry.MustRegister(m.alpenglowGenesisSlot)
+	m.registry.MustRegister(m.localAlpenglowGenesis)
+	m.registry.MustRegister(m.activeVoteLagSlots)
+	m.registry.MustRegister(m.clusterFinalizedSlot)
+	m.registry.MustRegister(m.clusterLive)
+	m.registry.MustRegister(m.networkCurrentStakeRatio)
+	m.registry.MustRegister(m.alpenglowVerdicts)
+
 	m.logger.Debug("initialized Prometheus metrics")
+}
+
+// initConsensusMetrics creates the metrics that describe the consensus phase and the Alpenglow
+// signals failover decisions depend on.
+func (m *Metrics) initConsensusMetrics() {
+	newGauge := func(name, help string, extraLabelNames ...string) *prometheus.GaugeVec {
+		return prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: metricsNamespacePrefix + name, Help: help},
+			append(extraLabelNames, m.commonLabelNames...),
+		)
+	}
+	m.consensusPhase = newGauge("consensus_phase", "Consensus phase of the cluster as seen by this node, 1 for the current phase", consensusPhaseLabelName)
+	m.alpenglowGenesisSlot = newGauge("alpenglow_genesis_slot", "Alpenglow genesis slot of the cluster, 0 if unknown")
+	m.localAlpenglowGenesis = newGauge("local_alpenglow_genesis_match", "Whether the local validator reports the cluster's Alpenglow genesis (1 = yes, 0 = no); Alpenglow phase only")
+	m.activeVoteLagSlots = newGauge("active_vote_lag_slots", "Slots the active peer's last vote trailed the reference slot in the last sample, when measured")
+	m.clusterFinalizedSlot = newGauge("cluster_finalized_slot", "Highest finalized slot seen on the cluster RPCs; Alpenglow phase only")
+	m.clusterLive = newGauge("cluster_live", "Whether the cluster's finalized slot is advancing (1 = yes, 0 = stalled); Alpenglow phase only")
+	m.networkCurrentStakeRatio = newGauge("network_current_stake_ratio", "Share of activated stake held by current vote accounts; Alpenglow phase only")
+	m.alpenglowVerdicts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: metricsNamespacePrefix + "alpenglow_vote_verdicts_total",
+			Help: "Verdicts of the Alpenglow vote rule on the active peer, one per sample in the Alpenglow phase (observe-only: not acted on)",
+		},
+		append([]string{verdictLabelName}, m.commonLabelNames...),
+	)
+}
+
+// IncAlpenglowVerdict counts one verdict of the Alpenglow vote rule on the active peer.
+func (m *Metrics) IncAlpenglowVerdict(verdict string) {
+	state := m.cache.GetState()
+	m.alpenglowVerdicts.With(m.mergeLabels(prometheus.Labels{verdictLabelName: verdict}, m.getCommonLabels(&state))).Inc()
 }
 
 // IncRecordingWriteFailure records a failed recording checkpoint or finalization.
@@ -195,6 +250,7 @@ func (m *Metrics) RefreshMetrics() {
 	m.exportMetricSelfInGossip(&state)
 	m.exportMetricFailoverStatus(&state)
 	m.exportMetricUpdateAvailable(&state)
+	m.exportConsensusMetrics(&state)
 
 	m.logger.Debug("metrics refreshed",
 		validatorRoleLabelName, state.Role,
@@ -261,6 +317,46 @@ func (m *Metrics) exportMetricUpdateAvailable(state *cache.State) {
 	m.updateAvailable.
 		With(m.getCommonLabels(state)).
 		Set(value)
+}
+
+func (m *Metrics) exportConsensusMetrics(state *cache.State) {
+	commonLabels := m.getCommonLabels(state)
+	for _, phase := range consensus.Phases {
+		var value float64
+		if phase.String() == state.ConsensusPhase {
+			value = 1
+		}
+		m.consensusPhase.With(m.mergeLabels(prometheus.Labels{consensusPhaseLabelName: phase.String()}, commonLabels)).Set(value)
+	}
+	m.alpenglowGenesisSlot.With(commonLabels).Set(float64(state.AlpenglowGenesisSlot))
+
+	// Series without a current value are removed rather than left at a stale one.
+	m.activeVoteLagSlots.Reset()
+	if state.ActiveVoteLagSlots != nil {
+		m.activeVoteLagSlots.With(commonLabels).Set(float64(*state.ActiveVoteLagSlots))
+	}
+
+	m.localAlpenglowGenesis.Reset()
+	m.clusterFinalizedSlot.Reset()
+	m.clusterLive.Reset()
+	m.networkCurrentStakeRatio.Reset()
+	alpenglow := state.Alpenglow
+	if alpenglow == nil {
+		return
+	}
+	m.localAlpenglowGenesis.With(commonLabels).Set(boolToFloat(alpenglow.LocalGenesisMatch))
+	m.clusterFinalizedSlot.With(commonLabels).Set(float64(alpenglow.FinalizedSlot))
+	m.clusterLive.With(commonLabels).Set(boolToFloat(alpenglow.ClusterLive))
+	if alpenglow.NetworkStakeRatioKnown {
+		m.networkCurrentStakeRatio.With(commonLabels).Set(alpenglow.NetworkStakeRatio)
+	}
+}
+
+func boolToFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // mergeLabels merges fromLabels into toLabels

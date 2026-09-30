@@ -25,8 +25,25 @@ type State struct {
 	// Update availability
 	UpdateAvailable bool
 
+	// Consensus
+	ConsensusPhase       string // "unknown", "tower", "migrating", "alpenglow"
+	AlpenglowGenesisSlot uint64 // 0 when unknown
+	// ActiveVoteLagSlots is the active peer's vote lag from the last sample; nil when not measured.
+	ActiveVoteLagSlots *uint64
+	// Alpenglow holds signals that are only tracked in the Alpenglow phase; nil otherwise.
+	Alpenglow *AlpenglowState
+
 	// Timestamps
 	LastUpdated time.Time
+}
+
+// AlpenglowState holds the signals that are only tracked while the cluster runs Alpenglow.
+type AlpenglowState struct {
+	LocalGenesisMatch      bool
+	FinalizedSlot          uint64
+	ClusterLive            bool
+	NetworkStakeRatio      float64
+	NetworkStakeRatioKnown bool
 }
 
 // Cache provides thread-safe access to the HA manager state
