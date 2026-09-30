@@ -86,6 +86,12 @@ type State struct {
 	// activeVoteLag is the active's vote lag in slots from the last Refresh, when it was measured.
 	activeVoteLag      uint64
 	activeVoteLagKnown bool
+	// observeOnly keeps TowerBFT rules deciding in every phase; the Alpenglow rule only runs to
+	// record its verdict.
+	observeOnly bool
+	// alpenglowVerdict is the Alpenglow rule's verdict on the active peer in the last Refresh,
+	// empty when the rule did not run.
+	alpenglowVerdict string
 }
 
 // PeerState represents the state of a peer as seen by the solana network
@@ -113,6 +119,9 @@ type Options struct {
 	ConfigPeers                    config.Peers
 	LogPrefix                      string
 	Alpenglow                      config.Alpenglow
+	// ObserveOnly evaluates the Alpenglow vote rule without acting on it: TowerBFT rules keep
+	// deciding whether the active peer is voting, in every phase.
+	ObserveOnly bool
 }
 
 // NewState creates a new gossip state
@@ -129,6 +138,7 @@ func NewState(opts Options) *State {
 		delinquentSlotDistanceOverride: opts.DelinquentSlotDistanceOverride,
 		consensus:                      consensus.View{Phase: consensus.PhaseTower},
 		alpenglowCfg:                   opts.Alpenglow,
+		observeOnly:                    opts.ObserveOnly,
 		now:                            time.Now,
 	}
 }
@@ -156,6 +166,7 @@ func (p *State) Refresh() {
 	p.leaderlessReason = ""
 	p.vetoReason = ""
 	p.activeVoteLagKnown = false
+	p.alpenglowVerdict = ""
 
 	// get cluster nodes - if this fails we return an empty state, which should cause its consumer
 	// to check for failovers
@@ -652,6 +663,13 @@ func (p *State) LeaderlessStreakIsVoteOnly() bool {
 // Veto* constants), or empty when it did not.
 func (p *State) VetoReason() string {
 	return p.vetoReason
+}
+
+// AlpenglowVerdict returns the Alpenglow vote rule's verdict on the active peer in the last
+// Refresh: one of the Verdict* or Veto* constants, or empty when the rule did not run. In
+// observe-only mode the verdict is not acted on.
+func (p *State) AlpenglowVerdict() string {
+	return p.alpenglowVerdict
 }
 
 // ActiveVoteLag returns how many slots the active's last vote trailed the reference slot in the

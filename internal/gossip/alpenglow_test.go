@@ -97,9 +97,11 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 		wantDelinquent  bool
 		wantLagSlots    uint64
 		wantLagMeasured bool
+		wantVerdict     string
 	}{
 		{
 			name:            "votes landing",
+			wantVerdict:     VerdictVoting,
 			voteAccounts:    alpenglowVoteAccounts(testProcessedSlot-10, 1000, 9000, false),
 			finalization:    liveFinalization(),
 			wantLagSlots:    10,
@@ -107,6 +109,7 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 		},
 		{
 			name:            "lag at the threshold still counts as voting",
+			wantVerdict:     VerdictVoting,
 			voteAccounts:    alpenglowVoteAccounts(testProcessedSlot-testVoteLagLimit, 1000, 9000, false),
 			finalization:    liveFinalization(),
 			wantLagSlots:    testVoteLagLimit,
@@ -114,6 +117,7 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 		},
 		{
 			name:            "votes not landing while the cluster finalizes",
+			wantVerdict:     VerdictNotVoting,
 			voteAccounts:    alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
 			finalization:    liveFinalization(),
 			wantLeaderless:  1,
@@ -124,6 +128,7 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 		},
 		{
 			name:            "votes not landing while the cluster is stalled",
+			wantVerdict:     VetoClusterStalled,
 			voteAccounts:    alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
 			finalization:    stalledFinalization(),
 			wantVeto:        VetoClusterStalled,
@@ -132,6 +137,7 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 		},
 		{
 			name:            "votes not landing while too little stake is current",
+			wantVerdict:     VetoClusterStalled,
 			voteAccounts:    alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, true),
 			finalization:    liveFinalization(),
 			stakeRatioMin:   0.85,
@@ -141,6 +147,7 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 		},
 		{
 			name:            "votes not landing with enough current stake",
+			wantVerdict:     VerdictNotVoting,
 			voteAccounts:    alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
 			finalization:    liveFinalization(),
 			stakeRatioMin:   0.85,
@@ -152,18 +159,21 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 		},
 		{
 			name:         "no vote account is vetoed as excluded",
+			wantVerdict:  VetoVoteAccountExcluded,
 			voteAccounts: map[string]interface{}{"current": []interface{}{}, "delinquent": []interface{}{}},
 			finalization: liveFinalization(),
 			wantVeto:     VetoVoteAccountExcluded,
 		},
 		{
 			name:         "unstaked vote account is vetoed as excluded",
+			wantVerdict:  VetoVoteAccountExcluded,
 			voteAccounts: alpenglowVoteAccounts(testProcessedSlot-100, 0, 9000, false),
 			finalization: liveFinalization(),
 			wantVeto:     VetoVoteAccountExcluded,
 		},
 		{
 			name:         "vote account RPC error assumes the active is voting",
+			wantVerdict:  VerdictUnknown,
 			voteAccounts: nil,
 			finalization: liveFinalization(),
 		},
@@ -216,8 +226,57 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 			if got := state.ActivePeerIsDelinquent(); got != tt.wantDelinquent {
 				t.Errorf("ActivePeerIsDelinquent() = %t, want %t", got, tt.wantDelinquent)
 			}
+			if got := state.AlpenglowVerdict(); got != tt.wantVerdict {
+				t.Errorf("AlpenglowVerdict() = %q, want %q", got, tt.wantVerdict)
+			}
 			if lag, ok := state.ActiveVoteLag(); ok != tt.wantLagMeasured || lag != tt.wantLagSlots {
 				t.Errorf("ActiveVoteLag() = %d, %t; want %d, %t", lag, ok, tt.wantLagSlots, tt.wantLagMeasured)
+			}
+		})
+	}
+}
+
+func TestRefresh_ObserveOnlyRecordsVerdictWithoutActing(t *testing.T) {
+	state := newAlpenglowTestState(t, map[string]interface{}{
+		"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+		"getSlot":         testProcessedSlot,
+		"getVoteAccounts": alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
+	})
+	state.observeOnly = true
+	state.finalization = liveFinalization()
+
+	state.Refresh()
+
+	if got := state.AlpenglowVerdict(); got != VerdictNotVoting {
+		t.Errorf("AlpenglowVerdict() = %q, want %q", got, VerdictNotVoting)
+	}
+	if lag, ok := state.ActiveVoteLag(); !ok || lag != 100 {
+		t.Errorf("ActiveVoteLag() = %d, %t; want 100, true", lag, ok)
+	}
+	// TowerBFT rules decide: the account is current, so the active is voting.
+	if state.LeaderlessSamplesCount != 0 || state.ActivePeerIsDelinquent() || state.VetoReason() != "" {
+		t.Errorf("observe-only acted on the verdict: leaderless %d, delinquent %t, veto %q",
+			state.LeaderlessSamplesCount, state.ActivePeerIsDelinquent(), state.VetoReason())
+	}
+}
+
+func TestRefresh_ObserveOnlyKeepsTowerRulesInEveryPhase(t *testing.T) {
+	for _, phase := range []consensus.Phase{consensus.PhaseUnknown, consensus.PhaseMigrating, consensus.PhaseAlpenglow} {
+		t.Run(phase.String(), func(t *testing.T) {
+			state := newAlpenglowTestState(t, map[string]interface{}{
+				"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+				"getVoteAccounts": delinquentVoteAccountsResult([]string{testActivePubkey}, 100),
+				"getBalance":      balanceResult(10_000_000),
+				"getSlot":         500,
+			})
+			state.observeOnly = true
+			state.SetConsensusView(consensus.View{Phase: phase, GenesisSlot: 100})
+
+			state.Refresh()
+
+			if state.LeaderlessSamplesCount != 1 || state.LeaderlessReason() != LeaderlessReasonDelinquent {
+				t.Errorf("leaderless %d reason %q, want 1 %q: TowerBFT delinquency must still decide",
+					state.LeaderlessSamplesCount, state.LeaderlessReason(), LeaderlessReasonDelinquent)
 			}
 		})
 	}
