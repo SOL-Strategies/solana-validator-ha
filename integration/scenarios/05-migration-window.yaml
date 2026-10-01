@@ -1,0 +1,47 @@
+name: migration-window
+description: >
+  While the cluster migrates to Alpenglow, TowerBFT votes stop landing for everyone, so vote
+  evidence is ignored: a lagging active that would be delinquent under TowerBFT must not be
+  failed over. A disconnected active is still failed over through gossip absence.
+  Runs before the Alpenglow scenarios because the HA clients never leave the alpenglow phase.
+
+initial_state:
+  active_validator: validator-1
+
+steps:
+  - name: start the Alpenglow migration
+    action: set_phase
+    phase: migrating
+
+  - name: wait for the HA clients to detect the migration
+    action: wait
+    duration: 8s
+
+  - name: active votes stop landing (delinquent by TowerBFT rules)
+    action: set_vote_lag
+    target: validator-1
+    value: 500
+
+  - name: wait longer than the leaderless threshold
+    action: wait
+    duration: 20s
+
+  - name: no failover on vote evidence during the migration
+    action: assert
+    timeout: 10s
+    active_count: 1
+    state:
+      validator-1:
+        role: active
+
+  - name: disconnect active validator
+    action: disconnect
+    target: validator-1
+
+  - name: a passive takes over through gossip absence
+    action: assert
+    timeout: 45s
+    active_count: 1
+    state:
+      validator-1:
+        role: passive

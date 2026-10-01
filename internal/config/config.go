@@ -263,6 +263,8 @@ func (c *Config) validate() error {
 		)
 	}
 
+	c.warnAboutTowerOnlySettings()
+
 	// failover.recording: validate output dir is reachable and writable at startup
 	if c.Failover.Recording.Enabled {
 		resolvedDir := c.Failover.Recording.ResolvedOutputDir(c.File)
@@ -273,6 +275,18 @@ func (c *Config) validate() error {
 	}
 
 	return nil
+}
+
+// warnAboutTowerOnlySettings warns about failover settings that only take effect while the
+// cluster runs TowerBFT, because Alpenglow votes are judged by vote lag instead of delinquency.
+func (c *Config) warnAboutTowerOnlySettings() {
+	mode := c.Cluster.Consensus.Mode
+	if mode == ConsensusModeAlpenglow && c.Failover.DelinquencyBypass {
+		c.logger.Warn("failover.delinquency_bypass is ignored because cluster.consensus.mode is alpenglow")
+	}
+	if mode != ConsensusModeTower && c.Failover.DelinquentSlotDistanceOverride.Enabled {
+		c.logger.Warnf("failover.delinquent_slot_distance_override only applies while the cluster runs TowerBFT (cluster.consensus.mode is %s)", mode)
+	}
 }
 
 // setDefaults sets default values for configuration

@@ -1,0 +1,54 @@
+name: alpenglow-cluster-stall
+description: >
+  The whole cluster stops finalizing, so every validator's last vote freezes and the active's
+  vote lag grows. A failover cannot help, so none happens; the samples are vetoed instead.
+
+initial_state:
+  active_validator: validator-1
+
+steps:
+  - name: switch the cluster to Alpenglow
+    action: set_phase
+    phase: alpenglow
+
+  - name: wait for detection and the warm-up
+    action: wait
+    duration: 12s
+
+  - name: stall finalization
+    action: stall_finalization
+
+  - name: wait until the vote lag is far past the threshold
+    action: wait
+    duration: 40s
+
+  - name: no failover during the stall
+    action: assert
+    timeout: 10s
+    active_count: 1
+    state:
+      validator-1:
+        role: active
+
+  - name: the stall was vetoed
+    action: assert_metric
+    target: validator-2
+    metric: solana_validator_ha_failover_vetoes_total
+    labels:
+      reason: cluster_stalled
+    min_value: 1
+
+  - name: resume finalization
+    action: resume_finalization
+
+  - name: wait for the cluster to recover
+    action: wait
+    duration: 15s
+
+  - name: still no failover after the stall
+    action: assert
+    timeout: 10s
+    active_count: 1
+    state:
+      validator-1:
+        role: active

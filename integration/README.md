@@ -31,6 +31,23 @@ The integration test validates the following scenarios:
 - **Expected Behavior**: Only one validator becomes active (first responder wins)
 - **Validation**: Confirms that only one validator becomes active despite multiple candidates
 
+### Scenarios 5–11: Alpenglow
+
+These drive the mock's consensus simulation (`set_phase`, `set_vote_lag`, `stall_finalization`,
+`set_local_genesis`, `exclude_vote_account`) and check both roles and metrics (`assert_metric`).
+They run in file order and must stay after scenarios 1–4: once an HA client has seen the
+Alpenglow genesis certificate it never leaves the alpenglow phase, and `reset` keeps the phase.
+
+| Scenario | Expected behaviour |
+|---|---|
+| `05-migration-window` | During the migration a lagging active is not failed over; a disconnected one is |
+| `06-alpenglow-zombie-active` | Active in gossip with votes not landing → one passive takes over |
+| `07-alpenglow-cluster-stall` | Finalization stalls → no failover, `cluster_stalled` vetoes counted |
+| `08-alpenglow-stall-plus-host-down` | Stall plus active disconnect → failover through gossip absence |
+| `09-local-not-migrated` | Highest-ranked passive has no local genesis → the next one takes over |
+| `10-vote-account-excluded` | Active vote account missing → no failover, `vote_account_excluded` vetoes counted |
+| `11-phase-sticky` | RPC answers as TowerBFT after Alpenglow → HA clients stay in the alpenglow phase |
+
 ## Failover Logic
 
 The current system uses a **first-responder wins** approach:
