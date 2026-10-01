@@ -192,16 +192,17 @@ func (f *Failover) Validate() error {
 	return nil
 }
 
-// RenderRoleCommands renders the failover commands for a given role if they have templated strings
-func (f *Failover) RenderRoleCommands(data RoleCommandTemplateData) (err error) {
-	err = f.Active.RenderCommands(data)
+// PrepareRoleCommandTemplates parses and validates command and hook templates while preserving
+// their source strings for rendering when the commands and hooks are run.
+func (f *Failover) PrepareRoleCommandTemplates(data RoleCommandTemplateData) (err error) {
+	err = f.Active.PrepareTemplates(data)
 	if err != nil {
-		return fmt.Errorf("failed to render command template strings for failover.active.command: %w", err)
+		return fmt.Errorf("failed to prepare command template strings for failover.active.command: %w", err)
 	}
 
-	err = f.Passive.RenderCommands(data)
+	err = f.Passive.PrepareTemplates(data)
 	if err != nil {
-		return fmt.Errorf("failed to render command template strings for failover.passive.command: %w", err)
+		return fmt.Errorf("failed to prepare command template strings for failover.passive.command: %w", err)
 	}
 
 	return nil

@@ -147,13 +147,15 @@ func (c *Config) Initialize() error {
 		return err
 	}
 
-	// render failover commands, args and hooks
-	err := c.Failover.RenderRoleCommands(RoleCommandTemplateData{
+	// Parse and validate templates now, but render them when scripts run so dynamic values such as
+	// the detected consensus phase are current at invocation time.
+	err := c.Failover.PrepareRoleCommandTemplates(RoleCommandTemplateData{
 		ActiveIdentityKeypairFile:  c.Validator.Identities.ActiveKeyPairFile,
 		ActiveIdentityPubkey:       c.Validator.Identities.ActivePubkey(),
 		PassiveIdentityKeypairFile: c.Validator.Identities.PassiveKeyPairFile,
 		PassiveIdentityPubkey:      c.Validator.Identities.PassivePubkey(),
 		SelfName:                   c.Validator.Name,
+		ConsensusMode:              "unknown",
 	})
 	if err != nil {
 		return err

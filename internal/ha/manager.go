@@ -745,11 +745,29 @@ func (m *Manager) refreshConsensus() {
 	}
 }
 
+// roleCommandTemplateData returns template values for a script invocation. ConsensusMode comes
+// from the detector's most recently observed cluster phase.
+func (m *Manager) roleCommandTemplateData() config.RoleCommandTemplateData {
+	consensusMode := "unknown"
+	if m.detector != nil {
+		consensusMode = m.detector.View().Phase.String()
+	}
+	return config.RoleCommandTemplateData{
+		ActiveIdentityKeypairFile:  m.cfg.Validator.Identities.ActiveKeyPairFile,
+		ActiveIdentityPubkey:       m.cfg.Validator.Identities.ActivePubkey(),
+		PassiveIdentityKeypairFile: m.cfg.Validator.Identities.PassiveKeyPairFile,
+		PassiveIdentityPubkey:      m.cfg.Validator.Identities.PassivePubkey(),
+		SelfName:                   m.cfg.Validator.Name,
+		ConsensusMode:              consensusMode,
+	}
+}
+
 // ensurePassive calls a user-specified command that should be idempotent in setting the passive role
 // safest thing would be to to ensure validator service always starts with passive identity
 // and the failover.passive.command simply retsarts the validator service or waits for it to start up
 func (m *Manager) ensurePassive() {
 	var err error
+	templateData := m.roleCommandTemplateData()
 	passivePubkey := m.cfg.Validator.Identities.PassivePubkey()
 	m.logger.Info("becoming passive", "pubkey", passivePubkey)
 	if m.activeRecorder != nil {
@@ -772,6 +790,7 @@ func (m *Manager) ensurePassive() {
 		err = m.cfg.Failover.Passive.Hooks.RunPre(config.HooksRunOptions{
 			DryRun:       m.cfg.Failover.DryRun,
 			LoggerPrefix: m.logPrefix,
+			TemplateData: templateData,
 			LoggerArgs: []any{
 				"failover_stage", "pre-passive",
 			},
@@ -793,6 +812,7 @@ func (m *Manager) ensurePassive() {
 	err = m.cfg.Failover.Passive.RunCommand(config.RoleCommandRunOptions{
 		DryRun:       m.cfg.Failover.DryRun,
 		LoggerPrefix: m.logPrefix,
+		TemplateData: templateData,
 		LoggerArgs: []any{
 			"failover_stage", constants.RoleNamePassive,
 			"passive_pubkey", passivePubkey,
@@ -814,6 +834,7 @@ func (m *Manager) ensurePassive() {
 		m.cfg.Failover.Passive.Hooks.RunPost(config.HooksRunOptions{
 			DryRun:       m.cfg.Failover.DryRun,
 			LoggerPrefix: m.logPrefix,
+			TemplateData: templateData,
 			LoggerArgs: []any{
 				"failover_stage", "post-passive",
 			},
@@ -862,6 +883,7 @@ func (m *Manager) ensurePassive() {
 // and the failover.passive.command simply retsarts the validator service
 func (m *Manager) ensureActive() {
 	var err error
+	templateData := m.roleCommandTemplateData()
 	activePubkey := m.cfg.Validator.Identities.ActivePubkey()
 	m.logger.Info("becoming active", "pubkey", activePubkey)
 
@@ -880,6 +902,7 @@ func (m *Manager) ensureActive() {
 		err = m.cfg.Failover.Active.Hooks.RunPre(config.HooksRunOptions{
 			DryRun:       m.cfg.Failover.DryRun,
 			LoggerPrefix: m.logPrefix,
+			TemplateData: templateData,
 			LoggerArgs: []any{
 				"failover_stage", "pre-active",
 			},
@@ -901,6 +924,7 @@ func (m *Manager) ensureActive() {
 	err = m.cfg.Failover.Active.RunCommand(config.RoleCommandRunOptions{
 		DryRun:       m.cfg.Failover.DryRun,
 		LoggerPrefix: m.logPrefix,
+		TemplateData: templateData,
 		LoggerArgs: []any{
 			"failover_stage", constants.RoleNameActive,
 			"active_pubkey", activePubkey,
@@ -922,6 +946,7 @@ func (m *Manager) ensureActive() {
 		m.cfg.Failover.Active.Hooks.RunPost(config.HooksRunOptions{
 			DryRun:       m.cfg.Failover.DryRun,
 			LoggerPrefix: m.logPrefix,
+			TemplateData: templateData,
 			LoggerArgs: []any{
 				"failover_stage", "post-active",
 			},

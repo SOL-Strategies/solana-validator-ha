@@ -2,34 +2,36 @@ package config
 
 import (
 	"fmt"
-	"strings"
-	"text/template"
 
 	"github.com/sol-strategies/solana-validator-ha/internal/command"
 )
 
-// RoleCommandTemplateData represents data available for command templates
+// RoleCommandTemplateData represents data available for command and hook templates. ConsensusMode
+// is the latest detected cluster phase: unknown, tower, migrating, or alpenglow.
 type RoleCommandTemplateData struct {
 	ActiveIdentityKeypairFile  string
 	ActiveIdentityPubkey       string
 	PassiveIdentityKeypairFile string
 	PassiveIdentityPubkey      string
 	SelfName                   string
+	ConsensusMode              string
 }
 
 // Role represents configuration for active/passive role transitions
 type Role struct {
-	Name    string            // Internal field - set automatically by system
-	Command string            `koanf:"command"`
-	Args    []string          `koanf:"args"`
-	Env     map[string]string `koanf:"env"`
-	Hooks   Hooks             `koanf:"hooks"`
+	Name      string            // Internal field - set automatically by system
+	Command   string            `koanf:"command"`
+	Args      []string          `koanf:"args"`
+	Env       map[string]string `koanf:"env"`
+	Hooks     Hooks             `koanf:"hooks"`
+	templates *templateCache
 }
 
 type RoleCommandRunOptions struct {
 	DryRun       bool
 	LoggerPrefix string
 	LoggerArgs   []any
+	TemplateData RoleCommandTemplateData
 }
 
 // Validate validates the role configuration
@@ -42,96 +44,69 @@ func (r *Role) Validate() error {
 	return r.Hooks.Validate()
 }
 
-// RenderCommands renders the role commands
-func (r *Role) RenderCommands(data RoleCommandTemplateData) (err error) {
-	// render role.command, role.args, and role.env
-	err = r.renderCommandAndArgs(data)
-	if err != nil {
-		return fmt.Errorf("failed to render role.command, role.args, and role.env: %w", err)
+// PrepareTemplates parses and validates role command and hook templates while preserving their
+// source strings for execution-time rendering with the current consensus phase.
+func (r *Role) PrepareTemplates(data RoleCommandTemplateData) error {
+	r.templates = newTemplateCache()
+	if err := r.templates.prepare(data, r.Command, r.Args, r.Env); err != nil {
+		return fmt.Errorf("failed to prepare role.command, role.args, and role.env: %w", err)
 	}
-
-	// render role.hooks.pre
 	for i := range r.Hooks.Pre {
-		err = r.renderHook(data, &r.Hooks.Pre[i])
-		if err != nil {
-			return fmt.Errorf("failed to render role.hooks.pre[%d]: %w", i, err)
+		if err := r.Hooks.Pre[i].PrepareTemplates(data); err != nil {
+			return fmt.Errorf("failed to prepare role.hooks.pre[%d]: %w", i, err)
 		}
 	}
-
-	// render role.hooks.post
 	for i := range r.Hooks.Post {
-		err = r.renderHook(data, &r.Hooks.Post[i])
-		if err != nil {
-			return fmt.Errorf("failed to render role.hooks.post[%d]: %w", i, err)
+		if err := r.Hooks.Post[i].PrepareTemplates(data); err != nil {
+			return fmt.Errorf("failed to prepare role.hooks.post[%d]: %w", i, err)
 		}
 	}
-
 	return nil
 }
 
-func (r *Role) renderCommandAndArgs(data RoleCommandTemplateData) (err error) {
-	// render command
-	r.Command, err = r.renderTemplateString(data, r.Command)
-	if err != nil {
-		return fmt.Errorf("failed to render command: %w", err)
+func (r *Role) render(data RoleCommandTemplateData) (*Role, error) {
+	cache := r.templates
+	if cache == nil {
+		cache = newTemplateCache()
 	}
-
-	// render args
+	copy := *r
+	copy.templates = nil
+	var err error
+	copy.Command, err = cache.render(data, r.Command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render command: %w", err)
+	}
+	if r.Args != nil {
+		copy.Args = make([]string, len(r.Args))
+	}
 	for i, arg := range r.Args {
-		r.Args[i], err = r.renderTemplateString(data, arg)
+		copy.Args[i], err = cache.render(data, arg)
 		if err != nil {
-			return fmt.Errorf("failed to render args[%d]: %w", i, err)
+			return nil, fmt.Errorf("failed to render args[%d]: %w", i, err)
 		}
 	}
-
-	// render environment variables
+	if r.Env != nil {
+		copy.Env = make(map[string]string, len(r.Env))
+	}
 	for key, value := range r.Env {
-		r.Env[key], err = r.renderTemplateString(data, value)
+		copy.Env[key], err = cache.render(data, value)
 		if err != nil {
-			return fmt.Errorf("failed to render env[%s]: %w", key, err)
+			return nil, fmt.Errorf("failed to render env[%s]: %w", key, err)
 		}
 	}
-
-	return nil
-}
-
-func (r *Role) renderHook(data RoleCommandTemplateData, hook *Hook) (err error) {
-	// render hook command
-	hook.Command, err = r.renderTemplateString(data, hook.Command)
-	if err != nil {
-		return fmt.Errorf("failed to render hook command: %w", err)
-	}
-
-	// render hook args
-	for i, arg := range hook.Args {
-		hook.Args[i], err = r.renderTemplateString(data, arg)
-		if err != nil {
-			return fmt.Errorf("failed to render hook args[%d]: %w", i, err)
-		}
-	}
-
-	return nil
-}
-
-func (r *Role) renderTemplateString(data RoleCommandTemplateData, templateStr string) (rendered string, err error) {
-	// Parse and execute template
-	tmpl, err := template.New("command").Parse(templateStr)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse command template: %w", err)
-	}
-	var buf strings.Builder
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("failed to execute command template: %w", err)
-	}
-
-	return buf.String(), nil
+	copy.Hooks = r.Hooks.clone()
+	return &copy, nil
 }
 
 func (r *Role) RunCommand(opts RoleCommandRunOptions) error {
+	rendered, err := r.render(opts.TemplateData)
+	if err != nil {
+		return fmt.Errorf("failed to render role command: %w", err)
+	}
 	loggerArgs := []any{
-		"command", r.Command,
-		"args", r.Args,
-		"env", r.Env,
+		"command", rendered.Command,
+		"args", rendered.Args,
+		"env", rendered.Env,
 		"dry_run", opts.DryRun,
 	}
 	loggerArgs = append(loggerArgs, opts.LoggerArgs...)
@@ -140,11 +115,11 @@ func (r *Role) RunCommand(opts RoleCommandRunOptions) error {
 		return nil
 	}
 
-	err := command.Run(command.RunOptions{
-		Name:         r.Name,
-		Command:      r.Command,
-		Args:         r.Args,
-		Env:          r.Env,
+	err = command.Run(command.RunOptions{
+		Name:         rendered.Name,
+		Command:      rendered.Command,
+		Args:         rendered.Args,
+		Env:          rendered.Env,
 		DryRun:       opts.DryRun,
 		LoggerPrefix: opts.LoggerPrefix,
 		LoggerArgs:   loggerArgs,

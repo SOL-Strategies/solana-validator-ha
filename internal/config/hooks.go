@@ -21,6 +21,7 @@ type Hook struct {
 	Command     string   `koanf:"command"`
 	Args        []string `koanf:"args"`
 	MustSucceed bool     `koanf:"must_succeed"`
+	templates   *templateCache
 }
 
 // HookRunOptions represents options for running a hook
@@ -29,6 +30,7 @@ type HookRunOptions struct {
 	DryRun       bool
 	LoggerPrefix string
 	LoggerArgs   []any
+	TemplateData RoleCommandTemplateData
 }
 
 // HooksRunOptions represents options for running hooks
@@ -36,6 +38,46 @@ type HooksRunOptions struct {
 	DryRun       bool
 	LoggerPrefix string
 	LoggerArgs   []any
+	TemplateData RoleCommandTemplateData
+}
+
+func (h *Hook) PrepareTemplates(data RoleCommandTemplateData) error {
+	h.templates = newTemplateCache()
+	return h.templates.prepare(data, h.Command, h.Args, nil)
+}
+
+func (h *Hook) render(data RoleCommandTemplateData) (Hook, error) {
+	cache := h.templates
+	if cache == nil {
+		cache = newTemplateCache()
+	}
+	rendered := *h
+	var err error
+	rendered.Command, err = cache.render(data, h.Command)
+	if err != nil {
+		return Hook{}, fmt.Errorf("failed to render hook command: %w", err)
+	}
+	if h.Args != nil {
+		rendered.Args = make([]string, len(h.Args))
+	}
+	for i, arg := range h.Args {
+		rendered.Args[i], err = cache.render(data, arg)
+		if err != nil {
+			return Hook{}, fmt.Errorf("failed to render hook args[%d]: %w", i, err)
+		}
+	}
+	rendered.templates = nil
+	return rendered, nil
+}
+
+func (h Hooks) clone() Hooks {
+	cloneHooks := func(hooks []Hook) []Hook {
+		if hooks == nil {
+			return nil
+		}
+		return append([]Hook(nil), hooks...)
+	}
+	return Hooks{Pre: cloneHooks(h.Pre), Post: cloneHooks(h.Post)}
 }
 
 // Validate validates the hooks configuration
@@ -77,18 +119,22 @@ func (h *Hook) Validate(allowMustSucceed bool) error {
 }
 
 func (h *Hook) Run(opts HookRunOptions) error {
+	rendered, err := h.render(opts.TemplateData)
+	if err != nil {
+		return err
+	}
 	loggerArgs := []any{
 		"hook_name", strcase.ToSnake(h.Name),
-		"command", h.Command,
-		"args", h.Args,
+		"command", rendered.Command,
+		"args", rendered.Args,
 		"dry_run", opts.DryRun,
 	}
 	loggerArgs = append(loggerArgs, opts.LoggerArgs...)
 
 	return command.Run(command.RunOptions{
 		Name:         fmt.Sprintf("%s-hook %s", opts.HookType, h.Name),
-		Command:      h.Command,
-		Args:         h.Args,
+		Command:      rendered.Command,
+		Args:         rendered.Args,
 		DryRun:       opts.DryRun,
 		LoggerPrefix: opts.LoggerPrefix,
 		LoggerArgs:   loggerArgs,
@@ -110,6 +156,7 @@ func (h *Hooks) RunPre(opts HooksRunOptions) error {
 			DryRun:       opts.DryRun,
 			LoggerPrefix: opts.LoggerPrefix,
 			LoggerArgs:   loggerArgs,
+			TemplateData: opts.TemplateData,
 		})
 		if err != nil && hook.MustSucceed {
 			return err
@@ -136,6 +183,7 @@ func (h *Hooks) RunPost(opts HooksRunOptions) {
 			DryRun:       opts.DryRun,
 			LoggerPrefix: opts.LoggerPrefix,
 			LoggerArgs:   loggerArgs,
+			TemplateData: opts.TemplateData,
 		})
 		if err != nil {
 			log.Error("hook failed", loggerArgs...)

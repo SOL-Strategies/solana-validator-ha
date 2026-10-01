@@ -31,21 +31,22 @@ func TestRole_Validate(t *testing.T) {
 	assert.Contains(t, err.Error(), "role.command must be defined")
 }
 
-func TestRole_RenderCommands(t *testing.T) {
+func TestRole_PrepareAndRenderTemplates(t *testing.T) {
 	role := &Role{
-		Command: "systemctl {{.ActiveIdentityPubkey}}",
-		Args:    []string{"--identity", "{{.ActiveIdentityKeypairFile}}"},
+		Command: "systemctl {{.ActiveIdentityPubkey}} {{.ConsensusMode}}",
+		Args:    []string{"--identity", "{{.ActiveIdentityKeypairFile}}", "--phase", "{{.ConsensusMode}}"},
 		Env: map[string]string{
 			"SOLANA_IDENTITY": "{{.ActiveIdentityPubkey}}",
 			"SOLANA_KEYPAIR":  "{{.ActiveIdentityKeypairFile}}",
 			"SOLANA_SELF":     "{{.SelfName}}",
+			"SOLANA_PHASE":    "{{.ConsensusMode}}",
 		},
 		Hooks: Hooks{
 			Pre: []Hook{
-				{Name: "pre-hook", Command: "echo '{{.PassiveIdentityPubkey}}'"},
+				{Name: "pre-hook", Command: "echo '{{.PassiveIdentityPubkey}} {{.ConsensusMode}}'", Args: []string{"{{.ConsensusMode}}"}},
 			},
 			Post: []Hook{
-				{Name: "post-hook", Command: "echo '{{.PassiveIdentityKeypairFile}}'"},
+				{Name: "post-hook", Command: "echo '{{.PassiveIdentityKeypairFile}} {{.ConsensusMode}}'"},
 			},
 		},
 	}
@@ -58,22 +59,35 @@ func TestRole_RenderCommands(t *testing.T) {
 		SelfName:                   "validator-1",
 	}
 
-	err := role.RenderCommands(data)
+	err := role.PrepareTemplates(data)
 	assert.NoError(t, err)
 
-	// Check that templates were rendered
-	assert.Equal(t, "systemctl active-pubkey", role.Command)
-	assert.Equal(t, []string{"--identity", "/path/to/active.json"}, role.Args)
-	assert.Equal(t, "echo 'passive-pubkey'", role.Hooks.Pre[0].Command)
-	assert.Equal(t, "echo '/path/to/passive.json'", role.Hooks.Post[0].Command)
+	// Startup validation retains templates so the phase can be supplied later.
+	assert.Equal(t, "systemctl {{.ActiveIdentityPubkey}} {{.ConsensusMode}}", role.Command)
+	assert.Equal(t, "echo '{{.PassiveIdentityPubkey}} {{.ConsensusMode}}'", role.Hooks.Pre[0].Command)
 
-	// Check that environment variables were rendered
-	assert.Equal(t, "active-pubkey", role.Env["SOLANA_IDENTITY"])
-	assert.Equal(t, "/path/to/active.json", role.Env["SOLANA_KEYPAIR"])
-	assert.Equal(t, "validator-1", role.Env["SOLANA_SELF"])
+	for _, phase := range []string{"unknown", "tower", "migrating", "alpenglow"} {
+		renderData := data
+		renderData.ConsensusMode = phase
+		rendered, err := role.render(renderData)
+		assert.NoError(t, err)
+		assert.Equal(t, "systemctl active-pubkey "+phase, rendered.Command)
+		assert.Equal(t, []string{"--identity", "/path/to/active.json", "--phase", phase}, rendered.Args)
+		assert.Equal(t, phase, rendered.Env["SOLANA_PHASE"])
+
+		preHook, err := role.Hooks.Pre[0].render(renderData)
+		assert.NoError(t, err)
+		assert.Equal(t, "echo 'passive-pubkey "+phase+"'", preHook.Command)
+		assert.Equal(t, []string{phase}, preHook.Args)
+		postHook, err := role.Hooks.Post[0].render(renderData)
+		assert.NoError(t, err)
+		assert.Equal(t, "echo '/path/to/passive.json "+phase+"'", postHook.Command)
+	}
+
+	assert.Equal(t, "{{.ConsensusMode}}", role.Env["SOLANA_PHASE"])
 }
 
-func TestRole_RenderCommandsWithInvalidTemplate(t *testing.T) {
+func TestRole_PrepareTemplatesRejectsInvalidTemplate(t *testing.T) {
 	role := &Role{
 		Command: "systemctl {{.InvalidField}}",
 	}
@@ -83,12 +97,12 @@ func TestRole_RenderCommandsWithInvalidTemplate(t *testing.T) {
 		ActiveIdentityPubkey:      "active-pubkey",
 	}
 
-	err := role.RenderCommands(data)
+	err := role.PrepareTemplates(data)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to render role.command, role.args, and role.env")
+	assert.Contains(t, err.Error(), "failed to prepare role.command, role.args, and role.env")
 }
 
-func TestRole_RenderCommandsWithInvalidEnvTemplate(t *testing.T) {
+func TestRole_PrepareTemplatesRejectsInvalidEnvTemplate(t *testing.T) {
 	role := &Role{
 		Command: "systemctl start solana",
 		Env: map[string]string{
@@ -101,29 +115,17 @@ func TestRole_RenderCommandsWithInvalidEnvTemplate(t *testing.T) {
 		ActiveIdentityPubkey:      "active-pubkey",
 	}
 
-	err := role.RenderCommands(data)
+	err := role.PrepareTemplates(data)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to render env[SOLANA_IDENTITY]")
+	assert.Contains(t, err.Error(), "failed to execute env[SOLANA_IDENTITY] template")
 }
 
-func TestRole_RenderTemplateString(t *testing.T) {
-	role := &Role{}
-	data := RoleCommandTemplateData{
-		ActiveIdentityPubkey: "test-pubkey",
-	}
+func TestHookRenderUsesInvocationPhase(t *testing.T) {
+	hook := &Hook{Name: "phase", Command: "notify", Args: []string{"{{.ConsensusMode}}"}}
+	assert.NoError(t, hook.PrepareTemplates(RoleCommandTemplateData{ConsensusMode: "unknown"}))
 
-	// Test simple template
-	result, err := role.renderTemplateString(data, "echo {{.ActiveIdentityPubkey}}")
+	rendered, err := hook.render(RoleCommandTemplateData{ConsensusMode: "alpenglow"})
 	assert.NoError(t, err)
-	assert.Equal(t, "echo test-pubkey", result)
-
-	// Test template with multiple fields
-	result, err = role.renderTemplateString(data, "{{.ActiveIdentityPubkey}} {{.PassiveIdentityPubkey}}")
-	assert.NoError(t, err)
-	assert.Equal(t, "test-pubkey ", result) // PassiveIdentityPubkey is empty
-
-	// Test invalid template
-	_, err = role.renderTemplateString(data, "{{.InvalidField}}")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to execute command template")
+	assert.Equal(t, []string{"alpenglow"}, rendered.Args)
+	assert.Equal(t, []string{"{{.ConsensusMode}}"}, hook.Args)
 }

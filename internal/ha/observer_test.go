@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
+	"github.com/sol-strategies/solana-validator-ha/internal/consensus"
 	"github.com/sol-strategies/solana-validator-ha/internal/gossip"
 )
 
@@ -59,6 +60,16 @@ func newAlpenglowObserver(t *testing.T, cfg *config.Config) *Manager {
 	manager.localState.SetForceHealthyForTest(true)
 	manager.localState.SetHealthySinceForTest(time.Now().Add(-time.Hour))
 	return manager
+}
+
+func TestRoleCommandTemplateDataUsesDetectedPhase(t *testing.T) {
+	manager := &Manager{
+		cfg:      createTestConfig(),
+		detector: consensus.NewDetector(consensus.Options{Mode: config.ConsensusModeAlpenglow}),
+	}
+	if got := manager.roleCommandTemplateData().ConsensusMode; got != "alpenglow" {
+		t.Fatalf("ConsensusMode = %q, want alpenglow", got)
+	}
 }
 
 // In this release the Alpenglow rules are only observed, so failover decisions under Alpenglow

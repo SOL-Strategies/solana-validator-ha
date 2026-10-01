@@ -358,6 +358,9 @@ failover:
   #   {{ .ActiveIdentityPubkey }}       — active pubkey string
   #   {{ .PassiveIdentityPubkey }}      — passive pubkey string
   #   {{ .SelfName }}                   — value of validator.name
+  #   {{ .ConsensusMode }}              — latest detected phase: unknown, tower, migrating, or alpenglow
+  #                                      (may be unknown until consensus detection succeeds)
+  # Templates are validated at startup and rendered when each command or hook runs.
   active:
 
     # required: true
