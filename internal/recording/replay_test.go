@@ -8,28 +8,33 @@ import (
 	"time"
 )
 
-func TestReplayTwoNodeGolden(t *testing.T) {
-	paths, err := filepath.Glob("testdata/two-node/*.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, warnings, err := LoadReplayData(paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warnings) != 0 {
-		t.Fatalf("unexpected warnings: %v", warnings)
-	}
-	got, err := RenderReplay(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err := os.ReadFile("testdata/two-node.golden")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != string(want) {
-		t.Fatalf("replay output changed; review the display and update testdata/two-node.golden if intentional\n--- got ---\n%s\n--- want ---\n%s", got, want)
+func TestReplayGolden(t *testing.T) {
+	for _, scenario := range []string{"two-node", "alpenglow-zombie", "alpenglow-stall"} {
+		t.Run(scenario, func(t *testing.T) {
+			paths, err := filepath.Glob(filepath.Join("testdata", scenario, "*.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, warnings, err := LoadReplayData(paths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(warnings) != 0 {
+				t.Fatalf("unexpected warnings: %v", warnings)
+			}
+			got, err := RenderReplay(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			goldenPath := filepath.Join("testdata", scenario+".golden")
+			want, err := os.ReadFile(goldenPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != string(want) {
+				t.Fatalf("replay output changed; review the display and update %s if intentional\n--- got ---\n%s\n--- want ---\n%s", goldenPath, got, want)
+			}
+		})
 	}
 }
 
@@ -97,6 +102,8 @@ func TestReplayPreviewScenarios(t *testing.T) {
 		"last-node-standing": "last_node_standing_retained_active",
 		"delinquency-bypass": "delinquency_bypass_triggered",
 		"command-failure":    "promotion_failed",
+		"alpenglow-zombie":   "alpenglow_vote_lag_exceeded",
+		"alpenglow-stall":    "veto=cluster_stalled",
 	}
 	for scenario, expected := range tests {
 		t.Run(scenario, func(t *testing.T) {
@@ -145,5 +152,25 @@ func TestReplayV1DoesNotInventV2LocalState(t *testing.T) {
 	}
 	if !strings.Contains(out, "legacy  unknown  gossip") {
 		t.Fatalf("v1 replay should show an unknown role:\n%s", out)
+	}
+}
+
+func TestReplayV3ShowsAlpenglowEvidence(t *testing.T) {
+	paths, err := filepath.Glob("testdata/alpenglow-stall/*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _, err := LoadReplayData(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := RenderReplay(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"consensus_mode=auto", "phase=alpenglow", "reason=vote_lag", "live=false", "veto=cluster_stalled"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("v3 replay missing %q:\n%s", want, out)
+		}
 	}
 }

@@ -18,6 +18,8 @@ type Cluster struct {
 	// RPCURLCooldownDuration is how long a URL that returns 403/429/503 is deprioritised.
 	// Default: 15s. Lower values retry throttled URLs sooner.
 	RPCURLCooldownDuration time.Duration `koanf:"rpc_url_cooldown_duration"`
+	// Consensus controls how the cluster's consensus protocol (TowerBFT or Alpenglow) is determined.
+	Consensus Consensus `koanf:"consensus"`
 }
 
 // Validate validates the cluster configuration
@@ -73,4 +75,5 @@ func (c *Cluster) SetDefaults() {
 	if c.RPCURLCooldownDuration == 0 {
 		c.RPCURLCooldownDuration = 60 * time.Second
 	}
+	c.Consensus.SetDefaults()
 }

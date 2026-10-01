@@ -1,0 +1,35 @@
+────────────────────────────────────────────────────────────────────────────────
+  solana-validator-ha failover replay
+  identity: ActivePubkey111111111111111111111111111111
+  failover: chicago (186.233.187.141) → london (185.26.11.91)
+  downtime: ~15.351s
+  files:
+    - testdata/alpenglow-zombie/01-chicago.json [schema=3 binary=v0.2.0-alpenglow.1]
+    - testdata/alpenglow-zombie/02-london.json [schema=3 binary=v0.2.0-alpenglow.1]
+  outcomes:
+    chicago  demoted_passive  poll=5s threshold=3 delinquency_bypass=false consensus_mode=auto vote_lag_threshold=32
+    london   became_active    poll=5s threshold=3 delinquency_bypass=false consensus_mode=auto vote_lag_threshold=32
+
+  TTFL=time to first leaderless
+────────────────────────────────────────────────────────────────────────────────
+  timestamp                 TTFL      peer     role     log
+  2026-09-25T14:30:10.000Z  -5s       chicago  active   gossip  local=active healthy=true self_in_gossip=true leaderless=0  phase=alpenglow  live=true finalized=438009000  [chicago:active  london:passive]
+  2026-09-25T14:30:10.000Z  -5s       london   passive  gossip  local=passive healthy=true self_in_gossip=true leaderless=0  phase=alpenglow  live=true finalized=438009000  [chicago:active  london:passive]
+  2026-09-25T14:30:15.000Z  +0s       chicago  active   gossip  local=active healthy=true self_in_gossip=false leaderless=1 reason=vote_lag  phase=alpenglow  live=true finalized=438009018  delinquent=true  [chicago:missing slot_distance=41  london:passive]
+  2026-09-25T14:30:15.000Z  +0s       london   passive  gossip  local=passive healthy=true self_in_gossip=true leaderless=1 reason=vote_lag  phase=alpenglow  live=true finalized=438009018  delinquent=true  [chicago:missing slot_distance=41  london:passive]
+  2026-09-25T14:30:15.001Z  +1ms      chicago  active   incident_started  rpc_error=false leaderless_count=1 self_in_gossip=false delinquent=true undeclared_active=false
+  2026-09-25T14:30:15.001Z  +1ms      london   passive  incident_started  rpc_error=false leaderless_count=1 self_in_gossip=true delinquent=true undeclared_active=false
+  2026-09-25T14:30:15.002Z  +2ms      chicago  active   alpenglow_vote_lag_exceeded  vote_lag_slots=41 threshold=32
+  2026-09-25T14:30:15.002Z  +2ms      london   passive  alpenglow_vote_lag_exceeded  vote_lag_slots=41 threshold=32
+  2026-09-25T14:30:20.000Z  +5s       chicago  active   gossip  local=active healthy=true self_in_gossip=false leaderless=2 reason=vote_lag  phase=alpenglow  live=true finalized=438009030  delinquent=true  [chicago:missing slot_distance=53  london:passive]
+  2026-09-25T14:30:20.000Z  +5s       london   passive  gossip  local=passive healthy=true self_in_gossip=true leaderless=2 reason=vote_lag  phase=alpenglow  live=true finalized=438009030  delinquent=true  [chicago:missing slot_distance=53  london:passive]
+  2026-09-25T14:30:25.000Z  +10s      chicago  active   gossip  local=active healthy=true self_in_gossip=false leaderless=3 reason=vote_lag  phase=alpenglow  live=true finalized=438009043  delinquent=true  [chicago:missing slot_distance=66  london:passive]
+  2026-09-25T14:30:25.000Z  +10s      london   passive  gossip  local=passive healthy=true self_in_gossip=true leaderless=3 reason=vote_lag  phase=alpenglow  live=true finalized=438009043  delinquent=true  [chicago:missing slot_distance=66  london:passive]
+  2026-09-25T14:30:25.001Z  +10.001s  chicago  active   ensure_passive_start  passive_pubkey=ChicagoPassive111
+  2026-09-25T14:30:25.002Z  +10.002s  london   passive  threshold_reached  leaderless_count=3 threshold=3
+  2026-09-25T14:30:25.003Z  +10.003s  london   passive  rank_0_no_delay
+  2026-09-25T14:30:25.004Z  +10.004s  london   passive  ensure_active_start
+  2026-09-25T14:30:25.180Z  +10.18s   chicago  passive  passive_identity_confirmed  pubkey=ChicagoPassive111
+  2026-09-25T14:30:25.350Z  +10.35s   london   active   active_identity_confirmed  pubkey=ActivePubkey111111111111111111111111111111
+  2026-09-25T14:30:25.351Z  +10.351s  london   active   confirmed_active  duration=347ms
+────────────────────────────────────────────────────────────────────────────────

@@ -197,6 +197,18 @@ cluster:
   # recovery window. Lower if your RPC provider recovers faster.
   rpc_url_cooldown_duration: 60s
 
+  # How the cluster's consensus protocol is determined. See "Alpenglow (observe-only)" below.
+  consensus:
+
+    # required: false | default: auto
+    # auto: detect TowerBFT, the migration window and Alpenglow from RPC.
+    # tower | alpenglow: pin the behaviour and skip detection.
+    mode: auto
+
+    # required: false | default: 60s
+    # How often the consensus phase is queried until Alpenglow is detected.
+    detection_interval_duration: 60s
+
 failover:
 
   # required: false | default: false
@@ -249,9 +261,10 @@ failover:
   #   https://github.com/anza-xyz/agave/blob/master/rpc-client-types/src/request.rs
   # Since Agave v2.0, --health-check-slot-distance also defaults to 128 via the same constant:
   #   https://github.com/anza-xyz/agave/blob/master/validator/src/commands/run/args/json_rpc_config.rs
-  # Both thresholds agree — there is no gap between delinquency detection and health status.
-  # If you set value below 128, add --health-check-slot-distance <value> to your validator
-  # startup flags to keep the thresholds aligned — a startup warning will remind you if not.
+  # Under TowerBFT both thresholds agree — there is no gap between delinquency detection and
+  # health status. If you set value below 128, add --health-check-slot-distance <value> to your
+  # validator startup flags to keep the thresholds aligned — a startup warning will remind you if not.
+  # Under Alpenglow they no longer measure the same thing; see "Alpenglow (observe-only)".
   # Values <= 1 are clamped to 2 on startup.
   delinquent_slot_distance_override:
 
@@ -282,6 +295,31 @@ failover:
     # streak — the streak is only reset if unhealthiness persists across back-to-back samples.
     # Set to 0 to disable grace (any failure resets immediately — original behaviour).
     unhealthy_grace_count: 1
+
+  # Thresholds of the Alpenglow vote rule. In this release the rule is only observed: its verdicts are
+  # exported as metrics and logs, and do not change failover decisions. See "Alpenglow (observe-only)".
+  alpenglow:
+
+    # required: false | default: 32 | min: 16
+    # Slots the active's last vote may trail the processed slot before it counts as not voting.
+    # A healthy Alpenglow validator trails by up to ~9 slots.
+    vote_lag_slots_threshold: 32
+
+    # required: false | default: 64
+    # Slots the cluster must finalize past the Alpenglow genesis slot before vote evidence is trusted.
+    warmup_slots: 64
+
+    # required: false | default: 15s, or poll_interval_duration if longer | min: poll_interval_duration
+    # The cluster counts as stalled if its finalized slot has not advanced for this long.
+    finalization_stall_duration: 15s
+
+    # required: false | default: 0.85 | range: 0-1
+    # Minimum share of stake that must be current for vote evidence to count. 0 disables the check.
+    network_current_stake_ratio_min: 0.85
+
+    # required: false | default: 60s
+    # How often the ratio above is recomputed (one unfiltered getVoteAccounts call).
+    network_stake_check_interval_duration: 60s
 
   # Incident recording: writes JSON for network anomalies and failover decisions.
   recording:
@@ -483,6 +521,27 @@ failover:
 
 The delinquency threshold used for detection is `failover.delinquent_slot_distance_override` (if configured) or the Agave default of 128 slots (~51 s).
 
+## Alpenglow (observe-only)
+
+Alpenglow replaces TowerBFT votes with BLS votes that are aggregated into certificates. Gossip presence still means the same thing, but the voting signals this tool relies on change meaning:
+
+- **`lastVote`** in `getVoteAccounts` is only updated when a certificate that includes the validator lands in a block, so a healthy validator trails the tip by up to ~9 slots instead of ~1–3.
+- **`getHealth`** compares the local node against the highest *finalized* slot, and reports unknown until the node has seen a finalization. It no longer agrees with the 128-slot delinquency threshold.
+- **A cluster-wide stall** (no finalization) freezes every validator's `lastVote` at once.
+- **A vote account left out of the voter set** (for example unstaked, or missing its BLS key) cannot vote from any node.
+
+This release **observes** Alpenglow without changing any failover decision. Failover still follows the TowerBFT rules in every phase. Alongside, it:
+
+- **Detects the consensus phase.** With `cluster.consensus.mode: auto`, the phase (`tower`, `migrating`, `alpenglow`, or `unknown` until the first answer) is read from the Alpenglow feature gate account (`A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS`) and `getAgGenesisCert`. RPCs that do not implement `getAgGenesisCert` are skipped, and the local validator is asked instead. Once a genesis certificate is seen, the phase stays `alpenglow` for the life of the process.
+- **Evaluates the Alpenglow vote rule** in the `alpenglow` phase, after `failover.alpenglow.warmup_slots`. The rule reads the active's `lastVote` and the processed slot from the same RPC node. It would count the active as not voting when its vote lag exceeds `vote_lag_slots_threshold` while the cluster keeps finalizing close to the tip and at least `network_current_stake_ratio_min` of stake is current. A stalled cluster or an excluded vote account would be vetoed, since a failover cannot help.
+- **Checks the local genesis.** It records whether the local validator reports the cluster's Alpenglow genesis, which a later release will require before promoting a node.
+
+Each verdict is counted in `solana_validator_ha_alpenglow_vote_verdicts_total{verdict}`. A `not_voting`, vetoed or `unknown` verdict is also logged with an `observe-only:` prefix. Before a release activates the rule, watch on your cluster:
+
+- `solana_validator_ha_active_vote_lag_slots` against `vote_lag_slots_threshold`;
+- how often `not_voting` appears while the active is healthy (it should not);
+- how often `solana_validator_ha_cluster_live` drops to 0.
+
 ## Failover Priority
 
 By default, when multiple passive nodes are all eligible to take over, they use their public IP addresses (ascending sort) to break the tie. The node with the lowest IP gets rank 0 and takes over immediately; higher-ranked nodes wait `rank × poll_interval_duration` before attempting takeover.
@@ -549,9 +608,9 @@ Each recording file contains a single JSON object with:
 
 - **`schema_version`** — format version for forward-compatible parsing
 - **`node`** — identity of the node that wrote the file (name, public IP, passive pubkey)
-- **`config`** — relevant configuration snapshot (poll interval, leaderless threshold, delinquency bypass, etc.)
+- **`config`** — relevant configuration snapshot (poll interval, leaderless threshold, delinquency bypass, consensus mode and Alpenglow thresholds, etc.)
 - **`detected_at`** — UTC timestamp when the leaderless condition was first detected
-- **`gossip_samples`** — pre-incident and live samples with peer state, RPC status, local role/health, self-gossip presence, and elapsed incident time
+- **`gossip_samples`** — pre-incident and live samples with peer state, RPC status, local role/health, self-gossip presence, elapsed incident time, and (schema v3) the consensus phase and why the sample was leaderless
 - **`timeline`** — ordered decisions and actions, including ranking, guardrails, hooks, commands, durations, and identity confirmation
 - **`outcome`** — recovery, demotion, promotion, guardrail, abort, failure, or interruption result for this node
 
@@ -578,7 +637,7 @@ solana-validator-ha replay \
 
 To find the matching file from the other node, filter by the shared `<pubkey>` prefix — all recordings for the same HA cluster carry the same pubkey. The timestamps will differ by a few seconds (each node detects the failover at a different point in its own poll cycle), so sort chronologically within that prefix to find the pair.
 
-Replay accepts schema v1 and v2 recordings. It prints each producer's schema, binary version, local observations, time to first leaderless, action results, and terminal outcome. A warning is emitted when files appear to come from different clusters or their incident start times suggest clock skew.
+Replay accepts schema v1, v2 and v3 recordings. It prints each producer's schema, binary version, local observations, time to first leaderless, action results, and terminal outcome. A warning is emitted when files appear to come from different clusters or their incident start times suggest clock skew.
 
 The replay timeline is rendered as `timestamp / TTFL / peer / role / log`. Timestamps are UTC with millisecond precision. TTFL means "time to first leaderless": negative values are pre-incident context, zero is the peer's first leaderless or otherwise anomalous observation, and positive values are time since that observation. Because each peer detects and records an incident independently, TTFL is relative to that peer's own `detected_at`. Schema v1 recordings do not contain local-role observations, so their role is shown as `unknown`.
 
@@ -627,6 +686,17 @@ The application exposes Prometheus metrics on the configured port (default: 9090
 - **`solana_validator_ha_failover_status`**: Current failover status
 - **`solana_validator_ha_update_available`**: Whether a newer release is available (1=yes, 0=no). Updated on startup and periodically per `update.check_interval_duration`
 - **`solana_validator_ha_recording_write_failures_total`**: Number of failed recording checkpoints or final writes
+
+### Consensus Metrics
+- **`solana_validator_ha_consensus_phase{phase}`**: 1 for the current phase (`unknown`, `tower`, `migrating`, `alpenglow`), 0 for the others
+- **`solana_validator_ha_alpenglow_genesis_slot`**: Alpenglow genesis slot, 0 if unknown
+- **`solana_validator_ha_active_vote_lag_slots`**: Slots the active's last vote trailed the reference slot in the last sample, when measured
+- **`solana_validator_ha_alpenglow_vote_verdicts_total{verdict}`**: Verdicts of the Alpenglow vote rule on the active peer, one per sample in the Alpenglow phase (`voting`, `not_voting`, `unknown`, `cluster_stalled`, `vote_account_excluded`). Observe-only in this release
+- Alpenglow phase only:
+  - **`solana_validator_ha_local_alpenglow_genesis_match`**: Whether the local validator reports the cluster's Alpenglow genesis (1=yes, 0=no)
+  - **`solana_validator_ha_cluster_finalized_slot`**: Highest finalized slot seen on the cluster RPCs
+  - **`solana_validator_ha_cluster_live`**: Whether the finalized slot is advancing (1=yes, 0=stalled)
+  - **`solana_validator_ha_network_current_stake_ratio`**: Share of stake held by current vote accounts
 
 ### Metric Labels
 - `validator_name`: Configured validator name

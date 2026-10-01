@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	solanago "github.com/solana-foundation/solana-go/v2"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
 	"github.com/sol-strategies/solana-validator-ha/internal/gossip"
 	"github.com/sol-strategies/solana-validator-ha/internal/recording"
+	solanago "github.com/solana-foundation/solana-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,6 +83,8 @@ func createTestConfig() *config.Config {
 		Cluster: config.Cluster{
 			Name:    "mainnet-beta",
 			RPCURLs: []string{"https://api.mainnet-beta.solana.com"},
+			// pinned so the existing tests exercise TowerBFT behaviour without phase detection
+			Consensus: config.Consensus{Mode: config.ConsensusModeTower},
 		},
 		Failover: config.Failover{
 			PollIntervalDuration:       5 * time.Second,

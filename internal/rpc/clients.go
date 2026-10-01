@@ -2,17 +2,19 @@ package rpc
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/log"
+	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/solana-foundation/solana-go/v2"
 	"github.com/solana-foundation/solana-go/v2/rpc"
 	"github.com/solana-foundation/solana-go/v2/rpc/jsonrpc"
-	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 )
 
 // defaultTimeout is the default per-call RPC timeout.
@@ -163,6 +165,9 @@ func executeWithRetry[T any](c *Client, ctx context.Context, op rpcOperation[T])
 	}
 
 	var zero T
+	if len(errors) > 0 && allMethodNotFound(errors) {
+		return zero, fmt.Errorf("%s on %v: %w", op.name, attemptedURLs, ErrMethodNotFound)
+	}
 	return zero, fmt.Errorf("method call failed on all RPC endpoints method: %s, attempted_urls: %v, errors: %v", op.name, attemptedURLs, errors)
 }
 
@@ -236,6 +241,163 @@ func (c *Client) GetHealth(ctx context.Context) (string, error) {
 	}
 
 	return result, nil
+}
+
+// GetSlotWithCommitment gets the slot at the given commitment from the first working RPC client.
+func (c *Client) GetSlotWithCommitment(ctx context.Context, commitment rpc.CommitmentType) (uint64, error) {
+	return executeWithRetry(c, ctx, rpcOperation[uint64]{
+		name: "GetSlotWithCommitment",
+		execute: func(client *rpc.Client, ctx context.Context) (uint64, error) {
+			return client.GetSlot(ctx, commitment)
+		},
+	})
+}
+
+// AgGenesisCert is the part of an Alpenglow genesis certificate this client needs.
+// Blocks after Block.Slot are produced under Alpenglow consensus.
+type AgGenesisCert struct {
+	Block struct {
+		Slot uint64 `json:"slot"`
+	} `json:"block"`
+}
+
+// GetAgGenesisCert calls getAgGenesisCert. It returns nil while the cluster has not yet
+// switched to Alpenglow. When no endpoint implements the method, the error wraps
+// ErrMethodNotFound.
+func (c *Client) GetAgGenesisCert(ctx context.Context) (*AgGenesisCert, error) {
+	return executeWithRetry(c, ctx, rpcOperation[*AgGenesisCert]{
+		name: "GetAgGenesisCert",
+		execute: func(client *rpc.Client, ctx context.Context) (*AgGenesisCert, error) {
+			var cert *AgGenesisCert
+			if err := client.RPCCallForInto(ctx, &cert, "getAgGenesisCert", nil); err != nil {
+				return nil, err
+			}
+			// Slot 0 is the cluster's genesis block, never an Alpenglow genesis. Seeing it means the
+			// endpoint answered with something other than a certificate.
+			if cert != nil && cert.Block.Slot == 0 {
+				return nil, fmt.Errorf("getAgGenesisCert returned a certificate without a block slot")
+			}
+			return cert, nil
+		},
+	})
+}
+
+// FeatureStatus is the activation state of a feature gate account.
+type FeatureStatus struct {
+	Activated bool
+	// ActivatedAt is the slot the feature activated at. It is only set when Activated is true.
+	ActivatedAt uint64
+}
+
+// GetFeatureStatus reads a feature gate account at finalized commitment. A feature whose
+// account does not exist yet is reported as not activated.
+func (c *Client) GetFeatureStatus(ctx context.Context, feature solana.PublicKey) (FeatureStatus, error) {
+	return executeWithRetry(c, ctx, rpcOperation[FeatureStatus]{
+		name: "GetFeatureStatus",
+		execute: func(client *rpc.Client, ctx context.Context) (FeatureStatus, error) {
+			result, err := client.GetAccountInfoWithOpts(ctx, feature, &rpc.GetAccountInfoOpts{
+				Encoding:   solana.EncodingBase64,
+				Commitment: rpc.CommitmentFinalized,
+			})
+			if errors.Is(err, rpc.ErrNotFound) {
+				return FeatureStatus{}, nil
+			}
+			if err != nil {
+				return FeatureStatus{}, err
+			}
+			return decodeFeatureStatus(result.Value.Data.GetBinary())
+		},
+	})
+}
+
+// decodeFeatureStatus decodes the bincode layout of a feature account,
+// Feature { activated_at: Option<u64> }: a 0 byte for None, or a 1 byte followed by a
+// little-endian u64 slot.
+func decodeFeatureStatus(data []byte) (FeatureStatus, error) {
+	const someLen = 1 + 8
+	if len(data) == 0 {
+		return FeatureStatus{}, fmt.Errorf("feature account data is empty")
+	}
+	switch data[0] {
+	case 0:
+		return FeatureStatus{}, nil
+	case 1:
+		if len(data) < someLen {
+			return FeatureStatus{}, fmt.Errorf("feature account data is %d bytes, want at least %d", len(data), someLen)
+		}
+		return FeatureStatus{Activated: true, ActivatedAt: binary.LittleEndian.Uint64(data[1:someLen])}, nil
+	default:
+		return FeatureStatus{}, fmt.Errorf("feature account data has invalid option tag %d", data[0])
+	}
+}
+
+// VoteLag is a vote account's last vote together with the processed slot, both read from the
+// same RPC node so the difference between them is meaningful.
+type VoteLag struct {
+	// Found is false when the node returned no vote account for the requested pubkey.
+	Found          bool
+	LastVote       uint64
+	ActivatedStake uint64
+	ProcessedSlot  uint64
+}
+
+// Slots returns how many slots the last vote is behind the processed slot.
+func (v VoteLag) Slots() uint64 {
+	if v.LastVote >= v.ProcessedSlot {
+		return 0
+	}
+	return v.ProcessedSlot - v.LastVote
+}
+
+// GetVoteLag reads a vote account and the processed slot from one RPC node. Unstaked and
+// delinquent accounts are included, so Found is false only when the node knows no such account.
+func (c *Client) GetVoteLag(ctx context.Context, votePubkey solana.PublicKey) (VoteLag, error) {
+	return executeWithRetry(c, ctx, rpcOperation[VoteLag]{
+		name: "GetVoteLag",
+		execute: func(client *rpc.Client, ctx context.Context) (VoteLag, error) {
+			keepUnstakedDelinquents := true
+			accounts, err := client.GetVoteAccounts(ctx, &rpc.GetVoteAccountsOpts{
+				Commitment:              rpc.CommitmentProcessed,
+				VotePubkey:              &votePubkey,
+				KeepUnstakedDelinquents: &keepUnstakedDelinquents,
+			})
+			if err != nil {
+				return VoteLag{}, err
+			}
+			// Read the slot after the vote accounts so it is never older than the bank lastVote came from.
+			processedSlot, err := client.GetSlot(ctx, rpc.CommitmentProcessed)
+			if err != nil {
+				return VoteLag{}, err
+			}
+			lag := VoteLag{ProcessedSlot: processedSlot}
+			for _, account := range slices.Concat(accounts.Current, accounts.Delinquent) {
+				if account.VotePubkey.Equals(votePubkey) {
+					lag.Found = true
+					lag.LastVote = account.LastVote
+					lag.ActivatedStake = account.ActivatedStake
+					break
+				}
+			}
+			return lag, nil
+		},
+	})
+}
+
+// ErrMethodNotFound is wrapped by errors from methods that no configured endpoint implements.
+var ErrMethodNotFound = errors.New("RPC method not implemented by any endpoint")
+
+// methodNotFoundCode is the JSON-RPC 2.0 error code for an unknown method.
+const methodNotFoundCode = -32601
+
+// allMethodNotFound reports whether every error is a JSON-RPC "method not found" response.
+func allMethodNotFound(errs []error) bool {
+	for _, err := range errs {
+		var rpcErr *jsonrpc.RPCError
+		if !errors.As(err, &rpcErr) || rpcErr.Code != methodNotFoundCode {
+			return false
+		}
+	}
+	return true
 }
 
 // isPermanentHTTPError returns true when the error signals that the endpoint actively

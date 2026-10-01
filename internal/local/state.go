@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
-	solanagorpc "github.com/solana-foundation/solana-go/v2/rpc"
 	"github.com/sol-strategies/solana-validator-ha/internal/config"
 	"github.com/sol-strategies/solana-validator-ha/internal/logging"
 	"github.com/sol-strategies/solana-validator-ha/internal/rpc"
+	solanagorpc "github.com/solana-foundation/solana-go/v2/rpc"
 )
 
 // State tracks the local validator node's health and identity state.

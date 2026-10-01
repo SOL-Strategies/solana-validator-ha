@@ -23,22 +23,24 @@ type SelfHealthy struct {
 
 // Failover represents failover decision parameters
 type Failover struct {
-	DryRun                             bool                           `koanf:"dry_run"`
-	PollIntervalDuration               time.Duration                  `koanf:"poll_interval_duration"`
-	LeaderlessSamplesThreshold         int                            `koanf:"leaderless_samples_threshold"`
-	LeaderlessConfirmationPollDuration time.Duration                  `koanf:"leaderless_confirmation_poll_duration"`
+	DryRun                             bool          `koanf:"dry_run"`
+	PollIntervalDuration               time.Duration `koanf:"poll_interval_duration"`
+	LeaderlessSamplesThreshold         int           `koanf:"leaderless_samples_threshold"`
+	LeaderlessConfirmationPollDuration time.Duration `koanf:"leaderless_confirmation_poll_duration"`
 	// DelinquencyBypass, when true, skips the leaderless sample threshold if the active peer is
 	// declared delinquent by the network (and not due to low balance). Default false.
 	// ⚠️ See "Delinquency Fast-Path" in the README for the fork-recovery risk before enabling.
-	DelinquencyBypass                  bool                           `koanf:"delinquency_bypass"`
-	TakeoverJitterDuration             time.Duration                  `koanf:"takeover_jitter_duration"`
-	Priority                           *int                           `koanf:"priority"`
-	Active                             Role                           `koanf:"active"`
-	Passive                            Role                           `koanf:"passive"`
-	Peers                              Peers                          `koanf:"peers"`
-	DelinquentSlotDistanceOverride     DelinquentSlotDistanceOverride `koanf:"delinquent_slot_distance_override"`
-	SelfHealthy                        SelfHealthy                    `koanf:"self_healthy"`
-	Recording                          Recording                      `koanf:"recording"`
+	DelinquencyBypass              bool                           `koanf:"delinquency_bypass"`
+	TakeoverJitterDuration         time.Duration                  `koanf:"takeover_jitter_duration"`
+	Priority                       *int                           `koanf:"priority"`
+	Active                         Role                           `koanf:"active"`
+	Passive                        Role                           `koanf:"passive"`
+	Peers                          Peers                          `koanf:"peers"`
+	DelinquentSlotDistanceOverride DelinquentSlotDistanceOverride `koanf:"delinquent_slot_distance_override"`
+	SelfHealthy                    SelfHealthy                    `koanf:"self_healthy"`
+	Recording                      Recording                      `koanf:"recording"`
+	// Alpenglow holds the vote-evidence settings used once the cluster runs Alpenglow consensus.
+	Alpenglow Alpenglow `koanf:"alpenglow"`
 }
 
 // leaderlessConfirmationPollFloor is the minimum allowed value for
@@ -257,6 +259,8 @@ func (f *Failover) SetDefaults() {
 	if f.LeaderlessConfirmationPollDuration == 0 {
 		f.LeaderlessConfirmationPollDuration = f.PollIntervalDuration
 	}
+
+	f.Alpenglow.SetDefaults(f.PollIntervalDuration)
 
 	// Set role names
 	f.Active.Name = "active"
