@@ -61,6 +61,7 @@ type Manager struct {
 var vetoOutcomes = map[string]string{
 	gossip.VetoClusterStalled:      "aborted_cluster_stalled",
 	gossip.VetoVoteAccountExcluded: "aborted_vote_account_excluded",
+	gossip.VetoFailoverIneffective: "aborted_failover_ineffective",
 }
 
 // NewManager creates a new HA manager from options
@@ -658,16 +659,7 @@ func (m *Manager) ensureHAState() {
 
 	// under Alpenglow we must be on the same Alpenglow genesis as the cluster, otherwise our
 	// votes cannot count; getHealth alone does not show this
-	if eligible, reason := m.detector.LocalEligibility(); !eligible {
-		m.logger.Error("we have not migrated to the cluster's Alpenglow genesis - unable to become active in failover",
-			"reason", reason,
-			"cluster_genesis_slot", m.detector.View().GenesisSlot,
-		)
-		m.metrics.IncFailoverVeto(reason)
-		if m.activeRecorder != nil {
-			m.activeRecorder.AddEvent("veto_local_genesis", "reason="+reason)
-		}
-		m.finishRecording("aborted_local_not_migrated", fromNode, "unknown")
+	if !m.isLocalEligible(fromNode, "pre_delay") {
 		return
 	}
 
@@ -700,6 +692,9 @@ func (m *Manager) ensureHAState() {
 	// rank-0 nodes skip this re-validation because zero time elapsed during their "delay", so no peer could have
 	// taken over in the interim - avoiding an unnecessary RPC round trip on the hot path.
 	if delayApplied {
+		// re-read the consensus phase first, so a cluster that entered Alpenglow during the delay
+		// is judged by the Alpenglow rules
+		m.refreshConsensusNow()
 		m.gossipState.Refresh()
 		if m.activeRecorder != nil {
 			m.activeRecorder.AddSample(m.buildGossipSample())
@@ -757,6 +752,15 @@ func (m *Manager) ensureHAState() {
 		return
 	}
 
+	// the cluster may have entered Alpenglow since the phase was last read - during the delay, or
+	// within the detection interval for rank 0 - so check our genesis again before promoting
+	if !delayApplied {
+		m.refreshConsensusNow()
+	}
+	if !m.isLocalEligible(fromNode, "pre_promotion") {
+		return
+	}
+
 	// now we know we are healthy, passive, and none of our peers have assumed active role
 	// we can take over as active - this should be idempotent in setting the active role
 	if m.activeRecorder != nil {
@@ -777,11 +781,41 @@ func (m *Manager) ensureHAState() {
 	}
 }
 
+// isLocalEligible reports whether the local validator may be promoted in the current consensus
+// phase. When it may not, the veto is logged, counted and recorded, and the recording finished.
+// stage names the point of the takeover the check ran at.
+func (m *Manager) isLocalEligible(fromNode, stage string) bool {
+	eligible, reason := m.detector.LocalEligibility()
+	if eligible {
+		return true
+	}
+	m.logger.Error("we have not migrated to the cluster's Alpenglow genesis - unable to become active in failover",
+		"reason", reason,
+		"cluster_genesis_slot", m.detector.View().GenesisSlot,
+		"stage", stage,
+	)
+	m.metrics.IncFailoverVeto(reason)
+	if m.activeRecorder != nil {
+		m.activeRecorder.AddEvent("veto_local_genesis", fmt.Sprintf("reason=%s stage=%s", reason, stage))
+	}
+	m.finishRecording("aborted_local_not_migrated", fromNode, "unknown")
+	return false
+}
+
 // refreshConsensus updates the consensus phase and hands it to the gossip state, so the next
 // gossip Refresh judges voting evidence by the rules of that phase.
 func (m *Manager) refreshConsensus() {
+	m.applyConsensusRefresh(m.detector.Refresh)
+}
+
+// refreshConsensusNow is refreshConsensus without waiting for the detection interval.
+func (m *Manager) refreshConsensusNow() {
+	m.applyConsensusRefresh(m.detector.RefreshNow)
+}
+
+func (m *Manager) applyConsensusRefresh(refresh func(context.Context)) {
 	previous := m.detector.Phase()
-	m.detector.Refresh(m.ctx)
+	refresh(m.ctx)
 	view := m.detector.View()
 	m.gossipState.SetConsensusView(view)
 	if view.Phase != previous && m.activeRecorder != nil {

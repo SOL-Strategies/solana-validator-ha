@@ -530,7 +530,7 @@ Alpenglow replaces TowerBFT votes with BLS votes that are aggregated into certif
 - **`lastVote`** in `getVoteAccounts` is only updated when a certificate that includes the validator lands in a block, so a healthy validator trails the tip by up to ~9 slots instead of ~1–3.
 - **`getHealth`** compares the local node against the highest *finalized* slot, and reports unknown until the node has seen a finalization. It no longer agrees with the 128-slot delinquency threshold.
 - **A cluster-wide stall** (no finalization) freezes every validator's `lastVote` at once. Failing over cannot help and adds equivocation risk.
-- **A vote account left out of the voter set** (for example unstaked, or missing its BLS key) cannot vote from any node.
+- **A vote account left out of the voter set** cannot vote from any node. Agave leaves out staked accounts with no BLS pubkey, or with a BLS pubkey or node identity shared with another staked account, yet `getVoteAccounts` still lists them with their stake.
 
 `solana-validator-ha` therefore tracks the cluster's consensus phase and judges the active peer by the rules of that phase:
 
@@ -539,12 +539,17 @@ Alpenglow replaces TowerBFT votes with BLS votes that are aggregated into certif
 | `tower` | Alpenglow feature gate not active | missing from gossip, or delinquent / no vote account (unchanged) | none |
 | `migrating` / `unknown` | feature gate active but no Alpenglow genesis certificate yet / nothing answered | missing from gossip only; vote evidence is ignored | none |
 | `alpenglow` (warm-up) | `getAgGenesisCert` returned a certificate; finalized slot ≤ genesis + `warmup_slots` | missing from gossip only | none |
-| `alpenglow` | as above, after the warm-up | missing from gossip, or vote lag > `vote_lag_slots_threshold` while the cluster finalizes | stall, excluded vote account, local genesis |
+| `alpenglow` | as above, after the warm-up | missing from gossip, or vote lag > `vote_lag_slots_threshold` while the cluster finalizes | stall, excluded vote account, ineffective failover, local genesis |
 
 - **Detection.** With `cluster.consensus.mode: auto`, the phase is read from the Alpenglow feature gate account (`A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS`) and `getAgGenesisCert`. RPCs that do not implement `getAgGenesisCert` are skipped, and the local validator is asked instead. Once a genesis certificate is seen, the phase stays `alpenglow` for the life of the process.
 - **Vote lag.** `lastVote` and the processed slot are read from the same RPC node, so the lag is not skewed by nodes at different heights. The active counts as not voting only while the cluster keeps finalizing (the finalized slot advanced within `finalization_stall_duration`) and at least `network_current_stake_ratio_min` of stake is current. A finalization certificate needs 60% of stake, so if the cluster finalizes and the active's votes still do not land, the fault is local to the active. At the defaults a zombie active is replaced in ~25–30 s, instead of ~66 s through delinquency.
-- **Vetoes.** A stalled cluster (the finalized slot stops advancing, trails the processed slot by more than the threshold, or too little stake is current) or an excluded vote account is logged, counted in `solana_validator_ha_failover_vetoes_total`, and does not count against the active. A leaderless streak in which the active was ever missing from gossip is never vetoed: a dead host is dead during a stall too.
-- **Local genesis.** Under Alpenglow a passive node is only promoted if its local validator reports the cluster's Alpenglow genesis slot, on top of the usual health checks. Otherwise the takeover is aborted (`aborted_local_not_migrated`) and the next-ranked peer takes over.
+- **Vetoes.** These are logged, counted in `solana_validator_ha_failover_vetoes_total`, and do not count against the active:
+  - `cluster_stalled`: the finalized slot stops advancing, trails the processed slot by more than the threshold, or too little stake is current.
+  - `vote_account_excluded`: the vote account has no stake, or is left out of the voter set. Before counting the active as not voting, the vote accounts' BLS pubkeys are read with `getMultipleAccounts` (only the first 193 bytes of each staked account) and Agave's voter-set rules are applied. The answer is reused for up to 10 minutes while the votes stay missing. It is based on the accounts' current state, while Agave uses the epoch's stake snapshot, so a key changed within the last epoch or two can be judged early. If the keys cannot be read, the active is judged by its votes alone.
+  - `failover_ineffective`: the active identity already moved to another node while the votes were not landing, and they still do not land. HA peers share one vote account, so the fault is with the account and another failover would not help. This allows at most one takeover per spell of missing votes; the spell ends when the votes land again. It also stops a takeover when the new active has a separate fault of its own, until its votes land or it drops out of gossip.
+
+  A leaderless streak in which the active was ever missing from gossip is never vetoed: a dead host is dead during a stall too.
+- **Local genesis.** Under Alpenglow a passive node is only promoted if its local validator reports the cluster's Alpenglow genesis slot, on top of the usual health checks. This is checked again right before promotion, after re-reading the consensus phase, in case the cluster entered Alpenglow during the takeover delay. Otherwise the takeover is aborted (`aborted_local_not_migrated`) and the next-ranked peer takes over.
 
 ### Vote history on failover
 
@@ -705,8 +710,8 @@ The application exposes Prometheus metrics on the configured port (default: 9090
 - **`solana_validator_ha_consensus_phase{phase}`**: 1 for the current phase (`unknown`, `tower`, `migrating`, `alpenglow`), 0 for the others
 - **`solana_validator_ha_alpenglow_genesis_slot`**: Alpenglow genesis slot, 0 if unknown
 - **`solana_validator_ha_active_vote_lag_slots`**: Slots the active's last vote trailed the reference slot in the last sample, when measured
-- **`solana_validator_ha_alpenglow_vote_verdicts_total{verdict}`**: Verdicts of the Alpenglow vote rule on the active peer, one per sample in the Alpenglow phase (`voting`, `not_voting`, `unknown`, `cluster_stalled`, `vote_account_excluded`)
-- **`solana_validator_ha_failover_vetoes_total{reason}`**: Samples or takeovers where evidence was disregarded because a failover could not help (`cluster_stalled`, `vote_account_excluded`, `local_not_migrated`, `local_genesis_mismatch`)
+- **`solana_validator_ha_alpenglow_vote_verdicts_total{verdict}`**: Verdicts of the Alpenglow vote rule on the active peer, one per sample in the Alpenglow phase (`voting`, `not_voting`, `unknown`, `cluster_stalled`, `vote_account_excluded`, `failover_ineffective`)
+- **`solana_validator_ha_failover_vetoes_total{reason}`**: Samples or takeovers where evidence was disregarded because a failover could not help (`cluster_stalled`, `vote_account_excluded`, `failover_ineffective`, `local_not_migrated`, `local_genesis_mismatch`)
 - Alpenglow phase only:
   - **`solana_validator_ha_local_alpenglow_genesis_match`**: Whether the local validator reports the cluster's Alpenglow genesis (1=yes, 0=no)
   - **`solana_validator_ha_cluster_finalized_slot`**: Highest finalized slot seen on the cluster RPCs

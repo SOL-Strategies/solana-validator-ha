@@ -270,6 +270,34 @@ func TestDetector_QueriesClusterOnlyWhenDue(t *testing.T) {
 	}
 }
 
+func TestDetector_RefreshNow(t *testing.T) {
+	cluster := newStubRPC(t, map[string]any{"getAgGenesisCert": nil, "getAccountInfo": missingAccount})
+	local := newStubRPC(t, map[string]any{"getAgGenesisCert": nil})
+	d := newTestDetector(config.ConsensusModeAuto, cluster, local, newFakeClock())
+	d.Refresh(context.Background())
+
+	// the cluster migrates within the detection interval
+	cluster.set("getAgGenesisCert", genesisCert(6000))
+	d.Refresh(context.Background())
+	if got := d.Phase(); got != PhaseTower {
+		t.Fatalf("Phase() after Refresh within the interval = %s, want tower", got)
+	}
+	d.RefreshNow(context.Background())
+	if got := d.Phase(); got != PhaseAlpenglow {
+		t.Fatalf("Phase() after RefreshNow = %s, want alpenglow", got)
+	}
+	if eligible, reason := d.LocalEligibility(); eligible || reason != ReasonLocalNotMigrated {
+		t.Errorf("LocalEligibility() after RefreshNow = %t, %q; want false, %q", eligible, reason, ReasonLocalNotMigrated)
+	}
+
+	// once the phase is final, the cluster is not asked again
+	calls := cluster.callCount("getAgGenesisCert")
+	d.RefreshNow(context.Background())
+	if got := cluster.callCount("getAgGenesisCert"); got != calls {
+		t.Errorf("getAgGenesisCert calls after RefreshNow in the final phase = %d, want %d", got, calls)
+	}
+}
+
 func TestDetector_PinnedTowerMakesNoCalls(t *testing.T) {
 	cluster := newStubRPC(t, map[string]any{"getAgGenesisCert": genesisCert(6000)})
 	local := newStubRPC(t, map[string]any{"getAgGenesisCert": genesisCert(6000)})

@@ -383,6 +383,69 @@ func (c *Client) GetVoteLag(ctx context.Context, votePubkey solana.PublicKey) (V
 	})
 }
 
+// BLSPubkey is a compressed BLS public key, as stored in a vote account.
+type BLSPubkey [48]byte
+
+// The BLS pubkey's place in a vote account, from Agave's VoteStateV4 layout: a u32 version, four
+// pubkeys, two u16 commissions and a u64, then an Option<[u8; 48]>.
+const (
+	voteStateVersionV4    = 3
+	blsPubkeyOptionOffset = 4 + 4*32 + 2 + 2 + 8
+	blsPubkeySliceLength  = blsPubkeyOptionOffset + 1 + len(BLSPubkey{})
+	// maxMultipleAccounts is the most accounts getMultipleAccounts accepts in one call.
+	maxMultipleAccounts = 100
+)
+
+// GetVoteAccountBLSPubkeys returns the BLS pubkeys of the given vote accounts. Only the bytes up
+// to the key are fetched. Accounts that are missing, use an older vote state version or have no
+// BLS pubkey are left out of the result.
+func (c *Client) GetVoteAccountBLSPubkeys(ctx context.Context, votePubkeys []solana.PublicKey) (map[solana.PublicKey]BLSPubkey, error) {
+	offset, length := uint64(0), uint64(blsPubkeySliceLength)
+	opts := &rpc.GetMultipleAccountsOpts{
+		Encoding:   solana.EncodingBase64,
+		Commitment: rpc.CommitmentProcessed,
+		DataSlice:  &rpc.DataSlice{Offset: &offset, Length: &length},
+	}
+	keys := make(map[solana.PublicKey]BLSPubkey, len(votePubkeys))
+	for batch := range slices.Chunk(votePubkeys, maxMultipleAccounts) {
+		accounts, err := executeWithRetry(c, ctx, rpcOperation[[]*rpc.Account]{
+			name: "GetMultipleAccounts",
+			execute: func(client *rpc.Client, ctx context.Context) ([]*rpc.Account, error) {
+				result, err := client.GetMultipleAccountsWithOpts(ctx, batch, opts)
+				if err != nil {
+					return nil, err
+				}
+				if len(result.Value) != len(batch) {
+					return nil, fmt.Errorf("getMultipleAccounts returned %d accounts for %d pubkeys", len(result.Value), len(batch))
+				}
+				return result.Value, nil
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		for i, account := range accounts {
+			if account == nil {
+				continue
+			}
+			if key, ok := decodeVoteBLSPubkey(account.Data.GetBinary()); ok {
+				keys[batch[i]] = key
+			}
+		}
+	}
+	return keys, nil
+}
+
+// decodeVoteBLSPubkey reads the BLS pubkey from the start of a vote account's data. ok is false
+// unless the data is a VoteStateV4 with the key set.
+func decodeVoteBLSPubkey(data []byte) (key BLSPubkey, ok bool) {
+	if len(data) < blsPubkeySliceLength || binary.LittleEndian.Uint32(data) != voteStateVersionV4 || data[blsPubkeyOptionOffset] != 1 {
+		return BLSPubkey{}, false
+	}
+	copy(key[:], data[blsPubkeyOptionOffset+1:])
+	return key, true
+}
+
 // ErrMethodNotFound is wrapped by errors from methods that no configured endpoint implements.
 var ErrMethodNotFound = errors.New("RPC method not implemented by any endpoint")
 

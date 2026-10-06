@@ -114,11 +114,22 @@ func (d *Detector) LocalEligibility() (eligible bool, reason string) {
 // Refresh re-reads the cluster phase and the local genesis certificate when their check
 // intervals have elapsed. It is cheap to call on every poll.
 func (d *Detector) Refresh(ctx context.Context) {
+	d.refresh(ctx, false)
+}
+
+// RefreshNow re-reads the cluster phase without waiting for the detection interval, unless the
+// phase is already final, then the local genesis certificate as Refresh does. Call it before
+// acting on LocalEligibility after the phase may have changed.
+func (d *Detector) RefreshNow(ctx context.Context) {
+	d.refresh(ctx, true)
+}
+
+func (d *Detector) refresh(ctx context.Context, force bool) {
 	if d.mode == config.ConsensusModeTower {
 		return
 	}
 	now := d.now()
-	if d.clusterCheckDue(now) {
+	if d.clusterCheckDue(now) || force && !d.phaseFinal() {
 		d.refreshCluster(ctx)
 		d.clusterCheckedAt = now
 	}
@@ -126,6 +137,11 @@ func (d *Detector) Refresh(ctx context.Context) {
 		d.refreshLocal(ctx)
 		d.localCheckedAt = now
 	}
+}
+
+// phaseFinal reports whether the phase can no longer change: Alpenglow with a known genesis slot.
+func (d *Detector) phaseFinal() bool {
+	return d.phase == PhaseAlpenglow && d.genesisSlot != 0
 }
 
 func (d *Detector) clusterCheckDue(now time.Time) bool {

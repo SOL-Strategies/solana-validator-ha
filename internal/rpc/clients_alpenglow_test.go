@@ -3,7 +3,9 @@ package rpc
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
+	"maps"
 	"testing"
 
 	"github.com/solana-foundation/solana-go/v2"
@@ -205,5 +207,98 @@ func TestGetVoteLag(t *testing.T) {
 				t.Errorf("GetVoteLag().Slots() = %d, want %d", got.Slots(), tt.wantSlots)
 			}
 		})
+	}
+}
+
+// voteStateData returns the start of a vote account's data in the given version, with the BLS
+// pubkey set to key when key is not nil.
+func voteStateData(version uint32, key *BLSPubkey) []byte {
+	data := make([]byte, blsPubkeySliceLength)
+	binary.LittleEndian.PutUint32(data, version)
+	if key != nil {
+		data[blsPubkeyOptionOffset] = 1
+		copy(data[blsPubkeyOptionOffset+1:], key[:])
+	}
+	return data
+}
+
+func TestDecodeVoteBLSPubkey(t *testing.T) {
+	key := BLSPubkey{1, 2, 3}
+	tests := []struct {
+		name   string
+		data   []byte
+		want   BLSPubkey
+		wantOK bool
+	}{
+		{name: "v4 with key", data: voteStateData(voteStateVersionV4, &key), want: key, wantOK: true},
+		{name: "v4 without key", data: voteStateData(voteStateVersionV4, nil)},
+		{name: "v3", data: voteStateData(2, &key)},
+		{name: "invalid option tag", data: func() []byte {
+			data := voteStateData(voteStateVersionV4, &key)
+			data[blsPubkeyOptionOffset] = 2
+			return data
+		}()},
+		{name: "truncated", data: voteStateData(voteStateVersionV4, &key)[:blsPubkeyOptionOffset+1]},
+		{name: "empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := decodeVoteBLSPubkey(tt.data)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("decodeVoteBLSPubkey() = %x, %t; want %x, %t", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestGetVoteAccountBLSPubkeys(t *testing.T) {
+	withKey := solana.MustPublicKeyFromBase58(testVotePubkey)
+	withoutKey := solana.MustPublicKeyFromBase58("11111111111111111111111111111111")
+	missing := solana.MustPublicKeyFromBase58("Stake11111111111111111111111111111111111111")
+	key := BLSPubkey{7}
+	account := func(data []byte) map[string]interface{} {
+		return map[string]interface{}{
+			"data":       []string{base64.StdEncoding.EncodeToString(data), "base64"},
+			"executable": false,
+			"lamports":   1,
+			"owner":      "Vote111111111111111111111111111111111111111",
+			"rentEpoch":  0,
+		}
+	}
+	server := mockSolanaRPCServer(t, map[string]interface{}{
+		"getMultipleAccounts": map[string]interface{}{
+			"context": map[string]interface{}{"slot": 1},
+			"value": []interface{}{
+				account(voteStateData(voteStateVersionV4, &key)),
+				account(voteStateData(voteStateVersionV4, nil)),
+				nil,
+			},
+		},
+	})
+
+	got, err := NewClient("test", server.URL).GetVoteAccountBLSPubkeys(context.Background(), []solana.PublicKey{withKey, withoutKey, missing})
+	if err != nil {
+		t.Fatalf("GetVoteAccountBLSPubkeys() error = %v", err)
+	}
+	want := map[solana.PublicKey]BLSPubkey{withKey: key}
+	if !maps.Equal(got, want) {
+		t.Errorf("GetVoteAccountBLSPubkeys() = %v, want %v", got, want)
+	}
+}
+
+func TestGetVoteAccountBLSPubkeysRejectsShortAnswer(t *testing.T) {
+	server := mockSolanaRPCServer(t, map[string]interface{}{
+		"getMultipleAccounts": map[string]interface{}{
+			"context": map[string]interface{}{"slot": 1},
+			"value":   []interface{}{nil},
+		},
+	})
+	pubkeys := []solana.PublicKey{
+		solana.MustPublicKeyFromBase58(testVotePubkey),
+		solana.MustPublicKeyFromBase58("11111111111111111111111111111111"),
+	}
+
+	if _, err := NewClient("test", server.URL).GetVoteAccountBLSPubkeys(context.Background(), pubkeys); err == nil {
+		t.Error("GetVoteAccountBLSPubkeys() error = nil, want an error for one account returned for two pubkeys")
 	}
 }

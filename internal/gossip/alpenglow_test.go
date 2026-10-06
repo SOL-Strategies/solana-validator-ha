@@ -1,6 +1,8 @@
 package gossip
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +57,31 @@ func alpenglowVoteAccounts(lastVote, activeStake, otherStake uint64, otherDelinq
 		current = append(current, account(testOtherNodePubkey, otherStake))
 	}
 	return map[string]interface{}{"current": current, "delinquent": delinquent}
+}
+
+// blsKeyAccounts returns a getMultipleAccounts result with one VoteStateV4 account per key, in
+// order. Each key is filled with its byte; 0 means the account has no BLS pubkey.
+func blsKeyAccounts(keys ...byte) map[string]interface{} {
+	const optionOffset = 4 + 4*32 + 2 + 2 + 8
+	values := []interface{}{}
+	for _, key := range keys {
+		data := make([]byte, optionOffset+1+48)
+		binary.LittleEndian.PutUint32(data, 3)
+		if key != 0 {
+			data[optionOffset] = 1
+			for i := optionOffset + 1; i < len(data); i++ {
+				data[i] = key
+			}
+		}
+		values = append(values, map[string]interface{}{
+			"data":       []string{base64.StdEncoding.EncodeToString(data), "base64"},
+			"executable": false,
+			"lamports":   1,
+			"owner":      "Vote111111111111111111111111111111111111111",
+			"rentEpoch":  0,
+		})
+	}
+	return map[string]interface{}{"context": map[string]interface{}{"slot": 1}, "value": values}
 }
 
 // newAlpenglowTestState returns a State in the Alpenglow phase (genesis slot 100, long past
@@ -199,8 +226,9 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			responses := map[string]interface{}{
-				"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
-				"getSlot":         testProcessedSlot,
+				"getClusterNodes":     []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+				"getSlot":             testProcessedSlot,
+				"getMultipleAccounts": blsKeyAccounts(1, 2),
 			}
 			if tt.voteAccounts != nil {
 				responses["getVoteAccounts"] = tt.voteAccounts
@@ -238,9 +266,10 @@ func TestRefresh_AlpenglowVoteEvidence(t *testing.T) {
 
 func TestRefresh_AlpenglowVoteLagRecordsDelinquencyDetail(t *testing.T) {
 	state := newAlpenglowTestState(t, map[string]interface{}{
-		"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
-		"getSlot":         testProcessedSlot,
-		"getVoteAccounts": alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
+		"getClusterNodes":     []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+		"getSlot":             testProcessedSlot,
+		"getVoteAccounts":     alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
+		"getMultipleAccounts": blsKeyAccounts(1, 2),
 	})
 	state.finalization = liveFinalization()
 
@@ -289,11 +318,202 @@ func TestRefresh_AlpenglowFinalizationLagVetoes(t *testing.T) {
 	}
 }
 
+func TestRefresh_AlpenglowVoterSet(t *testing.T) {
+	// the active and the rest of the network, with the given BLS keys, identities and epoch flag
+	voteAccounts := func(otherNodePubkey string, activeInEpoch bool) map[string]interface{} {
+		accounts := alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false)
+		current := accounts["current"].([]interface{})
+		current[0].(map[string]interface{})["epochVoteAccount"] = activeInEpoch
+		current[1].(map[string]interface{})["nodePubkey"] = otherNodePubkey
+		return accounts
+	}
+	tests := []struct {
+		name         string
+		voteAccounts map[string]interface{}
+		blsAccounts  interface{} // nil leaves getMultipleAccounts unanswered
+		wantVerdict  string
+	}{
+		{
+			name:         "member is judged by its votes",
+			voteAccounts: voteAccounts(testOtherNodePubkey, true),
+			blsAccounts:  blsKeyAccounts(1, 2),
+			wantVerdict:  VerdictNotVoting,
+		},
+		{
+			name:         "no BLS pubkey",
+			voteAccounts: voteAccounts(testOtherNodePubkey, true),
+			blsAccounts:  blsKeyAccounts(0, 2),
+			wantVerdict:  VetoVoteAccountExcluded,
+		},
+		{
+			name:         "BLS pubkey shared with another staked account",
+			voteAccounts: voteAccounts(testOtherNodePubkey, true),
+			blsAccounts:  blsKeyAccounts(1, 1),
+			wantVerdict:  VetoVoteAccountExcluded,
+		},
+		{
+			name:         "identity shared with another staked account",
+			voteAccounts: voteAccounts(testActivePubkey, true),
+			blsAccounts:  blsKeyAccounts(1, 2),
+			wantVerdict:  VetoVoteAccountExcluded,
+		},
+		{
+			name:         "no stake in the current epoch",
+			voteAccounts: voteAccounts(testOtherNodePubkey, false),
+			blsAccounts:  blsKeyAccounts(2),
+			wantVerdict:  VetoVoteAccountExcluded,
+		},
+		{
+			name:         "BLS pubkeys unavailable falls back to the votes",
+			voteAccounts: voteAccounts(testOtherNodePubkey, true),
+			wantVerdict:  VerdictNotVoting,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			responses := map[string]interface{}{
+				"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+				"getSlot":         testProcessedSlot,
+				"getVoteAccounts": tt.voteAccounts,
+			}
+			if tt.blsAccounts != nil {
+				responses["getMultipleAccounts"] = tt.blsAccounts
+			}
+			state := newAlpenglowTestState(t, responses)
+			state.finalization = liveFinalization()
+
+			state.Refresh()
+
+			if got := state.AlpenglowVerdict(); got != tt.wantVerdict {
+				t.Errorf("AlpenglowVerdict() = %q, want %q", got, tt.wantVerdict)
+			}
+			wantLeaderless := 0
+			if tt.wantVerdict == VerdictNotVoting {
+				wantLeaderless = 1
+			}
+			if state.LeaderlessSamplesCount != wantLeaderless {
+				t.Errorf("LeaderlessSamplesCount = %d, want %d", state.LeaderlessSamplesCount, wantLeaderless)
+			}
+		})
+	}
+}
+
+func TestRefresh_AlpenglowVoterSetIsCached(t *testing.T) {
+	state := newAlpenglowTestState(t, map[string]interface{}{
+		"getClusterNodes":     []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+		"getSlot":             testProcessedSlot,
+		"getVoteAccounts":     alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
+		"getMultipleAccounts": blsKeyAccounts(0, 2),
+	})
+	state.finalization = liveFinalization()
+	state.Refresh()
+	if got := state.AlpenglowVerdict(); got != VetoVoteAccountExcluded {
+		t.Fatalf("first AlpenglowVerdict() = %q, want %q", got, VetoVoteAccountExcluded)
+	}
+
+	// the key is set now, but the cached answer is reused until the recheck interval passes
+	member := newGossipMockRPCServer(t, map[string]interface{}{
+		"getClusterNodes":     []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+		"getSlot":             testProcessedSlot,
+		"getVoteAccounts":     alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
+		"getMultipleAccounts": blsKeyAccounts(1, 2),
+	})
+	state.clusterRPC = rpc.NewClient("test", member.URL)
+	state.Refresh()
+	if got := state.AlpenglowVerdict(); got != VetoVoteAccountExcluded {
+		t.Errorf("cached AlpenglowVerdict() = %q, want %q", got, VetoVoteAccountExcluded)
+	}
+
+	later := testNow.Add(voterSetRecheckInterval)
+	state.now = func() time.Time { return later }
+	state.finalization = finalizationTracker{maxSlot: testProcessedSlot - 10, advancedAt: later.Add(-time.Second)}
+	state.Refresh()
+	if got := state.AlpenglowVerdict(); got != VerdictNotVoting {
+		t.Errorf("rechecked AlpenglowVerdict() = %q, want %q", got, VerdictNotVoting)
+	}
+}
+
+func TestRefresh_AlpenglowVoterSetRecheckedAfterVotesLand(t *testing.T) {
+	server := func(lastVote uint64, blsAccounts map[string]interface{}) *rpc.Client {
+		return rpc.NewClient("test", newGossipMockRPCServer(t, map[string]interface{}{
+			"getClusterNodes":     []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+			"getSlot":             testProcessedSlot,
+			"getVoteAccounts":     alpenglowVoteAccounts(lastVote, 1000, 9000, false),
+			"getMultipleAccounts": blsAccounts,
+		}).URL)
+	}
+	state := newAlpenglowTestState(t, map[string]interface{}{})
+	state.finalization = liveFinalization()
+
+	steps := []struct {
+		name        string
+		client      *rpc.Client
+		wantVerdict string
+	}{
+		{name: "member, not voting", client: server(testProcessedSlot-100, blsKeyAccounts(1, 2)), wantVerdict: VerdictNotVoting},
+		{name: "votes land", client: server(testProcessedSlot-10, blsKeyAccounts(1, 2)), wantVerdict: VerdictVoting},
+		{name: "key removed, not voting", client: server(testProcessedSlot-100, blsKeyAccounts(0, 2)), wantVerdict: VetoVoteAccountExcluded},
+	}
+	for _, step := range steps {
+		state.clusterRPC = step.client
+		state.Refresh()
+		if got := state.AlpenglowVerdict(); got != step.wantVerdict {
+			t.Errorf("%s: AlpenglowVerdict() = %q, want %q", step.name, got, step.wantVerdict)
+		}
+	}
+}
+
+func TestRefresh_AlpenglowFailoverIneffective(t *testing.T) {
+	const otherDeclaredIP = "192.168.1.102"
+	server := func(ip string, lastVote uint64) *rpc.Client {
+		return rpc.NewClient("test", newGossipMockRPCServer(t, map[string]interface{}{
+			"getClusterNodes":     []interface{}{gossipClusterNode(testActivePubkey, ip)},
+			"getSlot":             testProcessedSlot,
+			"getVoteAccounts":     alpenglowVoteAccounts(lastVote, 1000, 9000, false),
+			"getMultipleAccounts": blsKeyAccounts(1, 2),
+		}).URL)
+	}
+	state := newAlpenglowTestState(t, map[string]interface{}{})
+	state.configPeers = config.Peers{
+		"peer1": {IP: testDeclaredIP, Name: "peer1"},
+		"peer2": {IP: otherDeclaredIP, Name: "peer2"},
+	}
+	state.finalization = liveFinalization()
+
+	steps := []struct {
+		name        string
+		client      *rpc.Client
+		wantVerdict string
+	}{
+		{name: "first holder not voting", client: server(testDeclaredIP, testProcessedSlot-100), wantVerdict: VerdictNotVoting},
+		{name: "first holder still not voting", client: server(testDeclaredIP, testProcessedSlot-100), wantVerdict: VerdictNotVoting},
+		{name: "identity moved and still not voting", client: server(otherDeclaredIP, testProcessedSlot-100), wantVerdict: VetoFailoverIneffective},
+		{name: "back on the first holder, still not voting", client: server(testDeclaredIP, testProcessedSlot-100), wantVerdict: VetoFailoverIneffective},
+		{name: "votes land again", client: server(testDeclaredIP, testProcessedSlot-10), wantVerdict: VerdictVoting},
+		{name: "a new spell starts afresh", client: server(otherDeclaredIP, testProcessedSlot-100), wantVerdict: VerdictNotVoting},
+	}
+	for _, step := range steps {
+		state.clusterRPC = step.client
+		state.Refresh()
+		if got := state.AlpenglowVerdict(); got != step.wantVerdict {
+			t.Errorf("%s: AlpenglowVerdict() = %q, want %q", step.name, got, step.wantVerdict)
+		}
+		wantVeto := ""
+		if step.wantVerdict == VetoFailoverIneffective {
+			wantVeto = VetoFailoverIneffective
+		}
+		if got := state.VetoReason(); got != wantVeto {
+			t.Errorf("%s: VetoReason() = %q, want %q", step.name, got, wantVeto)
+		}
+	}
+}
+
 func TestRefresh_LeaderlessStreakIsVoteOnly(t *testing.T) {
 	notVoting := newGossipMockRPCServer(t, map[string]interface{}{
-		"getClusterNodes": []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
-		"getSlot":         testProcessedSlot,
-		"getVoteAccounts": alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
+		"getClusterNodes":     []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+		"getSlot":             testProcessedSlot,
+		"getVoteAccounts":     alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false),
+		"getMultipleAccounts": blsKeyAccounts(1, 2),
 	})
 	activeGone := newGossipMockRPCServer(t, map[string]interface{}{
 		"getClusterNodes": []interface{}{},

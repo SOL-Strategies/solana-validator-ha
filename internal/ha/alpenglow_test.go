@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -167,6 +168,12 @@ func TestEnsureHAState_PostDelayVeto(t *testing.T) {
 			wantOutcome: "aborted_vote_account_excluded",
 		},
 		{
+			name:        "vote-only streak aborts when an earlier failover did not help",
+			veto:        gossip.VetoFailoverIneffective,
+			wantStatus:  "idle",
+			wantOutcome: "aborted_failover_ineffective",
+		},
+		{
 			name:                  "streak with the active missing from gossip is never vetoed",
 			veto:                  gossip.VetoClusterStalled,
 			streakHasGossipAbsent: true,
@@ -198,6 +205,62 @@ func TestEnsureHAState_PostDelayVeto(t *testing.T) {
 			}
 			if got := waitForRecordingOutcome(t, dir); got != tt.wantOutcome {
 				t.Errorf("recording outcome = %q, want %q", got, tt.wantOutcome)
+			}
+		})
+	}
+}
+
+func TestEnsureHAState_RechecksLocalGenesisBeforePromotion(t *testing.T) {
+	tests := []struct {
+		name   string
+		selfIP string
+	}{
+		{name: "rank 0, no delay", selfIP: "185.0.0.1"},
+		{name: "rank 1, after the delay", selfIP: "185.0.0.3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// the cluster has no Alpenglow genesis on the first read and has one on every later
+			// read, as if it migrated during the takeover
+			var mu sync.Mutex
+			certReads := 0
+			cluster := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req struct {
+					Method string `json:"method"`
+					ID     any    `json:"id"`
+				}
+				json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+				var result any
+				switch req.Method {
+				case "getAgGenesisCert":
+					mu.Lock()
+					certReads++
+					if certReads > 1 {
+						result = map[string]any{"block": map[string]any{"slot": 5000}}
+					}
+					mu.Unlock()
+				case "getAccountInfo":
+					result = map[string]any{"context": map[string]any{"slot": 1}, "value": nil}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}) //nolint:errcheck
+			}))
+			t.Cleanup(cluster.Close)
+			cfg := createTestConfig()
+			cfg.Cluster.Consensus.Mode = config.ConsensusModeAuto
+			cfg.Cluster.RPCURLs = []string{cluster.URL}
+			cfg.Cluster.RPCTimeoutDuration = time.Second
+			cfg.Validator.RPCURL = newJSONRPCStub(t, map[string]any{"getAgGenesisCert": nil}) // not migrated
+			dir := enableRecording(cfg, t)
+			manager := newTakeoverCandidate(t, cfg, tt.selfIP)
+
+			manager.ensureHAState()
+
+			if got := manager.cache.GetState().FailoverStatus; got != "idle" {
+				t.Errorf("FailoverStatus = %q, want %q", got, "idle")
+			}
+			if got := waitForRecordingOutcome(t, dir); got != "aborted_local_not_migrated" {
+				t.Errorf("recording outcome = %q, want %q", got, "aborted_local_not_migrated")
 			}
 		})
 	}

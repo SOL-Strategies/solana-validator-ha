@@ -89,6 +89,10 @@ type State struct {
 	// alpenglowVerdict is the Alpenglow rule's verdict on the active peer in the last Refresh,
 	// empty when the rule did not run.
 	alpenglowVerdict string
+	// voterSet caches whether the active vote account is in the Alpenglow voter set.
+	voterSet voterSetCheck
+	// unvotedHolders tracks the nodes that held the active identity while its votes were not landing.
+	unvotedHolders unvotedHolders
 }
 
 // PeerState represents the state of a peer as seen by the solana network
