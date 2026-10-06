@@ -209,7 +209,8 @@ func (o *Orchestrator) executeStep(step Step) error {
 
 	case "set_active", "disconnect", "reconnect", "set_unhealthy", "set_healthy",
 		"set_phase", "set_vote_lag", "stall_finalization", "resume_finalization",
-		"set_local_genesis", "exclude_vote_account", "include_vote_account":
+		"set_local_genesis", "exclude_vote_account", "include_vote_account",
+		"remove_bls_key", "restore_bls_key":
 		return o.callAction(mockAction{Action: step.Action, Target: step.Target, Phase: step.Phase, Value: step.Value})
 
 	case "assert":

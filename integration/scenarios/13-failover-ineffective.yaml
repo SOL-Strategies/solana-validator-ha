@@ -1,0 +1,74 @@
+name: failover-ineffective
+description: >
+  Under Alpenglow the shared vote account's votes stop landing whichever node holds the active
+  identity. One passive takes over; when the votes still do not land, no further failover
+  happens and the failover_ineffective veto is counted.
+
+initial_state:
+  active_validator: validator-1
+
+steps:
+  - name: switch the cluster to Alpenglow
+    action: set_phase
+    phase: alpenglow
+
+  - name: wait for detection and the warm-up
+    action: wait
+    duration: 12s
+
+  - name: assert initial state
+    action: assert
+    timeout: 30s
+    active_count: 1
+    state:
+      validator-1:
+        role: active
+
+  - name: votes stop landing on validator-1
+    action: set_vote_lag
+    target: validator-1
+    value: 200
+
+  - name: votes stop landing on validator-2
+    action: set_vote_lag
+    target: validator-2
+    value: 200
+
+  - name: votes stop landing on validator-3
+    action: set_vote_lag
+    target: validator-3
+    value: 200
+
+  - name: the highest-ranked passive takes over once
+    action: assert
+    timeout: 60s
+    active_count: 1
+    state:
+      validator-1:
+        role: passive
+      validator-2:
+        role: active
+
+  - name: wait longer than the leaderless threshold again
+    action: wait
+    duration: 30s
+
+  - name: no second failover
+    action: assert
+    timeout: 10s
+    active_count: 1
+    state:
+      validator-1:
+        role: passive
+      validator-2:
+        role: active
+      validator-3:
+        role: passive
+
+  - name: the repeat failover was vetoed
+    action: assert_metric
+    target: validator-3
+    metric: solana_validator_ha_failover_vetoes_total
+    labels:
+      reason: failover_ineffective
+    min_value: 1

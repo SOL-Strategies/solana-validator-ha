@@ -31,10 +31,10 @@ The integration test validates the following scenarios:
 - **Expected Behavior**: Only one validator becomes active (first responder wins)
 - **Validation**: Confirms that only one validator becomes active despite multiple candidates
 
-### Scenarios 5–11: Alpenglow
+### Scenarios 5–13: Alpenglow
 
 These drive the mock's consensus simulation (`set_phase`, `set_vote_lag`, `stall_finalization`,
-`set_local_genesis`, `exclude_vote_account`) and check both roles and metrics (`assert_metric`).
+`set_local_genesis`, `exclude_vote_account`, `remove_bls_key`) and check both roles and metrics (`assert_metric`).
 They run in file order and must stay after scenarios 1–4: once an HA client has seen the
 Alpenglow genesis certificate it never leaves the alpenglow phase, and `reset` keeps the phase.
 
@@ -47,6 +47,8 @@ Alpenglow genesis certificate it never leaves the alpenglow phase, and `reset` k
 | `09-local-not-migrated` | Highest-ranked passive has no local genesis → the next one takes over |
 | `10-vote-account-excluded` | Active vote account missing → no failover, `vote_account_excluded` vetoes counted |
 | `11-phase-sticky` | RPC answers as TowerBFT after Alpenglow → HA clients stay in the alpenglow phase |
+| `12-vote-account-not-in-voter-set` | Active vote account staked but without a BLS pubkey → no failover, verdict `vote_account_excluded` |
+| `13-failover-ineffective` | Votes do not land on any node → one takeover only, `failover_ineffective` vetoes counted |
 
 ## Failover Logic
 

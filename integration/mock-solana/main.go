@@ -67,6 +67,9 @@ type MockSolanaServer struct {
 	voteLag map[string]uint64
 	// voteAccountExcluded hides the active vote account, as if it were left out of the voter set.
 	voteAccountExcluded bool
+	// blsKeyRemoved clears the active vote account's BLS pubkey: the account stays staked and
+	// listed, but Agave leaves it out of the voter set.
+	blsKeyRemoved bool
 	// localGenesis overrides the genesis slot a validator's local RPC reports; 0 means none.
 	localGenesis map[string]uint64
 }
@@ -138,7 +141,7 @@ type BalanceResult struct {
 // ControlAction is the unified control request accepted by the /action endpoint.
 // Actions: set_active, set_passive, disconnect, reconnect, set_unhealthy, set_healthy, reset,
 // set_phase, set_vote_lag, stall_finalization, resume_finalization, set_local_genesis,
-// exclude_vote_account, include_vote_account.
+// exclude_vote_account, include_vote_account, remove_bls_key, restore_bls_key.
 type ControlAction struct {
 	Action string `json:"action"`
 	Target string `json:"target"` // validator name; empty for reset/set_active with no target
@@ -183,6 +186,8 @@ func (s *MockSolanaServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 		result = s.getBalance()
 	case "getAccountInfo":
 		result = s.getFeatureAccountInfo()
+	case "getMultipleAccounts":
+		result = s.getVoteAccountsData(req["params"])
 	case "getAgGenesisCert":
 		// Local validator RPC URLs carry ?validator=<name>; cluster RPC URLs do not.
 		result = s.getAgGenesisCert(r.URL.Query().Get("validator"))
@@ -281,6 +286,7 @@ func (s *MockSolanaServer) handleAction(w http.ResponseWriter, r *http.Request) 
 		s.voteLag = make(map[string]uint64)
 		s.localGenesis = make(map[string]uint64)
 		s.voteAccountExcluded = false
+		s.blsKeyRemoved = false
 		s.stalledAt = 0
 		s.activeValidator = action.Target
 		log.Printf("[control] reset: active=%q phase=%q", action.Target, s.phase)
@@ -316,6 +322,14 @@ func (s *MockSolanaServer) handleAction(w http.ResponseWriter, r *http.Request) 
 	case "include_vote_account":
 		s.voteAccountExcluded = false
 		log.Printf("[control] include_vote_account")
+
+	case "remove_bls_key":
+		s.blsKeyRemoved = true
+		log.Printf("[control] remove_bls_key")
+
+	case "restore_bls_key":
+		s.blsKeyRemoved = false
+		log.Printf("[control] restore_bls_key")
 
 	default:
 		s.mu.Unlock()
@@ -559,6 +573,36 @@ func (s *MockSolanaServer) getFeatureAccountInfo() AccountInfoResult {
 		Owner:    "Feature111111111111111111111111111111111111",
 	}
 	return result
+}
+
+// getVoteAccountsData answers getMultipleAccounts for vote accounts with the start of a
+// VoteStateV4: the version, then zeros up to the BLS pubkey option. Each account's BLS pubkey is
+// made from its address, so keys are unique; remove_bls_key clears the active account's key.
+func (s *MockSolanaServer) getVoteAccountsData(params any) map[string]any {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	const blsOptionOffset = 4 + 4*32 + 2 + 2 + 8
+	var pubkeys []any
+	if list, ok := params.([]any); ok && len(list) > 0 {
+		pubkeys, _ = list[0].([]any)
+	}
+	values := make([]*AccountInfo, 0, len(pubkeys))
+	for _, p := range pubkeys {
+		pubkey, _ := p.(string)
+		data := make([]byte, blsOptionOffset+1+48)
+		binary.LittleEndian.PutUint32(data, 3)
+		if !(s.blsKeyRemoved && pubkey == activeVotePubkey) {
+			data[blsOptionOffset] = 1
+			copy(data[blsOptionOffset+1:], pubkey)
+		}
+		values = append(values, &AccountInfo{
+			Data:     []string{base64.StdEncoding.EncodeToString(data), "base64"},
+			Lamports: 1_000_000,
+			Owner:    "Vote111111111111111111111111111111111111111",
+		})
+	}
+	return map[string]any{"context": map[string]any{"slot": s.processedSlot()}, "value": values}
 }
 
 // getAgGenesisCert returns the Alpenglow genesis certificate, or nil before Alpenglow. A

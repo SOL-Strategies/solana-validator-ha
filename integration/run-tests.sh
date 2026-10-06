@@ -69,8 +69,8 @@ echo ""
 print_status "Running integration test scenarios..."
 echo "=========================================="
 
-# Poll orchestrator logs until it finishes (15-minute timeout; 11 scenarios take ~10 minutes)
-timeout=900
+# Poll orchestrator logs until it finishes (20-minute timeout; 13 scenarios take ~12 minutes)
+timeout=1200
 start_time=$(date +%s)
 
 while true; do
