@@ -137,3 +137,18 @@ func TestIncAlpenglowVerdict(t *testing.T) {
 		}
 	}
 }
+
+func TestIncFailoverVeto(t *testing.T) {
+	m, _ := newConsensusTestMetrics(cache.State{})
+	m.IncFailoverVeto("cluster_stalled")
+	m.IncFailoverVeto("cluster_stalled")
+	m.IncFailoverVeto("local_not_migrated")
+	families := gatherByName(t, m)
+
+	for reason, want := range map[string]float64{"cluster_stalled": 2, "local_not_migrated": 1} {
+		got := metricValue(t, families[metricsNamespacePrefix+"failover_vetoes_total"], map[string]string{"reason": reason, "validator_name": "test-validator"})
+		if got != want {
+			t.Errorf("failover_vetoes_total{reason=%q} = %g, want %g", reason, got, want)
+		}
+	}
+}

@@ -1,0 +1,42 @@
+name: phase-sticky
+description: >
+  Once the HA clients have seen the Alpenglow genesis certificate they stay in the alpenglow
+  phase, even when an RPC later answers as if the cluster were still on TowerBFT.
+
+initial_state:
+  active_validator: validator-1
+
+steps:
+  - name: switch the cluster to Alpenglow
+    action: set_phase
+    phase: alpenglow
+
+  - name: the HA client is in the alpenglow phase
+    action: assert_metric
+    target: validator-1
+    timeout: 20s
+    metric: solana_validator_ha_consensus_phase
+    labels:
+      phase: alpenglow
+    min_value: 1
+
+  - name: RPC answers as if on TowerBFT
+    action: set_phase
+    phase: tower
+
+  - name: wait for several detection intervals
+    action: wait
+    duration: 10s
+
+  - name: the HA client is still in the alpenglow phase
+    action: assert_metric
+    target: validator-1
+    timeout: 5s
+    metric: solana_validator_ha_consensus_phase
+    labels:
+      phase: alpenglow
+    min_value: 1
+
+  - name: restore the Alpenglow phase on the mock
+    action: set_phase
+    phase: alpenglow

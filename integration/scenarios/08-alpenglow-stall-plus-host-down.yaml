@@ -1,0 +1,38 @@
+name: alpenglow-stall-plus-host-down
+description: >
+  During a cluster-wide stall the active host goes down. Gossip absence is never vetoed, since a
+  dead host is dead during a stall too, so a passive takes over.
+
+initial_state:
+  active_validator: validator-1
+
+steps:
+  - name: switch the cluster to Alpenglow
+    action: set_phase
+    phase: alpenglow
+
+  - name: wait for detection and the warm-up
+    action: wait
+    duration: 12s
+
+  - name: stall finalization
+    action: stall_finalization
+
+  - name: wait until the stall is detected
+    action: wait
+    duration: 20s
+
+  - name: disconnect active validator
+    action: disconnect
+    target: validator-1
+
+  - name: a passive takes over through gossip absence
+    action: assert
+    timeout: 45s
+    active_count: 1
+    state:
+      validator-1:
+        role: passive
+
+  - name: resume finalization
+    action: resume_finalization

@@ -1,0 +1,43 @@
+name: local-not-migrated
+description: >
+  Under Alpenglow a passive whose local validator reports no Alpenglow genesis certificate must
+  not be promoted, even when it is the highest-ranked candidate. The next candidate takes over.
+
+initial_state:
+  active_validator: validator-1
+
+steps:
+  - name: switch the cluster to Alpenglow
+    action: set_phase
+    phase: alpenglow
+
+  - name: validator-2 has not migrated
+    action: set_local_genesis
+    target: validator-2
+    value: 0
+
+  - name: wait for detection and the warm-up
+    action: wait
+    duration: 12s
+
+  - name: disconnect active validator
+    action: disconnect
+    target: validator-1
+
+  - name: validator-3 takes over instead of the higher-ranked validator-2
+    action: assert
+    timeout: 45s
+    active_count: 1
+    state:
+      validator-2:
+        role: passive
+      validator-3:
+        role: active
+
+  - name: validator-2 recorded why it stood down
+    action: assert_metric
+    target: validator-2
+    metric: solana_validator_ha_failover_vetoes_total
+    labels:
+      reason: local_not_migrated
+    min_value: 1

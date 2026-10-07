@@ -1,0 +1,49 @@
+name: vote-account-not-in-voter-set
+description: >
+  Under Alpenglow the active's vote account loses its BLS pubkey. It stays staked and listed by
+  getVoteAccounts, but Agave leaves it out of the voter set, so its votes stop landing on any
+  node. The account holds too little stake to close the network stake gate, so only the
+  voter-set check keeps the passives from taking over.
+
+initial_state:
+  active_validator: validator-1
+
+steps:
+  - name: switch the cluster to Alpenglow
+    action: set_phase
+    phase: alpenglow
+
+  - name: wait for detection and the warm-up
+    action: wait
+    duration: 12s
+
+  - name: the active vote account loses its BLS pubkey
+    action: remove_bls_key
+
+  - name: its votes stop landing
+    action: set_vote_lag
+    target: validator-1
+    value: 200
+
+  - name: wait longer than the leaderless threshold
+    action: wait
+    duration: 20s
+
+  - name: no failover
+    action: assert
+    timeout: 10s
+    active_count: 1
+    state:
+      validator-1:
+        role: active
+
+  - name: the exclusion was vetoed
+    action: assert_metric
+    target: validator-2
+    metric: solana_validator_ha_alpenglow_vote_verdicts_total
+    labels:
+      verdict: vote_account_excluded
+    min_value: 1
+
+  - name: restore the BLS pubkey
+    action: restore_bls_key

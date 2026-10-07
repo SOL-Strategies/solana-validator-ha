@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,10 +21,10 @@ import (
 
 // Scenario is a single test scenario loaded from a YAML file.
 type Scenario struct {
-	Name        string       `yaml:"name"`
-	Description string       `yaml:"description"`
+	Name         string       `yaml:"name"`
+	Description  string       `yaml:"description"`
 	InitialState InitialState `yaml:"initial_state"`
-	Steps       []Step       `yaml:"steps"`
+	Steps        []Step       `yaml:"steps"`
 }
 
 // InitialState describes the cluster state to establish before the scenario runs.
@@ -39,13 +40,26 @@ type Step struct {
 	// used by: wait
 	Duration string `yaml:"duration,omitempty"`
 
-	// used by: set_active, disconnect, reconnect, set_unhealthy, set_healthy
+	// used by: set_active, disconnect, reconnect, set_unhealthy, set_healthy, set_vote_lag,
+	// set_local_genesis, assert_metric
 	Target string `yaml:"target,omitempty"`
 
-	// used by: assert
+	// used by: set_phase (tower, migrating or alpenglow)
+	Phase string `yaml:"phase,omitempty"`
+
+	// used by: set_vote_lag (slots), set_local_genesis (slot, 0 for none)
+	Value uint64 `yaml:"value,omitempty"`
+
+	// used by: assert, assert_metric
 	Timeout     string                       `yaml:"timeout,omitempty"`
 	State       map[string]ValidatorExpected `yaml:"state,omitempty"`
 	ActiveCount *int                         `yaml:"active_count,omitempty"`
+
+	// used by: assert_metric. Passes once Target exports a series of Metric whose labels include
+	// Labels with a value of at least MinValue.
+	Metric   string            `yaml:"metric,omitempty"`
+	Labels   map[string]string `yaml:"labels,omitempty"`
+	MinValue float64           `yaml:"min_value,omitempty"`
 }
 
 // ValidatorExpected is the expected state of a single validator in an assert step.
@@ -105,22 +119,30 @@ func loadScenarios(dir string) ([]Scenario, error) {
 
 // ── Mock control ──────────────────────────────────────────────────────────────
 
-func (o *Orchestrator) callAction(action, target string) error {
-	body, _ := json.Marshal(map[string]string{"action": action, "target": target})
+// mockAction is the control request accepted by the mock's /action endpoint.
+type mockAction struct {
+	Action string `json:"action"`
+	Target string `json:"target"`
+	Phase  string `json:"phase,omitempty"`
+	Value  uint64 `json:"value,omitempty"`
+}
+
+func (o *Orchestrator) callAction(action mockAction) error {
+	body, _ := json.Marshal(action)
 	resp, err := http.Post(o.mockURL+"/action", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("POST /action %s %s: %w", action, target, err)
+		return fmt.Errorf("POST /action %+v: %w", action, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("POST /action %s %s: status %d", action, target, resp.StatusCode)
+		return fmt.Errorf("POST /action %+v: status %d", action, resp.StatusCode)
 	}
 	return nil
 }
 
 // resetState brings the cluster to a clean initial state before each scenario.
 func (o *Orchestrator) resetState(initialActive string) error {
-	if err := o.callAction("reset", initialActive); err != nil {
+	if err := o.callAction(mockAction{Action: "reset", Target: initialActive}); err != nil {
 		return fmt.Errorf("reset: %w", err)
 	}
 	log.Printf("[reset] cluster reset: active_validator=%q", initialActive)
@@ -185,11 +207,17 @@ func (o *Orchestrator) executeStep(step Step) error {
 		time.Sleep(d)
 		return nil
 
-	case "set_active", "disconnect", "reconnect", "set_unhealthy", "set_healthy":
-		return o.callAction(step.Action, step.Target)
+	case "set_active", "disconnect", "reconnect", "set_unhealthy", "set_healthy",
+		"set_phase", "set_vote_lag", "stall_finalization", "resume_finalization",
+		"set_local_genesis", "exclude_vote_account", "include_vote_account",
+		"remove_bls_key", "restore_bls_key":
+		return o.callAction(mockAction{Action: step.Action, Target: step.Target, Phase: step.Phase, Value: step.Value})
 
 	case "assert":
 		return o.executeAssert(step)
+
+	case "assert_metric":
+		return o.executeAssertMetric(step)
 
 	default:
 		return fmt.Errorf("unknown action: %q", step.Action)
@@ -274,6 +302,75 @@ func (o *Orchestrator) executeAssert(step Step) error {
 	}
 	sort.Strings(parts)
 	return fmt.Errorf("assert timed out after %s: %s", timeout, strings.Join(parts, " "))
+}
+
+// executeAssertMetric polls a validator's /metrics until a matching series reaches MinValue.
+func (o *Orchestrator) executeAssertMetric(step Step) error {
+	timeout := 30 * time.Second
+	if step.Timeout != "" {
+		d, err := time.ParseDuration(step.Timeout)
+		if err != nil {
+			return fmt.Errorf("invalid timeout %q: %w", step.Timeout, err)
+		}
+		timeout = d
+	}
+
+	var last string
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		value, found, err := o.metricValue(step.Target, step.Metric, step.Labels)
+		switch {
+		case err != nil:
+			last = err.Error()
+		case !found:
+			last = "no matching series"
+		case value >= step.MinValue:
+			log.Printf("  assert_metric passed: %s %s%v = %g (want >= %g)", step.Target, step.Metric, step.Labels, value, step.MinValue)
+			return nil
+		default:
+			last = fmt.Sprintf("value %g", value)
+		}
+		log.Printf("  waiting... %s %s%v: %s (want >= %g)", step.Target, step.Metric, step.Labels, last, step.MinValue)
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("assert_metric timed out after %s: %s %s%v: %s (want >= %g)", timeout, step.Target, step.Metric, step.Labels, last, step.MinValue)
+}
+
+// metricValue returns the value of the first series of metric on a validator whose labels
+// include all of wantLabels.
+func (o *Orchestrator) metricValue(validator, metric string, wantLabels map[string]string) (value float64, found bool, err error) {
+	resp, err := http.Get(o.validatorURLs[validator] + "/metrics")
+	if err != nil {
+		return 0, false, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, false, err
+	}
+
+	for _, line := range strings.Split(string(body), "\n") {
+		if !strings.HasPrefix(line, metric+"{") && !strings.HasPrefix(line, metric+" ") {
+			continue
+		}
+		matches := true
+		for name, want := range wantLabels {
+			if !strings.Contains(line, fmt.Sprintf("%s=%q", name, want)) {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		fields := strings.Fields(line)
+		value, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			return 0, false, fmt.Errorf("parsing %q: %w", line, err)
+		}
+		return value, true, nil
+	}
+	return 0, false, nil
 }
 
 // ── Scenario runner ───────────────────────────────────────────────────────────

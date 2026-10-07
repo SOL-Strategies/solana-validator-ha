@@ -17,3 +17,12 @@ func (s *State) SetActivePeerDelinquentForTest(v bool) {
 func (s *State) SetRefreshNoOpForTest(v bool) {
 	s.skipRefreshForTest = v
 }
+
+// SetVoteEvidenceForTest seeds the outcome of the last Refresh: why it was leaderless, why the
+// active's missing votes were vetoed, and whether the leaderless streak saw the active missing
+// from gossip. Intended for tests that drive ensureHAState without a real RPC refresh.
+func (s *State) SetVoteEvidenceForTest(leaderlessReason, vetoReason string, streakHasGossipAbsent bool) {
+	s.leaderlessReason = leaderlessReason
+	s.vetoReason = vetoReason
+	s.streakHasGossipAbsent = streakHasGossipAbsent
+}

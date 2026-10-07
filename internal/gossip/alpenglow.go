@@ -32,10 +32,13 @@ const (
 	// VetoVoteAccountExcluded means the active's vote account cannot vote under Alpenglow at all,
 	// for example because it is unstaked or left out of the voter set. Any node using it would fail.
 	VetoVoteAccountExcluded = "vote_account_excluded"
+	// VetoFailoverIneffective means the active identity already moved to another node while the
+	// vote account's votes were not landing, and they still are not. The fault is with the shared
+	// vote account, so another failover would not help either.
+	VetoFailoverIneffective = "failover_ineffective"
 )
 
-// Verdicts of the Alpenglow vote rule. VetoClusterStalled and VetoVoteAccountExcluded are
-// verdicts too.
+// Verdicts of the Alpenglow vote rule. The veto reasons are verdicts too.
 const (
 	VerdictVoting    = "voting"
 	VerdictNotVoting = "not_voting"
@@ -169,19 +172,10 @@ func (p *State) inAlpenglowWarmup() bool {
 // isActiveNodeVoting judges whether the node holding the active identity is voting, using the
 // evidence the current consensus phase supports.
 func (p *State) isActiveNodeVoting(node solanagorpc.GetClusterNodesResult) bool {
-	alpenglowRules := p.consensus.Phase == consensus.PhaseAlpenglow && !p.inAlpenglowWarmup()
-	if p.observeOnly {
-		// TowerBFT rules decide in every phase, as before Alpenglow support. The Alpenglow rule is
-		// evaluated alongside, so its verdicts can be watched before they are acted on.
-		if alpenglowRules {
-			p.observeAlpenglowVerdict(node, p.evaluateAlpenglowVoting(node))
-		}
-		return p.isNodeActiveAndVoting(node)
-	}
 	switch {
 	case p.consensus.Phase == consensus.PhaseTower:
 		return p.isNodeActiveAndVoting(node)
-	case alpenglowRules:
+	case p.consensus.Phase == consensus.PhaseAlpenglow && !p.inAlpenglowWarmup():
 		return p.applyAlpenglowVerdict(node, p.evaluateAlpenglowVoting(node))
 	default:
 		// While the phase is unknown, during the migration and during the Alpenglow warm-up,
@@ -192,8 +186,8 @@ func (p *State) isActiveNodeVoting(node solanagorpc.GetClusterNodesResult) bool 
 
 // alpenglowVerdict is the outcome of judging a node by the Alpenglow vote rule.
 type alpenglowVerdict struct {
-	// name is VerdictVoting, VerdictNotVoting, VerdictUnknown, VetoClusterStalled or
-	// VetoVoteAccountExcluded.
+	// name is VerdictVoting, VerdictNotVoting, VerdictUnknown, VetoClusterStalled,
+	// VetoVoteAccountExcluded or VetoFailoverIneffective.
 	name string
 	// lag is set when lagKnown is true.
 	lag      rpc.VoteLag
@@ -242,6 +236,7 @@ func (p *State) evaluateAlpenglowVoting(node solanagorpc.GetClusterNodesResult) 
 	switch {
 	case lagSlots <= threshold:
 		verdict.name = VerdictVoting
+		p.endUnvotedSpell()
 	case !p.finalization.isLive(now, p.alpenglowCfg.FinalizationStallDuration):
 		verdict.name = VetoClusterStalled
 		verdict.why = fmt.Sprintf("finalized slot %d has not advanced", p.finalization.maxSlot)
@@ -253,8 +248,31 @@ func (p *State) evaluateAlpenglowVoting(node solanagorpc.GetClusterNodesResult) 
 		verdict.why = fmt.Sprintf("network stake ratio %.3f is stale or below the minimum %.3f", ratio, p.alpenglowCfg.NetworkCurrentStakeRatioMin)
 	default:
 		verdict.name = VerdictNotVoting
+		p.vetoIneffectiveNotVoting(ctx, node, votePubkey, &verdict)
 	}
 	return verdict
+}
+
+// vetoIneffectiveNotVoting turns a not_voting verdict into a veto when a failover cannot help:
+// the vote account is not in the Alpenglow voter set, or the active identity has already moved
+// while the votes were not landing.
+func (p *State) vetoIneffectiveNotVoting(ctx context.Context, node solanagorpc.GetClusterNodesResult, votePubkey solana.PublicKey, verdict *alpenglowVerdict) {
+	excludedWhy, err := p.voterSetExclusion(ctx, votePubkey)
+	switch {
+	case err != nil:
+		// The votes are still not landing, so judge the node by them alone; a repeat failover is
+		// still caught below.
+		p.logger.Warn("failed to check that the active vote account is in the Alpenglow voter set", "error", err)
+	case excludedWhy != "":
+		verdict.name = VetoVoteAccountExcluded
+		verdict.why = fmt.Sprintf("vote account %s is not in the Alpenglow voter set: %s", votePubkey, excludedWhy)
+		return
+	}
+	nodeIP := strings.Split(*node.Gossip, ":")[0]
+	if why, ineffective := p.failoverIneffective(nodeIP, votePubkey); ineffective {
+		verdict.name = VetoFailoverIneffective
+		verdict.why = why
+	}
 }
 
 // applyAlpenglowVerdict acts on a verdict and reports whether the node counts as voting.
@@ -265,6 +283,13 @@ func (p *State) applyAlpenglowVerdict(node solanagorpc.GetClusterNodesResult, ve
 	case VerdictUnknown:
 		p.logger.Error("failed to judge the active peer's votes - assuming it is voting", "why", verdict.why)
 		return true // forgive rpc error and assume innocence lest we trigger a false-positive failover
+	case VetoFailoverIneffective:
+		p.vetoReason = VetoFailoverIneffective
+		p.logger.Error(fmt.Sprintf("‼️ %s votes are still not landing after the active identity moved - the shared vote account is at fault, so another failover would not help", p.nodeLabel(node)),
+			"detail", verdict.why,
+			"vote_lag_slots", verdict.lag.Slots(),
+		)
+		return true
 	case VetoVoteAccountExcluded:
 		p.vetoReason = VetoVoteAccountExcluded
 		p.logger.Error(fmt.Sprintf("‼️ %s vote account cannot vote under Alpenglow - a failover cannot fix this, so it is not counted against the active peer", p.nodeLabel(node)),
@@ -294,24 +319,6 @@ func (p *State) applyAlpenglowVerdict(node solanagorpc.GetClusterNodesResult, ve
 		"last_voted_at_slot", lag.LastVote,
 	)
 	return false
-}
-
-// observeAlpenglowVerdict records a verdict without acting on it, and logs what the Alpenglow
-// rule would have concluded when that differs from "voting".
-func (p *State) observeAlpenglowVerdict(node solanagorpc.GetClusterNodesResult, verdict alpenglowVerdict) {
-	p.recordAlpenglowVerdict(verdict)
-	keyvals := []any{"verdict", verdict.name, "vote_lag_slots", verdict.lag.Slots(), "threshold", p.alpenglowCfg.VoteLagSlotsThreshold}
-	if verdict.why != "" {
-		keyvals = append(keyvals, "why", verdict.why)
-	}
-	switch verdict.name {
-	case VerdictNotVoting:
-		p.logger.Warn(fmt.Sprintf("observe-only: under Alpenglow rules %s would count as not voting - no action taken", p.nodeLabel(node)), keyvals...)
-	case VerdictVoting:
-		p.logger.Debug("observe-only: under Alpenglow rules the active peer is voting", keyvals...)
-	default:
-		p.logger.Info("observe-only: under Alpenglow rules the active peer's missing votes would be vetoed or unknown - no action taken", keyvals...)
-	}
 }
 
 // recordAlpenglowVerdict keeps a verdict's name and measured vote lag for the last Refresh.
