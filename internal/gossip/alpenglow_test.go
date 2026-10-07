@@ -358,6 +358,18 @@ func TestRefresh_AlpenglowVoterSet(t *testing.T) {
 			wantVerdict:  VetoVoteAccountExcluded,
 		},
 		{
+			name:         "identity shared with a staked account without a BLS pubkey",
+			voteAccounts: voteAccounts(testActivePubkey, true),
+			blsAccounts:  blsKeyAccounts(1, 0),
+			wantVerdict:  VerdictNotVoting,
+		},
+		{
+			name:         "no BLS pubkey and identity shared with an account that has one",
+			voteAccounts: voteAccounts(testActivePubkey, true),
+			blsAccounts:  blsKeyAccounts(0, 2),
+			wantVerdict:  VetoVoteAccountExcluded,
+		},
+		{
 			name:         "no stake in the current epoch",
 			voteAccounts: voteAccounts(testOtherNodePubkey, false),
 			blsAccounts:  blsKeyAccounts(2),

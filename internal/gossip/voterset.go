@@ -28,11 +28,12 @@ type voterSetCheck struct {
 // "" when it is in it. A staked account can still be listed by getVoteAccounts while Agave leaves
 // it out, and its votes then never count.
 //
-// Agave builds the voter set from the epoch's stake snapshot (BLSPubkeyToRankMap::new) and leaves
-// out every staked account that has no BLS pubkey, shares its BLS pubkey with another staked
-// account, or shares its node identity with another staked account. This check applies the same
+// Agave builds the voter set from the epoch's stake snapshot (BLSPubkeyToRankMap::new). It skips
+// staked accounts without a valid BLS pubkey, then leaves out every remaining account that shares
+// its BLS pubkey or node identity with another remaining account. This check applies the same
 // rules to the accounts' current state, which matches the snapshot unless a key or identity
-// changed since it was taken. A BLS pubkey that is not a valid curve point is not detected.
+// changed since it was taken. A BLS pubkey that is not a valid curve point is not detected: such
+// an account is treated as a candidate, so it can wrongly exclude an account sharing its identity.
 func (p *State) voterSetExclusion(ctx context.Context, votePubkey solana.PublicKey) (string, error) {
 	now := p.now()
 	if c := p.voterSet; c.votePubkey.Equals(votePubkey) && now.Sub(c.checkedAt) < voterSetRecheckInterval {
@@ -75,18 +76,21 @@ func voterSetExclusionReason(votePubkey solana.PublicKey, staked []solanagorpc.V
 	if i < 0 {
 		return "it has no stake in the current epoch"
 	}
-	identity := staked[i].NodePubkey
-	if n := countFunc(staked, func(a solanagorpc.VoteAccountsResult) bool { return a.NodePubkey.Equals(identity) }); n > 1 {
-		return fmt.Sprintf("its identity %s is set on %d staked vote accounts", identity, n)
-	}
 	key, ok := keys[votePubkey]
 	if !ok {
 		return "it has no BLS pubkey"
 	}
-	if n := countFunc(staked, func(a solanagorpc.VoteAccountsResult) bool {
-		other, ok := keys[a.VotePubkey]
-		return ok && other == key
-	}); n > 1 {
+	// Agave skips accounts without a BLS pubkey before counting duplicates, so only the
+	// remaining candidates can exclude each other.
+	candidates := slices.DeleteFunc(slices.Clone(staked), func(a solanagorpc.VoteAccountsResult) bool {
+		_, ok := keys[a.VotePubkey]
+		return !ok
+	})
+	identity := staked[i].NodePubkey
+	if n := countFunc(candidates, func(a solanagorpc.VoteAccountsResult) bool { return a.NodePubkey.Equals(identity) }); n > 1 {
+		return fmt.Sprintf("its identity %s is set on %d vote accounts with BLS pubkeys", identity, n)
+	}
+	if n := countFunc(candidates, func(a solanagorpc.VoteAccountsResult) bool { return keys[a.VotePubkey] == key }); n > 1 {
 		return fmt.Sprintf("its BLS pubkey is set on %d staked vote accounts", n)
 	}
 	return ""
