@@ -26,3 +26,9 @@ func (s *State) SetVoteEvidenceForTest(leaderlessReason, vetoReason string, stre
 	s.vetoReason = vetoReason
 	s.streakHasGossipAbsent = streakHasGossipAbsent
 }
+
+// SetLastRefreshHadRPCErrorForTest seeds whether the last Refresh failed to reach the cluster RPC.
+// Intended for tests that drive ensureHAState without a real RPC refresh.
+func (s *State) SetLastRefreshHadRPCErrorForTest(v bool) {
+	s.lastRefreshHadRPCError = v
+}

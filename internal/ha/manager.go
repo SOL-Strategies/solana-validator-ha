@@ -55,7 +55,22 @@ type Manager struct {
 	// per streak rather than one per sample.
 	lastLeaderlessReason string
 	warnedBypassIgnored  bool
+	// isolation detects that this node, while active, has lost the network.
+	isolation *isolationMonitor
+	// demotedWithLocalRPCDown is set when the passive command succeeded but the local RPC did
+	// not answer, i.e. the validator was stopped. It stops the passive command from being re-run
+	// on every poll until the local RPC answers again.
+	demotedWithLocalRPCDown bool
 }
+
+// Recording outcomes of this node running the passive command.
+const (
+	outcomeDemotedPassive = "demoted_passive"
+	// outcomeDemotedValidatorDown means the passive command succeeded while the local validator
+	// was not answering RPC, so its identity could not be confirmed.
+	outcomeDemotedValidatorDown = "demoted_validator_down"
+	outcomeDemotionFailed       = "demotion_failed"
+)
 
 // vetoOutcomes maps a gossip veto reason to the recording outcome of the failover it aborts.
 var vetoOutcomes = map[string]string{
@@ -188,16 +203,22 @@ func (m *Manager) initialize() error {
 		Alpenglow:                      m.cfg.Failover.Alpenglow,
 	})
 
-	// create consensus detector; it gets its own local RPC client because the local state's
-	// client is used by the health tracker goroutine
+	// the consensus detector and the isolation monitor get their own local RPC client, shared on
+	// the HA monitor goroutine, because the local state's client is used by the health tracker
+	// goroutine
+	localRPC := rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL)
+
+	// create consensus detector
 	m.logger.Debug("creating consensus detector", "mode", m.cfg.Cluster.Consensus.Mode)
 	m.detector = consensus.NewDetector(consensus.Options{
 		Mode:              m.cfg.Cluster.Consensus.Mode,
 		DetectionInterval: m.cfg.Cluster.Consensus.DetectionIntervalDuration,
 		ClusterRPC:        clusterRPC,
-		LocalRPC:          rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL),
+		LocalRPC:          localRPC,
 		LogPrefix:         m.logPrefix,
 	})
+
+	m.isolation = newIsolationMonitor(localRPC, m.cfg.Failover.LeaderlessSamplesThreshold, m.cfg.Failover.Isolation.LocalSlotStallDuration)
 
 	// create local state
 	m.logger.Debug("creating local state")
@@ -550,6 +571,10 @@ func (m *Manager) ensureHAState() {
 		return
 	}
 
+	if m.demoteIfIsolated() {
+		return
+	}
+
 	// if there is an active peer found in the last failover.leaderless_samples_threshold - we are good
 	// having a lookback grace period is important to allow for RPC glitches and other issues
 	if !m.gossipState.LeaderlessSamplesExceedsThreshold(m.cfg.Failover.LeaderlessSamplesThreshold) {
@@ -593,15 +618,15 @@ func (m *Manager) ensureHAState() {
 
 	// if we don't see ourselves in gossip - evaluate whether to become passive
 	if m.isSelfNotInGossip() {
+		if m.alreadyDemotedWithLocalRPCDown() {
+			m.logger.Debug("already demoted and the local validator is still not answering RPC - not re-running the passive command")
+			return
+		}
+
 		// If RPC failed, we likely have network connectivity issues - become passive
 		if m.gossipState.LastRefreshHadRPCError() {
 			m.logger.Error("we do not appear in gossip due to RPC error (possible network connectivity issue) - ensuring we are passive")
-			m.ensurePassive()
-			if m.localState.IsSelfPassive() {
-				m.finishRecording("demoted_passive", fromNode, "unknown")
-			} else {
-				m.finishRecording("demotion_failed", fromNode, "unknown")
-			}
+			m.finishRecording(m.ensurePassive(), fromNode, "unknown")
 			return
 		}
 
@@ -620,12 +645,7 @@ func (m *Manager) ensureHAState() {
 
 		// Other peers are visible and could take over - safe to become passive
 		m.logger.Error("we do not appear in gossip but other peers are visible - ensuring we are passive so a peer can take over")
-		m.ensurePassive()
-		if m.localState.IsSelfPassive() {
-			m.finishRecording("demoted_passive", fromNode, "unknown")
-		} else {
-			m.finishRecording("demotion_failed", fromNode, "unknown")
-		}
+		m.finishRecording(m.ensurePassive(), fromNode, "unknown")
 		return
 	}
 	m.logger.Debug("we are in gossip", "pubkey", m.selfGossipPubkey(), "public_ip", m.peerSelf.IP)
@@ -859,10 +879,54 @@ func (m *Manager) delinquencyBypassAllowed() bool {
 	return false
 }
 
+// demoteIfIsolated runs the passive command when this node is active and has lost the network:
+// the cluster RPC has failed for failover.leaderless_samples_threshold consecutive polls and the
+// local processed slot has not moved for failover.isolation.local_slot_stall_duration. It
+// returns true when it acted. A cluster RPC outage alone, with the local slot still moving,
+// leaves the node alone, so an RPC provider outage cannot take a healthy active offline.
+func (m *Manager) demoteIfIsolated() bool {
+	if !m.cfg.Failover.Isolation.Enabled {
+		return false
+	}
+	m.isolation.observe(m.ctx, m.gossipState.LastRefreshHadRPCError())
+	if !m.isolation.isolated() || !m.localState.IsSelfActive() {
+		return false
+	}
+
+	m.logger.Error("cluster RPC unreachable and our local slot has stopped - we appear to have lost the network, ensuring we are passive",
+		"cluster_rpc_failures", m.isolation.clusterRPCFailures,
+		"local_slot", m.isolation.localSlot,
+		"local_slot_stalled_for", m.isolation.localSlotStalledFor().Round(time.Second),
+	)
+	if m.activeRecorder != nil {
+		m.activeRecorder.AddEvent("isolation_detected", fmt.Sprintf("cluster_rpc_failures=%d local_slot=%d local_slot_stalled_for=%s",
+			m.isolation.clusterRPCFailures, m.isolation.localSlot, m.isolation.localSlotStalledFor().Round(time.Second)))
+		m.checkpointRecording()
+	}
+	m.finishRecording(m.ensurePassive(), m.cfg.Validator.Name, "unknown")
+	return true
+}
+
+// alreadyDemotedWithLocalRPCDown reports whether an earlier demotion succeeded while the local
+// validator was not answering RPC, and it still is not. It clears that state once RPC answers,
+// so a validator that comes back active is demoted again.
+func (m *Manager) alreadyDemotedWithLocalRPCDown() bool {
+	if !m.demotedWithLocalRPCDown {
+		return false
+	}
+	if _, err := m.localState.SelfIdentity(); err != nil {
+		return true
+	}
+	m.demotedWithLocalRPCDown = false
+	return false
+}
+
 // ensurePassive calls a user-specified command that should be idempotent in setting the passive role
 // safest thing would be to to ensure validator service always starts with passive identity
-// and the failover.passive.command simply retsarts the validator service or waits for it to start up
-func (m *Manager) ensurePassive() {
+// and the failover.passive.command simply retsarts the validator service or waits for it to start up.
+// It returns the recording outcome: outcomeDemotedPassive, outcomeDemotedValidatorDown or
+// outcomeDemotionFailed.
+func (m *Manager) ensurePassive() (outcome string) {
 	var err error
 	passivePubkey := m.cfg.Validator.Identities.PassivePubkey()
 	m.logger.Info("becoming passive", "pubkey", passivePubkey)
@@ -894,7 +958,7 @@ func (m *Manager) ensurePassive() {
 	}
 	if err != nil {
 		m.logger.Error("failed to run pre-passive hooks", "error", err)
-		return
+		return outcomeDemotionFailed
 	}
 
 	// run passive command
@@ -915,7 +979,7 @@ func (m *Manager) ensurePassive() {
 	m.recordStep("passive_command_complete", commandStarted, err)
 	if err != nil {
 		m.logger.Warn("failed to run passive command", "error", err)
-		return
+		return outcomeDemotionFailed
 	}
 
 	// run post hooks
@@ -936,14 +1000,28 @@ func (m *Manager) ensurePassive() {
 	}
 
 	// check to ensure the call to the failover.passive.command was successful
-	if !m.localState.IsSelfPassive() {
-		m.logger.Error("we are not passive as reported by local rpc - unable to become active in failover",
+	identity, identityErr := m.localState.SelfIdentity()
+	if identityErr != nil {
+		// The passive command succeeded, so a local RPC that does not answer means the validator
+		// is stopped or restarting, not that it is still active.
+		m.logger.Warn("passive command succeeded but the local validator is not answering RPC - treating it as stopped",
+			"passive_pubkey", passivePubkey,
+			"error", identityErr,
+		)
+		if m.activeRecorder != nil {
+			m.activeRecorder.AddEvent("passive_identity_unverified", "local_rpc=unreachable")
+		}
+		m.demotedWithLocalRPCDown = true
+		return outcomeDemotedValidatorDown
+	}
+	if identity == m.cfg.Validator.Identities.ActivePubkey() {
+		m.logger.Error("passive command succeeded but local rpc still reports the active identity - check failover.passive.command",
 			"passive_pubkey", passivePubkey,
 		)
 		if m.activeRecorder != nil {
 			m.activeRecorder.AddEvent("passive_identity_unconfirmed", fmt.Sprintf("expected=%s", passivePubkey))
 		}
-		return
+		return outcomeDemotionFailed
 	}
 
 	m.logger.Debug("we are confirmed to be passive as reported by local rpc", "passive_pubkey", passivePubkey)
@@ -958,17 +1036,18 @@ func (m *Manager) ensurePassive() {
 	// if we are not in gossip, warn - we may be starting up or dropped from the network
 	if m.isSelfNotInGossip() {
 		m.logger.Warn("we are not in gossip after becoming passive", "passive_pubkey", passivePubkey)
-		return
+		return outcomeDemotedPassive
 	}
 
 	// if we are in gossip but not passive, show error - failover.passive.command has likely fucked up
 	if !m.localState.IsSelfPassive() {
 		m.logger.Error("we are in gossip but not passive - this should not happen check failover.passive.command logic", "passive_pubkey", passivePubkey)
-		return
+		return outcomeDemotionFailed
 	}
 
 	// we are passive by local rpc and in gossip
 	m.logger.Info("we are confirmed to be passive", "passive_pubkey", passivePubkey)
+	return outcomeDemotedPassive
 }
 
 // ensureActive makes the node active - this should be idempotent in setting the  active role

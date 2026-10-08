@@ -50,6 +50,15 @@ Alpenglow genesis certificate it never leaves the alpenglow phase, and `reset` k
 | `12-vote-account-not-in-voter-set` | Active vote account staked but without a BLS pubkey → no failover, verdict `vote_account_excluded` |
 | `13-failover-ineffective` | Votes do not land on any node → one takeover only, `failover_ineffective` vetoes counted |
 
+### Scenario 14: Network isolation
+
+`fail_cluster_rpc` makes cluster RPC calls from one validator fail (the mock tells callers apart by
+their docker IP); `isolate` also freezes that validator's local processed slot.
+
+| Scenario | Expected behaviour |
+|---|---|
+| `14-network-isolation` | Cluster RPC down with the local slot moving → active stays; local slot also frozen → active demotes itself and a passive takes over |
+
 ## Failover Logic
 
 The current system uses a **first-responder wins** approach:
