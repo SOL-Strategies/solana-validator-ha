@@ -588,6 +588,8 @@ Local `/health` does not help here: under Alpenglow it stayed `ok` for a node th
 
 To reduce the chance that an RPC outage and a local stall coincide, configure two or more independent `cluster.rpc_urls`.
 
+**Residual risk.** Isolation demotion does not change the takeover rule: a passive still takes over when the active is missing from, or not voting in, the view its cluster RPC returns. A cluster RPC whose gossip view is persistently incomplete can therefore still cause a rare false takeover, and the healthy active keeps running alongside the new one, because this path only acts when the active's own cluster RPC fails and its local slot stalls. Several independent `cluster.rpc_urls` reduce that risk; no RPC-based view can rule it out.
+
 ## Failover Priority
 
 By default, when multiple passive nodes are all eligible to take over, they use their public IP addresses (ascending sort) to break the tie. The node with the lowest IP gets rank 0 and takes over immediately; higher-ranked nodes wait `rank × poll_interval_duration` before attempting takeover.
