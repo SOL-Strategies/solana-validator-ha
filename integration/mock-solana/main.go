@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -72,17 +73,24 @@ type MockSolanaServer struct {
 	blsKeyRemoved bool
 	// localGenesis overrides the genesis slot a validator's local RPC reports; 0 means none.
 	localGenesis map[string]uint64
+	// clusterRPCDown makes cluster RPC calls from a validator fail, as if it lost the network.
+	// Callers are told apart by their docker IP, since cluster RPC URLs carry no ?validator=.
+	clusterRPCDown map[string]bool
+	// localSlotStalledAt freezes the processed slot a validator's local RPC reports; 0 while it moves.
+	localSlotStalledAt map[string]uint64
 }
 
 func NewMockSolanaServer() *MockSolanaServer {
 	return &MockSolanaServer{
-		activeValidator: os.Getenv("ACTIVE_VALIDATOR"),
-		disconnected:    make(map[string]bool),
-		unhealthy:       make(map[string]bool),
-		startedAt:       time.Now(),
-		phase:           phaseTower,
-		voteLag:         make(map[string]uint64),
-		localGenesis:    make(map[string]uint64),
+		activeValidator:    os.Getenv("ACTIVE_VALIDATOR"),
+		disconnected:       make(map[string]bool),
+		unhealthy:          make(map[string]bool),
+		startedAt:          time.Now(),
+		phase:              phaseTower,
+		voteLag:            make(map[string]uint64),
+		localGenesis:       make(map[string]uint64),
+		clusterRPCDown:     make(map[string]bool),
+		localSlotStalledAt: make(map[string]uint64),
 	}
 }
 
@@ -141,7 +149,8 @@ type BalanceResult struct {
 // ControlAction is the unified control request accepted by the /action endpoint.
 // Actions: set_active, set_passive, disconnect, reconnect, set_unhealthy, set_healthy, reset,
 // set_phase, set_vote_lag, stall_finalization, resume_finalization, set_local_genesis,
-// exclude_vote_account, include_vote_account, remove_bls_key, restore_bls_key.
+// exclude_vote_account, include_vote_account, remove_bls_key, restore_bls_key, fail_cluster_rpc,
+// isolate, restore_network.
 type ControlAction struct {
 	Action string `json:"action"`
 	Target string `json:"target"` // validator name; empty for reset/set_active with no target
@@ -161,10 +170,18 @@ func (s *MockSolanaServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	method, _ := req["method"].(string)
+	localValidator := r.URL.Query().Get("validator")
+
+	// cluster RPC calls from a validator that lost the network fail. 502 is not one of the
+	// statuses the HA client puts a URL on cooldown for, so it recovers as soon as it is restored.
+	if localValidator == "" && s.isClusterRPCDown(validatorByDockerIP(r.RemoteAddr)) {
+		http.Error(w, "network unreachable", http.StatusBadGateway)
+		return
+	}
 
 	// Track which validator is making the call via ?validator= query param.
 	// Used for per-validator responses (getIdentity, getHealth).
-	if v := r.URL.Query().Get("validator"); v != "" {
+	if v := localValidator; v != "" {
 		s.mu.Lock()
 		s.callingValidator = v
 		s.mu.Unlock()
@@ -179,7 +196,7 @@ func (s *MockSolanaServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 	case "getHealth":
 		result = s.getHealth()
 	case "getSlot":
-		result = s.getSlot(commitmentParam(req["params"]))
+		result = s.getSlot(commitmentParam(req["params"]), localValidator)
 	case "getVoteAccounts":
 		result = s.getVoteAccounts()
 	case "getBalance":
@@ -224,6 +241,28 @@ func commitmentParam(params any) string {
 		return commitment
 	}
 	return "processed"
+}
+
+// isClusterRPCDown reports whether a validator's cluster RPC calls fail.
+func (s *MockSolanaServer) isClusterRPCDown(validator string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return validator != "" && s.clusterRPCDown[validator]
+}
+
+// validatorByDockerIP returns the validator whose docker IP made a request, or "" for other
+// callers such as the orchestrator.
+func validatorByDockerIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return ""
+	}
+	for name, meta := range validatorMeta {
+		if meta.dockerIP == host {
+			return name
+		}
+	}
+	return ""
 }
 
 // handleAction is the unified control endpoint used by test scenarios and validator commands.
@@ -287,6 +326,8 @@ func (s *MockSolanaServer) handleAction(w http.ResponseWriter, r *http.Request) 
 		s.localGenesis = make(map[string]uint64)
 		s.voteAccountExcluded = false
 		s.blsKeyRemoved = false
+		s.clusterRPCDown = make(map[string]bool)
+		s.localSlotStalledAt = make(map[string]uint64)
 		s.stalledAt = 0
 		s.activeValidator = action.Target
 		log.Printf("[control] reset: active=%q phase=%q", action.Target, s.phase)
@@ -330,6 +371,21 @@ func (s *MockSolanaServer) handleAction(w http.ResponseWriter, r *http.Request) 
 	case "restore_bls_key":
 		s.blsKeyRemoved = false
 		log.Printf("[control] restore_bls_key")
+
+	case "fail_cluster_rpc":
+		s.clusterRPCDown[action.Target] = true
+		log.Printf("[control] fail_cluster_rpc: %q", action.Target)
+
+	case "isolate":
+		// the validator loses the network: cluster RPC fails and it stops receiving blocks
+		s.clusterRPCDown[action.Target] = true
+		s.localSlotStalledAt[action.Target] = s.processedSlot()
+		log.Printf("[control] isolate: %q local slot frozen at %d", action.Target, s.localSlotStalledAt[action.Target])
+
+	case "restore_network":
+		delete(s.clusterRPCDown, action.Target)
+		delete(s.localSlotStalledAt, action.Target)
+		log.Printf("[control] restore_network: %q", action.Target)
 
 	default:
 		s.mu.Unlock()
@@ -513,11 +569,16 @@ func (s *MockSolanaServer) lastVote(processed, extraLag uint64) uint64 {
 	return voteSlot - min(voteSlot, behind)
 }
 
-func (s *MockSolanaServer) getSlot(commitment string) uint64 {
+// getSlot returns the slot at commitment. localValidator is set for a validator's local RPC,
+// whose processed slot stays frozen while the validator is isolated.
+func (s *MockSolanaServer) getSlot(commitment, localValidator string) uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	processed := s.processedSlot()
+	if stalledAt := s.localSlotStalledAt[localValidator]; stalledAt != 0 {
+		processed = stalledAt
+	}
 	if commitment != "finalized" {
 		return processed
 	}

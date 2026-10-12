@@ -115,7 +115,8 @@ func (c *Config) LoadFromFile(filePath string) error {
 
 	// Set bool defaults that cannot be expressed as Go zero values.
 	// k.Set must be called before k.Load so the file can override them.
-	k.Set("update.check_enabled", true) //nolint:errcheck
+	k.Set("update.check_enabled", true)       //nolint:errcheck
+	k.Set("failover.isolation.enabled", true) //nolint:errcheck
 	// 0 disables the network stake check, so its non-zero default must be set the same way.
 	k.Set("failover.alpenglow.network_current_stake_ratio_min", defaultNetworkCurrentStakeRatioMin) //nolint:errcheck
 
@@ -195,6 +196,11 @@ func (c *Config) validate() error {
 	}
 
 	err = c.Failover.Alpenglow.Validate(c.Failover.PollIntervalDuration)
+	if err != nil {
+		return err
+	}
+
+	err = c.Failover.Isolation.Validate(c.Failover.PollIntervalDuration)
 	if err != nil {
 		return err
 	}
