@@ -73,6 +73,26 @@ failover:
 - **🏁 First-Responder Failover**: Race-based failover with deterministic rank-based delay so the highest-priority eligible passive validator assumes the active role. Default ordering is ascending IP sort; operators can override with explicit `failover.priority` per node
 - **📼 Incident Recording**: Optionally checkpoints timestamped JSON from the first anomalous network observation through recovery, demotion, or takeover — for multi-node diagnosis and replay
 
+## Upgrading from v0.1.24
+
+Existing configuration files remain valid, but this release changes failover behavior:
+
+- **Tower:** existing voting-based failover rules continue.
+- **Alpenglow:** vote-lag failover is now active rather than observe-only. Promotion requires matching local genesis; Tower-only delinquency settings are ignored.
+- **Both:** isolation demotion is enabled by default when cluster RPC repeatedly fails and the local processed slot stops advancing.
+
+Ensure `validator.rpc_url` reaches the local validator and your passive command works without network access. See [Alpenglow](#alpenglow) and [Network isolation](#network-isolation) for requirements and limitations.
+
+To disable isolation demotion:
+
+```yaml
+failover:
+  isolation:
+    enabled: false
+```
+
+This does not disable Alpenglow failover.
+
 ## Installation
 
 ### Download binary
@@ -567,11 +587,11 @@ Alpenglow replaces TowerBFT votes with BLS votes that are aggregated into certif
 
 Under Alpenglow, a validator restores its vote history for the new identity on `set-identity`, and starts a fresh one when there is none. The vote history file plays the role the tower file used to. If your active command copies the tower file to the new active before switching identity, copy the vote history file as well. `solana-validator-ha` does not move files itself.
 
-### Before the migration
+### Before upgrading
 
 If you ran the previous, observe-only release on an Alpenglow cluster, check its flight hours before upgrading: `solana_validator_ha_alpenglow_vote_verdicts_total{verdict="not_voting"}` should only have grown while the active was genuinely failing, and `solana_validator_ha_active_vote_lag_slots` should stay well below `vote_lag_slots_threshold`.
 
-Keep `cluster.consensus.mode: auto`. Check that your `cluster.rpc_urls` answer `getAgGenesisCert`; the local validator is used when they do not. To try the new behaviour without acting on it, run a second instance with `failover.dry_run: true` and a separate metrics port, and compare `solana_validator_ha_active_vote_lag_slots` against `vote_lag_slots_threshold`.
+Keep `cluster.consensus.mode: auto`. Check that your `cluster.rpc_urls` answer `getAgGenesisCert`; the local validator is used when they do not. To try the new behaviour without acting on it, run a second instance with `failover.dry_run: true`, separate metrics and health-check ports (`prometheus.port` and `prometheus.health_check_port`), and a separate recording directory if recording is enabled. Compare `solana_validator_ha_active_vote_lag_slots` against `vote_lag_slots_threshold`.
 
 ## Network isolation
 
