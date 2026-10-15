@@ -82,7 +82,7 @@ type TimelineEntry struct {
 type Outcome struct {
 	// Result is one of: "became_active", "became_active_unconfirmed",
 	// "aborted_peer_took_over", "aborted_not_healthy", "aborted_not_healthy_long_enough",
-	// "aborted_already_active", "aborted_self_not_in_gossip", "aborted_delay_error",
+	// "aborted_already_active", "aborted_self_not_in_gossip", "aborted_delay_error", "aborted_revalidation_failed",
 	// "aborted_cluster_stalled", "aborted_vote_account_excluded", "aborted_failover_ineffective",
 	// "aborted_local_not_migrated", "demoted_passive", "demoted_validator_down", "demotion_failed"
 	Result   string `json:"result"`
