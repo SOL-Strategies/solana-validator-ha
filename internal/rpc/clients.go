@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"reflect"
 	"slices"
 	"strings"
@@ -21,7 +23,8 @@ import (
 const defaultTimeout = 5 * time.Second
 
 // defaultURLCooldown is the default duration a URL that returned a permanent HTTP error
-// (403/429/503) is deprioritised before being retried again.
+// (403/429/503) or failed at the transport level (timeout, refused connection, DNS failure) is
+// deprioritised before being retried again.
 const defaultURLCooldown = 60 * time.Second
 
 // Client represents an RPC client that can handle multiple URLs
@@ -32,7 +35,7 @@ type Client struct {
 	clients map[string]*rpc.Client
 	// lastSuccessfulURL tracks the last URL that succeeded to avoid it for throttling protection
 	lastSuccessfulURL string
-	// urlCooldowns tracks when rate-limited / access-forbidden URLs may be retried again
+	// urlCooldowns tracks when rate-limited / access-forbidden / unreachable URLs may be retried again
 	urlCooldowns map[string]time.Time
 	timeout      time.Duration
 	urlCooldown  time.Duration
@@ -85,7 +88,7 @@ type rpcOperation[T any] struct {
 //
 //  1. Active URLs (not lastSuccessfulURL, not in cooldown) — tried first to spread load
 //  2. lastSuccessfulURL (if not in cooldown) — known-good, used as fallback
-//  3. Cooling-down URLs (403/429/503) — tried last, after all healthy options are exhausted
+//  3. Cooling-down URLs (403/429/503, timeouts, connection errors) — tried last, after all healthy options are exhausted
 func (c *Client) getURLsToTry() []string {
 	if len(c.urls) <= 1 {
 		return c.urls
@@ -120,6 +123,16 @@ func (c *Client) getURLsToTry() []string {
 	return append(result, coolingURLs...)
 }
 
+// coolDown deprioritises url for the client's cooldown and warns once per cooldown window.
+func (c *Client) coolDown(url, method, msg string) {
+	now := time.Now()
+	alreadyCooling := c.urlCooldowns[url].After(now)
+	c.urlCooldowns[url] = now.Add(c.urlCooldown)
+	if !alreadyCooling {
+		c.logger.Warn(msg, "method", method, "url", url, "cooldown", c.urlCooldown)
+	}
+}
+
 // executeWithRetry executes an RPC method, trying URLs in throttling-optimized order
 func executeWithRetry[T any](c *Client, ctx context.Context, op rpcOperation[T]) (T, error) {
 	attemptedURLs := []string{}
@@ -142,16 +155,13 @@ func executeWithRetry[T any](c *Client, ctx context.Context, op rpcOperation[T])
 		})
 
 		if err != nil {
-			if isPermanentHTTPError(err) {
-				now := time.Now()
-				alreadyCooling := c.urlCooldowns[url].After(now)
-				c.urlCooldowns[url] = now.Add(c.urlCooldown)
-				if !alreadyCooling {
-					c.logger.Warn("RPC endpoint rate-limited or access forbidden, cooling down",
-						"method", op.name,
-						"url", url,
-						"cooldown", c.urlCooldown,
-					)
+			// A caller-side cancellation or deadline says nothing about the endpoint.
+			if ctx.Err() == nil {
+				switch {
+				case isPermanentHTTPError(err):
+					c.coolDown(url, op.name, "RPC endpoint rate-limited or access forbidden, cooling down")
+				case isTransportError(err):
+					c.coolDown(url, op.name, "RPC endpoint unreachable or timed out, cooling down")
 				}
 			}
 			c.logger.Debug("method call failed", "method", op.name, "error", err, "rpc_url", url)
@@ -481,6 +491,18 @@ func isPermanentHTTPError(err error) bool {
 		return httpErr.Code == 403 || httpErr.Code == 429 || httpErr.Code == 503
 	}
 	return false
+}
+
+// isTransportError returns true when the endpoint could not be reached or did not answer in
+// time (timeout, refused/reset connection, DNS failure, truncated response) as opposed to
+// answering with an error. Without a cooldown such an endpoint is retried first on every call
+// and costs a full timeout each time.
+func isTransportError(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // extractErrorMessage extracts just the message from an RPC error

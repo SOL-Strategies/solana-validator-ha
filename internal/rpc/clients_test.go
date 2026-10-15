@@ -571,3 +571,65 @@ func TestLastSuccessfulURLWithFailures(t *testing.T) {
 	assert.True(t, client.lastSuccessfulURL == urls[1] || client.lastSuccessfulURL == urls[2],
 		"Last successful URL should be one of the working servers")
 }
+
+// slotServer answers every JSON-RPC call with the given slot.
+func slotServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":42}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestUnreachableURLIsCooledDownAfterTimeout(t *testing.T) {
+	release := make(chan struct{})
+	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(release); hung.Close() })
+	healthy := slotServer(t)
+
+	c := NewClient("test", hung.URL, healthy.URL).WithTimeout(200 * time.Millisecond).WithCooldown(time.Minute)
+
+	// First call pays the timeout once, then lands on the healthy URL.
+	slot, err := c.GetSlot(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(42), slot)
+	assert.True(t, c.urlCooldowns[hung.URL].After(time.Now()), "timed-out URL must be cooling down")
+
+	// Subsequent calls must not try the hung URL first.
+	start := time.Now()
+	for i := 0; i < 5; i++ {
+		_, err = c.GetSlot(context.Background())
+		require.NoError(t, err)
+	}
+	assert.Less(t, time.Since(start), 150*time.Millisecond)
+	assert.Equal(t, []string{healthy.URL, hung.URL}, c.getURLsToTry())
+}
+
+func TestRefusedURLIsCooledDown(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close() // nothing listens any more: connection refused
+	healthy := slotServer(t)
+
+	c := NewClient("test", deadURL, healthy.URL)
+	_, err := c.GetSlot(context.Background())
+	require.NoError(t, err)
+	assert.True(t, c.urlCooldowns[deadURL].After(time.Now()))
+}
+
+func TestCallerCancellationDoesNotCoolDownURL(t *testing.T) {
+	healthy := slotServer(t)
+	c := NewClient("test", healthy.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := c.GetSlot(ctx)
+	require.Error(t, err)
+	assert.Empty(t, c.urlCooldowns)
+}
