@@ -32,3 +32,10 @@ func (s *State) SetVoteEvidenceForTest(leaderlessReason, vetoReason string, stre
 func (s *State) SetLastRefreshHadRPCErrorForTest(v bool) {
 	s.lastRefreshHadRPCError = v
 }
+
+// SetNotVotingActivePeerForTest seeds the peer that held the active identity in gossip during
+// the last Refresh while its votes were not landing.
+// Intended for tests that drive ensureHAState without a real RPC refresh.
+func (s *State) SetNotVotingActivePeerForTest(peer PeerState) {
+	s.notVotingActivePeer = peer
+}

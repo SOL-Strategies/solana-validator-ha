@@ -1016,3 +1016,60 @@ func TestActivePeerIsDelinquent_ResetOnNextRefresh(t *testing.T) {
 	state.Refresh()
 	assert.False(t, state.ActivePeerIsDelinquent(), "flag should be cleared after peer resumes voting")
 }
+
+func TestRefresh_NotVotingActivePeerIsTrackedButLeaderless(t *testing.T) {
+	// The declared peer holds the active identity in gossip but the network declares it delinquent.
+	server := newGossipMockRPCServer(t, map[string]interface{}{
+		"getClusterNodes": []interface{}{
+			gossipClusterNode(testActivePubkey, testDeclaredIP),
+		},
+		"getVoteAccounts": delinquentVoteAccountsResult([]string{testActivePubkey}, 100),
+		"getBalance":      balanceResult(10_000_000),
+		"getSlot":         500,
+	})
+	state := NewState(Options{
+		ClusterRPC:   rpc.NewClient("test", server.URL),
+		ActivePubkey: testActivePubkey,
+		SelfIP:       testSelfIP,
+		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
+	})
+
+	state.Refresh()
+
+	peer, ok := state.NotVotingActivePeer()
+	require.True(t, ok, "the not-voting active peer should be tracked")
+	assert.Equal(t, "peer1", peer.Name)
+	assert.Equal(t, testDeclaredIP, peer.IP)
+	assert.Equal(t, testActivePubkey, peer.Pubkey)
+	assert.False(t, state.HasIP(testDeclaredIP), "a not-voting active must stay out of the peer states")
+	assert.Equal(t, 1, state.LeaderlessSamplesCount)
+	assert.Contains(t, state.peersStateString(), "🔴 peer1 "+testDeclaredIP+" "+testActivePubkey[:7])
+}
+
+func TestRefresh_NotVotingActivePeerResetWhenVoting(t *testing.T) {
+	responses := map[string]interface{}{
+		"getClusterNodes": []interface{}{
+			gossipClusterNode(testActivePubkey, testDeclaredIP),
+		},
+		"getVoteAccounts": delinquentVoteAccountsResult([]string{testActivePubkey}, 100),
+		"getBalance":      balanceResult(10_000_000),
+		"getSlot":         500,
+	}
+	server := newGossipMockRPCServer(t, responses)
+	state := NewState(Options{
+		ClusterRPC:   rpc.NewClient("test", server.URL),
+		ActivePubkey: testActivePubkey,
+		SelfIP:       testSelfIP,
+		ConfigPeers:  config.Peers{"peer1": {IP: testDeclaredIP, Name: "peer1"}},
+	})
+	state.Refresh()
+	_, ok := state.NotVotingActivePeer()
+	require.True(t, ok)
+
+	responses["getVoteAccounts"] = votingVoteAccountsResult([]string{testActivePubkey})
+	state.Refresh()
+
+	_, ok = state.NotVotingActivePeer()
+	assert.False(t, ok, "the not-voting active peer must be reset once it votes again")
+	assert.True(t, state.HasActivePeer())
+}

@@ -304,3 +304,29 @@ func TestRecorder_ReportsWriteFailure(t *testing.T) {
 		t.Fatal("timed out waiting for asynchronous write failure")
 	}
 }
+
+func TestRecorder_DiscardAsyncRemovesCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	discarded := New(NodeInfo{Name: "node", IP: "10.0.0.1", ActivePubkey: "discarded"}, ConfigSnapshot{}, time.Now(), nil)
+	discarded.CheckpointAsync(dir, nil)
+	discarded.DiscardAsync(dir, func(err error) { t.Errorf("DiscardAsync error: %v", err) })
+	// the write queue is FIFO, so once this recording is written the discard has been handled
+	barrier := New(NodeInfo{Name: "node", IP: "10.0.0.1", ActivePubkey: "barrier"}, ConfigSnapshot{}, time.Now(), nil)
+	barrier.FinishAsync(dir, Outcome{Result: "barrier"}, nil)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join(dir, barrier.filename())); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 || entries[0].Name() != barrier.filename() {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("output dir holds %v, want only the barrier recording", names)
+	}
+}

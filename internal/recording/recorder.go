@@ -23,6 +23,7 @@ type writeJob struct {
 	path    string
 	data    []byte
 	final   bool
+	discard bool
 	onError func(error)
 }
 
@@ -32,6 +33,12 @@ var incidentSequence atomic.Uint64
 func init() {
 	go func() {
 		for job := range writeQueue {
+			if job.discard {
+				if err := os.Remove(job.path); err != nil && !os.IsNotExist(err) && job.onError != nil {
+					job.onError(err)
+				}
+				continue
+			}
 			if err := atomicWrite(job.path, job.data); err != nil {
 				if job.onError != nil {
 					job.onError(err)
@@ -99,6 +106,20 @@ func (r *Recorder) WriteAsync(outputDir string, outcome Outcome) {
 // FinishAsync finalizes a recording and reports persistence failures through onError.
 func (r *Recorder) FinishAsync(outputDir string, outcome Outcome, onError func(error)) {
 	r.enqueue(outputDir, true, &outcome, onError)
+}
+
+// DiscardAsync drops an unfinished recording, removing its .partial checkpoint once any queued
+// checkpoint has been written. The caller must not use the recorder after this call.
+func (r *Recorder) DiscardAsync(outputDir string, onError func(error)) {
+	r.mu.Lock()
+	path := filepath.Join(outputDir, r.filename()) + ".partial"
+	r.mu.Unlock()
+	job := writeJob{path: path, discard: true, onError: onError}
+	select {
+	case writeQueue <- job:
+	default:
+		go func() { writeQueue <- job }()
+	}
 }
 
 func (r *Recorder) enqueue(outputDir string, final bool, outcome *Outcome, onError func(error)) {
