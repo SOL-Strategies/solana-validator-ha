@@ -84,7 +84,8 @@ type Outcome struct {
 	// "aborted_peer_took_over", "aborted_not_healthy", "aborted_not_healthy_long_enough",
 	// "aborted_already_active", "aborted_self_not_in_gossip", "aborted_delay_error",
 	// "aborted_cluster_stalled", "aborted_vote_account_excluded", "aborted_failover_ineffective",
-	// "aborted_local_not_migrated", "demoted_passive", "demoted_validator_down", "demotion_failed"
+	// "aborted_local_not_migrated", "demoted_passive", "demoted_validator_down", "demotion_failed",
+	// "not_voting_retained_active"
 	Result   string `json:"result"`
 	FromNode string `json:"from_node"` // node name that was active before this failover
 	ToNode   string `json:"to_node"`   // node name that became active
