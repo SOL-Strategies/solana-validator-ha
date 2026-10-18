@@ -93,6 +93,7 @@ var repeatableOutcomes = map[string]bool{
 	"aborted_local_not_migrated":                 true,
 	"aborted_not_healthy":                        true,
 	"aborted_not_healthy_long_enough":            true,
+	"aborted_revalidation_failed":                true,
 	"aborted_undeclared_active":                  true,
 	"already_active":                             true,
 	"last_node_standing_retained_active":         true,
