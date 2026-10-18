@@ -210,6 +210,54 @@ func TestEnsureHAState_PostDelayVeto(t *testing.T) {
 	}
 }
 
+func TestEnsureHAState_PostDelayRefreshRPCError(t *testing.T) {
+	tests := []struct {
+		name        string
+		selfIP      string
+		wantStatus  string
+		wantOutcome string
+	}{
+		{
+			name:        "rank 1 aborts when the re-check cannot reach the cluster",
+			selfIP:      "185.0.0.3",
+			wantStatus:  "idle",
+			wantOutcome: "aborted_revalidation_failed",
+		},
+		{
+			// rank 0 does no re-check, so there is nothing to have failed
+			name:       "rank 0 takes over",
+			selfIP:     "185.0.0.1",
+			wantStatus: "becoming_active",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := createTestConfig()
+			// only record when the outcome is checked, so no write outlives the test
+			var dir string
+			if tt.wantOutcome != "" {
+				dir = enableRecording(cfg, t)
+			}
+			manager := newTakeoverCandidate(t, cfg, tt.selfIP)
+			manager.gossipState.SetVoteEvidenceForTest(gossip.LeaderlessReasonVoteLag, "", false)
+			// Refresh is a no-op in these tests, so the flag stands for the post-delay refresh
+			manager.gossipState.SetLastRefreshHadRPCErrorForTest(true)
+
+			manager.ensureHAState()
+
+			if got := manager.cache.GetState().FailoverStatus; got != tt.wantStatus {
+				t.Errorf("FailoverStatus = %q, want %q", got, tt.wantStatus)
+			}
+			if tt.wantOutcome == "" {
+				return
+			}
+			if got := waitForRecordingOutcome(t, dir); got != tt.wantOutcome {
+				t.Errorf("recording outcome = %q, want %q", got, tt.wantOutcome)
+			}
+		})
+	}
+}
+
 func TestEnsureHAState_RechecksLocalGenesisBeforePromotion(t *testing.T) {
 	tests := []struct {
 		name   string

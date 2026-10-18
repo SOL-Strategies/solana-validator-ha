@@ -359,13 +359,27 @@ func (p *State) findVotePubkey(ctx context.Context, identity solana.PublicKey) (
 	if err != nil {
 		return solana.PublicKey{}, false, err
 	}
+	// An identity can be set on more than one vote account, e.g. an old unstaked one left behind
+	// after moving to a new account. Prefer the first one with stake: judging an unstaked one
+	// would veto the active as vote_account_excluded on every poll.
+	var match *solanagorpc.VoteAccountsResult
 	for _, account := range slices.Concat(accounts.Current, accounts.Delinquent) {
-		if account.NodePubkey.Equals(identity) {
-			p.cacheVotePubkey(account)
-			return account.VotePubkey, true, nil
+		if !account.NodePubkey.Equals(identity) {
+			continue
+		}
+		if account.ActivatedStake > 0 {
+			match = &account
+			break
+		}
+		if match == nil {
+			match = &account
 		}
 	}
-	return solana.PublicKey{}, false, nil
+	if match == nil {
+		return solana.PublicKey{}, false, nil
+	}
+	p.cacheVotePubkey(*match)
+	return match.VotePubkey, true, nil
 }
 
 // recordLeaderlessSample counts a leaderless sample and tracks whether the streak includes

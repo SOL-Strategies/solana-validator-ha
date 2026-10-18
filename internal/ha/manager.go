@@ -721,6 +721,17 @@ func (m *Manager) ensureHAState() {
 			m.activeRecorder.AddEvent("revalidation_refresh", "")
 			m.checkpointRecording()
 		}
+
+		// a failed re-validation keeps the pre-delay leaderless count and clears any veto, so the
+		// checks below would pass without having seen the cluster - abort and retry on the next poll
+		if m.gossipState.LastRefreshHadRPCError() {
+			m.logger.Error("failed to re-check gossip after the takeover delay - aborting takeover")
+			if m.activeRecorder != nil {
+				m.activeRecorder.AddEvent("revalidation_failed", "rpc_error=true")
+			}
+			m.finishRecording("aborted_revalidation_failed", fromNode, "unknown")
+			return
+		}
 	}
 
 	// an undeclared active peer may have appeared during the delay - treat the same as the pre-delay check

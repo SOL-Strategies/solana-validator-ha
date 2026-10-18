@@ -662,3 +662,60 @@ func TestNetworkStakeGateClosesOnStaleRatio(t *testing.T) {
 		t.Error("networkStakeGateOpen() with a stale ratio = open, want closed")
 	}
 }
+
+func TestRefresh_AlpenglowJudgesTheStakedVoteAccount(t *testing.T) {
+	// an old, unstaked vote account still set to the active identity, listed before the real one
+	oldAccount := map[string]interface{}{
+		"nodePubkey":       testActivePubkey,
+		"votePubkey":       "SysvarC1ock11111111111111111111111111111111",
+		"activatedStake":   0,
+		"epochVoteAccount": false,
+		"epochCredits":     []interface{}{},
+		"commission":       0,
+		"lastVote":         0,
+		"rootSlot":         0,
+	}
+	tests := []struct {
+		name string
+		// listed moves the old account into the list it would be in, ahead of the real account
+		listed func(accounts map[string]interface{})
+	}{
+		{
+			name: "old account listed first among current accounts",
+			listed: func(accounts map[string]interface{}) {
+				accounts["current"] = append([]interface{}{oldAccount}, accounts["current"].([]interface{})...)
+			},
+		},
+		{
+			name: "both accounts delinquent, old one first",
+			listed: func(accounts map[string]interface{}) {
+				current := accounts["current"].([]interface{})
+				accounts["current"] = current[1:]
+				accounts["delinquent"] = []interface{}{oldAccount, current[0]}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			accounts := alpenglowVoteAccounts(testProcessedSlot-100, 1000, 9000, false)
+			tt.listed(accounts)
+			state := newAlpenglowTestState(t, map[string]interface{}{
+				"getClusterNodes":     []interface{}{gossipClusterNode(testActivePubkey, testDeclaredIP)},
+				"getSlot":             testProcessedSlot,
+				"getVoteAccounts":     accounts,
+				"getMultipleAccounts": blsKeyAccounts(1, 2),
+			})
+			// over several polls, so a veto cannot reset the streak in between
+			for i := 1; i <= 3; i++ {
+				state.finalization = liveFinalization()
+				state.Refresh()
+				if got := state.AlpenglowVerdict(); got != VerdictNotVoting {
+					t.Fatalf("poll %d: AlpenglowVerdict() = %q, want %q (veto %q)", i, got, VerdictNotVoting, state.VetoReason())
+				}
+				if state.LeaderlessSamplesCount != i {
+					t.Fatalf("poll %d: LeaderlessSamplesCount = %d, want %d", i, state.LeaderlessSamplesCount, i)
+				}
+			}
+		})
+	}
+}
