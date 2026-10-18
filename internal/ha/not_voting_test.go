@@ -9,6 +9,7 @@ import (
 
 	"github.com/sol-strategies/solana-validator-ha/internal/gossip"
 	"github.com/sol-strategies/solana-validator-ha/internal/recording"
+	"github.com/stretchr/testify/require"
 )
 
 // newNotVotingActive returns a manager that holds the active identity in gossip while its votes
@@ -161,4 +162,37 @@ func TestEnsureHAState_DifferentOutcomeAfterRepeatIsRecorded(t *testing.T) {
 	if !found {
 		t.Errorf("recording outcomes = %v, want one %q", outcomes, outcomeDemotionFailed)
 	}
+}
+
+// waitForRecordingWrites puts a separate recording behind the pending jobs in the
+// shared write queue, so assertions also wait for failed writes and discards.
+func waitForRecordingWrites(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	barrier := recording.New(recording.NodeInfo{ActivePubkey: "barrier"}, recording.ConfigSnapshot{}, time.Now(), nil)
+	barrier.FinishAsync(dir, recording.Outcome{Result: "barrier"}, nil)
+	require.Equal(t, "barrier", waitForRecordingOutcome(t, dir))
+}
+
+func TestEnsureHAState_NoActionRecordingRetriesAfterWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	manager := newNotVotingActive(t, map[string]gossip.PeerState{}, dir)
+
+	// The directory passed initialization, then became unavailable while the
+	// not-voting condition persisted. Neither checkpoints nor the final write succeed.
+	require.NoError(t, os.Remove(dir))
+	manager.ensureHAState()
+	waitForRecordingWrites(t)
+
+	// Storage recovers without any change in gossip or the no-action outcome.
+	require.NoError(t, os.Mkdir(dir, 0755))
+	manager.ensureHAState()
+	waitForRecordingWrites(t)
+	outcomes := waitForRecordings(t, dir, 1)
+	require.Equal(t, []string{outcomeNotVotingRetainedActive}, outcomes)
+
+	// Once the retry is persisted, further identical outcomes are suppressed again.
+	manager.ensureHAState()
+	waitForRecordingWrites(t)
+	require.Equal(t, outcomes, waitForRecordings(t, dir, 1))
 }

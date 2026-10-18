@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -53,6 +54,9 @@ type Manager struct {
 	// been seen since. An incident ending the same way again is discarded rather than written, so
 	// a condition that persists across polls leaves one recording instead of one per poll.
 	repeatOutcome string
+	// repeatOutcomeWriteFailed belongs to the write attempt that enabled suppression.
+	// The writer sets it on failure; only the HA goroutine changes which attempt we track.
+	repeatOutcomeWriteFailed *atomic.Bool
 	// detector tracks the cluster's consensus phase (TowerBFT or Alpenglow).
 	detector *consensus.Detector
 	// lastLeaderlessReason is from the previous sample, so a recording gets one vote-lag event
@@ -526,19 +530,29 @@ func (m *Manager) finishRecording(result, fromNode, toNode string) {
 	if m.activeRecorder == nil {
 		return
 	}
-	if result == m.repeatOutcome {
+	if result == m.repeatOutcome && m.repeatOutcomeWriteFailed != nil && !m.repeatOutcomeWriteFailed.Load() {
 		m.logger.Debug("incident ended with the same no-action outcome as the previous one - not writing another recording", "outcome", result)
 		m.activeRecorder.DiscardAsync(m.recordingOutputDir, m.recordingError)
 		m.activeRecorder = nil
 		return
 	}
 	m.repeatOutcome = ""
+	m.repeatOutcomeWriteFailed = nil
+	onError := m.recordingError
 	if repeatableOutcomes[result] {
 		m.repeatOutcome = result
+		failed := &atomic.Bool{}
+		m.repeatOutcomeWriteFailed = failed
+		onError = func(err error) {
+			// Capture this attempt's flag: a late failure must not reset suppression
+			// for a newer outcome or for an incident after recovery.
+			failed.Store(true)
+			m.recordingError(err)
+		}
 	}
 	m.activeRecorder.FinishAsync(m.recordingOutputDir, recording.Outcome{
 		Result: result, FromNode: fromNode, ToNode: toNode,
-	}, m.recordingError)
+	}, onError)
 	m.activeRecorder = nil
 }
 
@@ -563,6 +577,7 @@ func (m *Manager) observeRecording(sample recording.GossipSample, undeclaredActi
 		return true
 	}
 	m.repeatOutcome = "" // the condition cleared, so the next incident is a new one
+	m.repeatOutcomeWriteFailed = nil
 	if m.activeRecorder != nil {
 		m.activeRecorder.AddSample(sample)
 		// a vetoed sample counts the active as present, which also ends the incident
