@@ -49,6 +49,10 @@ type Manager struct {
 	// recordingOutputDir is the resolved output directory for failover recordings (empty if disabled).
 	recordingOutputDir string
 	activeRecorder     *recording.Recorder
+	// repeatOutcome is the no-action outcome the last incident ended with, while no recovery has
+	// been seen since. An incident ending the same way again is discarded rather than written, so
+	// a condition that persists across polls leaves one recording instead of one per poll.
+	repeatOutcome string
 	// detector tracks the cluster's consensus phase (TowerBFT or Alpenglow).
 	detector *consensus.Detector
 	// lastLeaderlessReason is from the previous sample, so a recording gets one vote-lag event
@@ -70,6 +74,9 @@ const (
 	// was not answering RPC, so its identity could not be confirmed.
 	outcomeDemotedValidatorDown = "demoted_validator_down"
 	outcomeDemotionFailed       = "demotion_failed"
+	// outcomeNotVotingRetainedActive means our votes were not landing but no peer was visible to
+	// take over, so we stayed active.
+	outcomeNotVotingRetainedActive = "not_voting_retained_active"
 )
 
 // vetoOutcomes maps a gossip veto reason to the recording outcome of the failover it aborts.
@@ -77,6 +84,23 @@ var vetoOutcomes = map[string]string{
 	gossip.VetoClusterStalled:      "aborted_cluster_stalled",
 	gossip.VetoVoteAccountExcluded: "aborted_vote_account_excluded",
 	gossip.VetoFailoverIneffective: "aborted_failover_ineffective",
+}
+
+// repeatableOutcomes are the recording outcomes where this node took no action. A persisting
+// condition reaches them again on every poll.
+var repeatableOutcomes = map[string]bool{
+	"aborted_delay_error":                        true,
+	"aborted_local_not_migrated":                 true,
+	"aborted_not_healthy":                        true,
+	"aborted_not_healthy_long_enough":            true,
+	"aborted_revalidation_failed":                true,
+	"aborted_undeclared_active":                  true,
+	"already_active":                             true,
+	"last_node_standing_retained_active":         true,
+	outcomeNotVotingRetainedActive:               true,
+	vetoOutcomes[gossip.VetoClusterStalled]:      true,
+	vetoOutcomes[gossip.VetoVoteAccountExcluded]: true,
+	vetoOutcomes[gossip.VetoFailoverIneffective]: true,
 }
 
 // NewManager creates a new HA manager from options
@@ -502,6 +526,16 @@ func (m *Manager) finishRecording(result, fromNode, toNode string) {
 	if m.activeRecorder == nil {
 		return
 	}
+	if result == m.repeatOutcome {
+		m.logger.Debug("incident ended with the same no-action outcome as the previous one - not writing another recording", "outcome", result)
+		m.activeRecorder.DiscardAsync(m.recordingOutputDir, m.recordingError)
+		m.activeRecorder = nil
+		return
+	}
+	m.repeatOutcome = ""
+	if repeatableOutcomes[result] {
+		m.repeatOutcome = result
+	}
 	m.activeRecorder.FinishAsync(m.recordingOutputDir, recording.Outcome{
 		Result: result, FromNode: fromNode, ToNode: toNode,
 	}, m.recordingError)
@@ -528,6 +562,7 @@ func (m *Manager) observeRecording(sample recording.GossipSample, undeclaredActi
 		m.checkpointRecording()
 		return true
 	}
+	m.repeatOutcome = "" // the condition cleared, so the next incident is a new one
 	if m.activeRecorder != nil {
 		m.activeRecorder.AddSample(sample)
 		// a vetoed sample counts the active as present, which also ends the incident
@@ -614,6 +649,27 @@ func (m *Manager) ensureHAState() {
 	fromNode := m.gossipState.GetLastActivePeer().Name
 	if fromNode == "" {
 		fromNode = "unknown"
+	}
+
+	// we hold the active identity in gossip but our votes are not landing - hand over if a peer can
+	// take over. Without this check we would be judged by the not-in-gossip rules below, since a
+	// not-voting active is left out of the peer states.
+	if m.isSelfNotVotingActive() {
+		if m.alreadyDemotedWithLocalRPCDown() {
+			m.logger.Debug("already demoted and the local validator is still not answering RPC - not re-running the passive command")
+			return
+		}
+		if !m.gossipState.HasPeers(m.peerSelf.IP) {
+			m.logger.Warn("our votes are not landing but no peer is visible to take over - staying active")
+			if m.activeRecorder != nil {
+				m.activeRecorder.AddEvent(outcomeNotVotingRetainedActive, "peers_visible=false")
+				m.finishRecording(outcomeNotVotingRetainedActive, fromNode, m.cfg.Validator.Name)
+			}
+			return
+		}
+		m.logger.Error("our votes are not landing and a peer is visible - ensuring we are passive so a peer can take over")
+		m.finishRecording(m.ensurePassive(), fromNode, "unknown")
+		return
 	}
 
 	// if we don't see ourselves in gossip - evaluate whether to become passive
@@ -1175,7 +1231,13 @@ func (m *Manager) startHealthyTracker() {
 
 // isSelfInGossip checks if the validator is in the gossip state
 func (m *Manager) isSelfInGossip() (isInGossip bool) {
-	return m.gossipState.HasIP(m.peerSelf.IP)
+	return m.gossipState.HasIP(m.peerSelf.IP) || m.isSelfNotVotingActive()
+}
+
+// isSelfNotVotingActive checks if we hold the active identity in gossip while our votes are not landing
+func (m *Manager) isSelfNotVotingActive() bool {
+	peer, ok := m.gossipState.NotVotingActivePeer()
+	return ok && peer.IP == m.peerSelf.IP
 }
 
 // isSelfNotInGossip checks if the validator is not in the gossip state
@@ -1216,7 +1278,7 @@ func (m *Manager) refreshMetrics() {
 
 	// Get peer count and self in gossip status
 	peerCount := len(m.gossipState.GetPeerStates())
-	selfInGossip := m.gossipState.HasIP(m.peerSelf.IP)
+	selfInGossip := m.isSelfInGossip()
 
 	// Update cache with current state
 	view := m.detector.View()

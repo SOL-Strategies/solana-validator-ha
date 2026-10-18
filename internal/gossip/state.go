@@ -49,6 +49,10 @@ type State struct {
 	delinquentSlotDistanceOverride config.DelinquentSlotDistanceOverride
 	lastRefreshHadRPCError         bool
 	configUndeclaredActivePeer     PeerState
+	// notVotingActivePeer is the config-declared peer that held the active identity in gossip
+	// during the last Refresh while its votes were not landing. Such a peer is left out of the
+	// peer states so the sample counts as leaderless. Zero when there is none.
+	notVotingActivePeer PeerState
 	// activePeerDelinquent is set to true during Refresh when the active peer is found in gossip
 	// but is declared delinquent by the network (via getVoteAccounts) and the delinquency is NOT
 	// due to low balance. In the Alpenglow phase it is set when the active's vote lag exceeds
@@ -158,6 +162,7 @@ func (p *State) Refresh() {
 	p.logger.Debug("refreshing peers state")
 	latestPeerStatesByName := make(map[string]PeerState)
 	p.configUndeclaredActivePeer = PeerState{} // reset on every refresh
+	p.notVotingActivePeer = PeerState{}        // reset on every refresh
 	p.activePeerDelinquent = false             // reset on every refresh
 	p.lastDelinquencyDetail = nil              // reset on every refresh
 	p.leaderlessReason = ""
@@ -238,6 +243,12 @@ func (p *State) Refresh() {
 		// so we need to check for that and only proceed to add it to the state if it is not voting still
 		if isActiveNode && !p.isActiveNodeVoting(*node) {
 			p.logger.Debug("active peer appears in gossip but is not voting - excluding from state", "ip", nodeIP, "pubkey", node.Pubkey.String())
+			p.notVotingActivePeer = PeerState{
+				Name:          peerName,
+				IP:            nodeIP,
+				Pubkey:        node.Pubkey.String(),
+				LastSeenAtUTC: time.Now().UTC(),
+			}
 			continue
 		}
 
@@ -382,12 +393,13 @@ func (p *State) Refresh() {
 
 // printStateEmojiKeyFormat prints the emoji legend once, called automatically on first Refresh.
 func (p *State) printStateEmojiKeyFormat() {
-	p.logger.Info("🟢=active 🟡=passive ❓=missing")
+	p.logger.Info("🟢=active 🟡=passive 🔴=active but not voting ❓=missing")
 }
 
 // peersStateString returns a compact string representation of all configured peers for logging.
 // format: 🟢 [(us)] <name> <ip> <pubkeyshort> | 🟡 [(us)] <name> <ip> <pubkeyshort> | ❓ [(us)] <name> <ip> <pubkeyshort>
-// where emoji is 🟢 for ACTIVE, 🟡 for PASSIVE, and ❓ for MISSING, sorted by IP ascending
+// where emoji is 🟢 for ACTIVE, 🟡 for PASSIVE, 🔴 for ACTIVE BUT NOT VOTING and ❓ for MISSING,
+// sorted by IP ascending
 func (p *State) peersStateString() string {
 	if len(p.configPeers) == 0 {
 		return ""
@@ -398,6 +410,7 @@ func (p *State) peersStateString() string {
 		ip          string
 		discovered  bool
 		active      bool
+		notVoting   bool
 		isSelf      bool
 		pubkeyShort string
 	}
@@ -409,6 +422,9 @@ func (p *State) peersStateString() string {
 			info.discovered = true
 			info.active = state.LastSeenActive
 			info.pubkeyShort = state.Pubkey[:7] // FN1Yjxx
+		} else if p.notVotingActivePeer.Name == name {
+			info.notVoting = true
+			info.pubkeyShort = p.notVotingActivePeer.Pubkey[:7]
 		}
 		peers = append(peers, info)
 	}
@@ -419,12 +435,13 @@ func (p *State) peersStateString() string {
 	parts := make([]string, len(peers))
 	for i, peer := range peers {
 		emoji := "❓"
-		if peer.discovered {
-			if peer.active {
-				emoji = "🟢"
-			} else {
-				emoji = "🟡"
-			}
+		switch {
+		case peer.notVoting:
+			emoji = "🔴"
+		case peer.discovered && peer.active:
+			emoji = "🟢"
+		case peer.discovered:
+			emoji = "🟡"
 		}
 		usThem := ""
 		if peer.isSelf {
@@ -469,6 +486,12 @@ func (p *State) GetDelinquencyDetail() *DelinquencyDetail {
 // if no active peer has ever been observed.
 func (p *State) GetLastActivePeer() PeerState {
 	return p.lastActivePeer
+}
+
+// NotVotingActivePeer returns the config-declared peer that held the active identity in gossip
+// during the last Refresh while its votes were not landing. ok is false when there was none.
+func (p *State) NotVotingActivePeer() (peer PeerState, ok bool) {
+	return p.notVotingActivePeer, p.notVotingActivePeer.IP != ""
 }
 
 // HasConfigUndeclaredActivePeer returns true if any of the peers are the active validator
