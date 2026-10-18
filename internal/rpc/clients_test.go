@@ -633,3 +633,45 @@ func TestCallerCancellationDoesNotCoolDownURL(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, c.urlCooldowns)
 }
+
+func TestCallerContextEndingInFlightDoesNotCoolDownURL(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		cancelOnRequest bool
+		wantErr         error
+	}{
+		{name: "cancellation", cancelOnRequest: true, wantErr: context.Canceled},
+		{name: "deadline", wantErr: context.DeadlineExceeded},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// The caller's deadline must expire before the client's per-attempt timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			started := make(chan struct{})
+			release := make(chan struct{})
+			hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				close(started)
+				if tt.cancelOnRequest {
+					cancel()
+				}
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+			}))
+			t.Cleanup(func() { close(release); hung.Close() })
+
+			c := NewClient("test", hung.URL).WithTimeout(5 * time.Second)
+			_, err := c.GetSlot(ctx)
+			require.Error(t, err)
+			select {
+			case <-started:
+			default:
+				t.Fatal("request must reach the endpoint before the caller context ends")
+			}
+			require.ErrorIs(t, ctx.Err(), tt.wantErr)
+			assert.Empty(t, c.urlCooldowns, "caller context ending must not penalize the endpoint")
+		})
+	}
+}
