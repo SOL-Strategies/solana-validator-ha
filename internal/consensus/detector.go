@@ -193,7 +193,8 @@ func (d *Detector) refreshCluster(ctx context.Context) {
 
 // fetchGenesisSlot returns the Alpenglow genesis slot, or zero while there is none. When the
 // cluster RPCs fail to answer getAgGenesisCert, the local validator is asked instead. A successful
-// null response is not a failure: the feature gate still determines the pre-Alpenglow phase.
+// null response means no genesis certificate is available yet. The on-chain feature gate then
+// distinguishes TowerBFT (not activated) from migration (activated).
 func (d *Detector) fetchGenesisSlot(ctx context.Context) (uint64, error) {
 	cert, err := d.clusterRPC.GetAgGenesisCert(ctx)
 	if err != nil && ctx.Err() == nil {
