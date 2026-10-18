@@ -2,7 +2,6 @@ package consensus
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -36,7 +35,7 @@ type Options struct {
 	// ClusterRPC is queried for the cluster phase.
 	ClusterRPC *rpc.Client
 	// LocalRPC is the local validator. It is queried for its own genesis certificate, and for the
-	// cluster's when no cluster RPC implements getAgGenesisCert.
+	// cluster's when the cluster RPCs cannot answer getAgGenesisCert.
 	LocalRPC  *rpc.Client
 	LogPrefix string
 }
@@ -192,12 +191,13 @@ func (d *Detector) refreshCluster(ctx context.Context) {
 	d.setPhase(PhaseTower)
 }
 
-// fetchGenesisSlot returns the Alpenglow genesis slot, or zero while there is none. When no
-// cluster RPC implements getAgGenesisCert, the local validator is asked instead.
+// fetchGenesisSlot returns the Alpenglow genesis slot, or zero while there is none. When the
+// cluster RPCs fail to answer getAgGenesisCert, the local validator is asked instead. A successful
+// null response is not a failure: the feature gate still determines the pre-Alpenglow phase.
 func (d *Detector) fetchGenesisSlot(ctx context.Context) (uint64, error) {
 	cert, err := d.clusterRPC.GetAgGenesisCert(ctx)
-	if errors.Is(err, rpc.ErrMethodNotFound) {
-		d.logger.Debug("no cluster RPC implements getAgGenesisCert - asking the local validator")
+	if err != nil && ctx.Err() == nil {
+		d.logger.Debug("failed to read the cluster Alpenglow genesis certificate - asking the local validator", "error", err)
 		cert, err = d.localRPC.GetAgGenesisCert(ctx)
 	}
 	if err != nil || cert == nil {
