@@ -300,7 +300,10 @@ type FeatureStatus struct {
 }
 
 // GetFeatureStatus reads a feature gate account at finalized commitment. A feature whose
-// account does not exist yet is reported as not activated.
+// account does not exist yet, or is not owned by the feature program, is reported as not
+// activated - the same rule the runtime applies. Anyone can send lamports to a feature address
+// before activation, which leaves an empty system-owned account there (mainnet-beta's Alpenglow
+// gate is one).
 func (c *Client) GetFeatureStatus(ctx context.Context, feature solana.PublicKey) (FeatureStatus, error) {
 	return executeWithRetry(c, ctx, rpcOperation[FeatureStatus]{
 		name: "GetFeatureStatus",
@@ -314,6 +317,9 @@ func (c *Client) GetFeatureStatus(ctx context.Context, feature solana.PublicKey)
 			}
 			if err != nil {
 				return FeatureStatus{}, err
+			}
+			if !result.Value.Owner.Equals(solana.FeatureProgramID) {
+				return FeatureStatus{}, nil
 			}
 			return decodeFeatureStatus(result.Value.Data.GetBinary())
 		},

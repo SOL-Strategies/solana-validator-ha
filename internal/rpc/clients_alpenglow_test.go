@@ -40,13 +40,17 @@ func TestDecodeFeatureStatus(t *testing.T) {
 }
 
 func featureAccountInfo(data []byte) map[string]interface{} {
+	return accountInfoOwnedBy("Feature111111111111111111111111111111111111", data)
+}
+
+func accountInfoOwnedBy(owner string, data []byte) map[string]interface{} {
 	return map[string]interface{}{
 		"context": map[string]interface{}{"slot": 1},
 		"value": map[string]interface{}{
 			"data":       []string{base64.StdEncoding.EncodeToString(data), "base64"},
 			"executable": false,
 			"lamports":   1,
-			"owner":      "Feature111111111111111111111111111111111111",
+			"owner":      owner,
 			"rentEpoch":  0,
 		},
 	}
@@ -62,6 +66,16 @@ func TestGetFeatureStatus(t *testing.T) {
 		{
 			name:        "account missing means not activated",
 			accountInfo: map[string]interface{}{"context": map[string]interface{}{"slot": 1}, "value": nil},
+			want:        FeatureStatus{},
+		},
+		{
+			name:        "funded system account means not activated",
+			accountInfo: accountInfoOwnedBy("11111111111111111111111111111111", nil),
+			want:        FeatureStatus{},
+		},
+		{
+			name:        "pending account",
+			accountInfo: featureAccountInfo([]byte{0}),
 			want:        FeatureStatus{},
 		},
 		{
