@@ -75,7 +75,7 @@ func TestGetFeatureStatus(t *testing.T) {
 		},
 		{
 			name:        "pending account",
-			accountInfo: featureAccountInfo([]byte{0}),
+			accountInfo: featureAccountInfo(make([]byte, solana.FeatureSizeOf)),
 			want:        FeatureStatus{},
 		},
 		{
