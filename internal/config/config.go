@@ -219,7 +219,11 @@ func (c *Config) validate() error {
 			continue // Already validated in Cluster.Validate()
 		}
 		if clusterRPCHost == validatorRPCHost {
-			c.logger.Warnf("cluster.rpc_urls contains the local validator RPC URL (%s) - ensure HA peers are configured as mutual --entrypoint flags for direct gossip, otherwise peer state may be stale", c.Validator.RPCURL)
+			label := clusterRPCURL
+			if source, ok := c.Cluster.rpcURLLabels[clusterRPCURL]; ok {
+				label = source
+			}
+			c.logger.Warnf("cluster.rpc_urls contains the local validator RPC URL (%s) - ensure HA peers are configured as mutual --entrypoint flags for direct gossip, otherwise peer state may be stale", label)
 			break
 		}
 	}

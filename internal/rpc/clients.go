@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"reflect"
 	"slices"
@@ -31,6 +32,8 @@ const defaultURLCooldown = 60 * time.Second
 type Client struct {
 	// urls is a slice of URLs for load balancing
 	urls []string
+	// urlLabels substitutes safe source URIs in diagnostics for secret endpoints.
+	urlLabels map[string]string
 	// clients is a map of RPC clients, keyed by the rpc URL
 	clients map[string]*rpc.Client
 	// lastSuccessfulURL tracks the last URL that succeeded to avoid it for throttling protection
@@ -56,6 +59,42 @@ func NewClient(logPrefix string, urls ...string) *Client {
 		urlCooldowns:      make(map[string]time.Time),
 		timeout:           defaultTimeout,
 		urlCooldown:       defaultURLCooldown,
+	}
+}
+
+// WithURLLabels sets safe diagnostic labels for secret endpoints, copying the map.
+// Errors from labelled endpoints expose only a category, never server/transport text.
+func (c *Client) WithURLLabels(labels map[string]string) *Client {
+	c.urlLabels = maps.Clone(labels)
+	return c
+}
+
+func (c *Client) urlLabel(endpoint string) string {
+	if label, ok := c.urlLabels[endpoint]; ok {
+		return label
+	}
+	return endpoint
+}
+
+func (c *Client) diagnosticError(endpoint string, err error) error {
+	if _, protected := c.urlLabels[endpoint]; !protected {
+		return err
+	}
+	var netErr net.Error
+	var rpcErr *jsonrpc.RPCError
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return fmt.Errorf("RPC timeout")
+	case isTransportError(err):
+		return fmt.Errorf("RPC transport failure")
+	case errors.As(err, &rpcErr) && rpcErr.Code == methodNotFoundCode:
+		return ErrMethodNotFound
+	default:
+		return fmt.Errorf("RPC failure")
 	}
 }
 
@@ -129,14 +168,15 @@ func (c *Client) coolDown(url, method, msg string) {
 	alreadyCooling := c.urlCooldowns[url].After(now)
 	c.urlCooldowns[url] = now.Add(c.urlCooldown)
 	if !alreadyCooling {
-		c.logger.Warn(msg, "method", method, "url", url, "cooldown", c.urlCooldown)
+		c.logger.Warn(msg, "method", method, "url", c.urlLabel(url), "cooldown", c.urlCooldown)
 	}
 }
 
 // executeWithRetry executes an RPC method, trying URLs in throttling-optimized order
 func executeWithRetry[T any](c *Client, ctx context.Context, op rpcOperation[T]) (T, error) {
 	attemptedURLs := []string{}
-	errors := []error{}
+	callErrors := []error{}
+	diagnosticErrors := []error{}
 
 	// try each URL in order, with lastSuccessfulURL at the end for throttling protection
 	for _, url := range c.getURLsToTry() {
@@ -145,7 +185,7 @@ func executeWithRetry[T any](c *Client, ctx context.Context, op rpcOperation[T])
 			continue
 		}
 
-		attemptedURLs = append(attemptedURLs, url)
+		attemptedURLs = append(attemptedURLs, c.urlLabel(url))
 
 		var result T
 		err := c.withTimeout(ctx, func(timeoutCtx context.Context) error {
@@ -164,8 +204,10 @@ func executeWithRetry[T any](c *Client, ctx context.Context, op rpcOperation[T])
 					c.coolDown(url, op.name, "RPC endpoint unreachable or timed out, cooling down")
 				}
 			}
-			c.logger.Debug("method call failed", "method", op.name, "error", err, "rpc_url", url)
-			errors = append(errors, err)
+			safeErr := c.diagnosticError(url, err)
+			c.logger.Debug("method call failed", "method", op.name, "error", safeErr, "rpc_url", c.urlLabel(url))
+			callErrors = append(callErrors, err)
+			diagnosticErrors = append(diagnosticErrors, safeErr)
 			continue
 		}
 
@@ -175,10 +217,10 @@ func executeWithRetry[T any](c *Client, ctx context.Context, op rpcOperation[T])
 	}
 
 	var zero T
-	if len(errors) > 0 && allMethodNotFound(errors) {
+	if len(callErrors) > 0 && allMethodNotFound(callErrors) {
 		return zero, fmt.Errorf("%s on %v: %w", op.name, attemptedURLs, ErrMethodNotFound)
 	}
-	return zero, fmt.Errorf("method call failed on all RPC endpoints method: %s, attempted_urls: %v, errors: %v", op.name, attemptedURLs, errors)
+	return zero, fmt.Errorf("method call failed on all RPC endpoints method: %s, attempted_urls: %v, errors: %v", op.name, attemptedURLs, diagnosticErrors)
 }
 
 // GetVoteAccounts gets the vote accounts from the first working RPC client

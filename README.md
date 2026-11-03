@@ -195,6 +195,8 @@ cluster:
 
   # required: only for custom cluster names | default: cluster default RPC URL for
   # known cluster.name values (mainnet-beta, devnet, testnet), no default otherwise
+  # Entries support HTTP/HTTPS URLs or file:// URIs (e.g. file:///run/secrets/rpc_url)
+  # for loading URLs containing API keys or other secrets from files.
   # RPC URLs used to query gossip state. Supplying multiple URLs provides resilience
   # against individual RPC drop-outs. URLs that return 403/429/503 are automatically
   # deprioritised for rpc_url_cooldown_duration before being retried.
