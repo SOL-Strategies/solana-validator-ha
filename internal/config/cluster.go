@@ -1,8 +1,13 @@
 package config
 
 import (
+	"bufio"
 	"fmt"
+	"maps"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	solanagorpc "github.com/solana-foundation/solana-go/v2/rpc"
@@ -12,6 +17,8 @@ import (
 type Cluster struct {
 	Name    string   `koanf:"name"`
 	RPCURLs []string `koanf:"rpc_urls"`
+	// rpcURLLabels retains safe source URIs for endpoints loaded from files.
+	rpcURLLabels map[string]string
 	// RPCTimeoutDuration is the per-call timeout for cluster RPC requests.
 	// Default: 2s. Lower values detect hanging endpoints faster; set higher if your RPC is slow.
 	RPCTimeoutDuration time.Duration `koanf:"rpc_timeout_duration"`
@@ -22,7 +29,8 @@ type Cluster struct {
 	Consensus Consensus `koanf:"consensus"`
 }
 
-// Validate validates the cluster configuration
+// Validate validates the cluster configuration and resolves file-backed RPC URLs.
+// Resolution is committed only on success; subsequent validation uses the loaded values.
 func (c *Cluster) Validate() error {
 	// cluster.name must be set; any non-empty name is accepted (including custom
 	// or future clusters such as Alpenglow), since RPC URLs are validated below.
@@ -35,14 +43,16 @@ func (c *Cluster) Validate() error {
 		return fmt.Errorf("cluster.rpc_urls must be a non-empty list of valid RPC URLs")
 	}
 
-	for _, rpcURL := range c.RPCURLs {
-		parsedURL, err := url.Parse(rpcURL)
+	resolved := make([]string, len(c.RPCURLs))
+	labels := c.RPCURLLabels()
+	for i, source := range c.RPCURLs {
+		endpoint, label, err := resolveRPCURL(source)
 		if err != nil {
-			return fmt.Errorf("cluster.rpc_urls must be a list of valid RPC URLs: %w", err)
+			return fmt.Errorf("cluster.rpc_urls must be a list of valid RPC URLs: cluster.rpc_urls[%d]: %w", i, err)
 		}
-		// Additional validation: must have a scheme and host
-		if parsedURL.Scheme == "" || parsedURL.Host == "" {
-			return fmt.Errorf("cluster.rpc_urls must be a list of valid RPC URLs: invalid URL %s", rpcURL)
+		resolved[i] = endpoint
+		if label != "" {
+			labels[endpoint] = label
 		}
 	}
 
@@ -53,7 +63,87 @@ func (c *Cluster) Validate() error {
 		return fmt.Errorf("cluster.rpc_url_cooldown_duration must be greater than zero")
 	}
 
+	c.RPCURLs = resolved
+	c.rpcURLLabels = labels
+
 	return nil
+}
+
+// RPCURLLabels returns a copy of the safe labels for file-backed endpoint URLs.
+func (c *Cluster) RPCURLLabels() map[string]string {
+	labels := maps.Clone(c.rpcURLLabels)
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	return labels
+}
+
+func resolveRPCURL(source string) (endpoint, label string, err error) {
+	parsed, err := url.Parse(source)
+	if err != nil {
+		// url.Parse errors can embed the entire input, including credentials.
+		return "", "", fmt.Errorf("invalid URL or file URI")
+	}
+	endpoint = source
+	if parsed.Scheme == "file" {
+		if !strings.HasPrefix(source, "file://") ||
+			(parsed.Host != "" && parsed.Host != "localhost") ||
+			parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery ||
+			strings.Contains(source, "#") || parsed.Opaque != "" ||
+			!filepath.IsAbs(parsed.Path) || strings.ContainsRune(parsed.Path, 0) {
+			return "", "", fmt.Errorf("file URI must specify an absolute local path without credentials, query, or fragment")
+		}
+		endpoint, err = readRPCURLFile(parsed.Path)
+		if err != nil {
+			return "", "", fmt.Errorf("file %s: %w", source, err)
+		}
+		label = source
+	}
+	parsed, err = url.Parse(endpoint)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		if label != "" {
+			return "", "", fmt.Errorf("file %s: first non-blank, non-comment line must be an HTTP/HTTPS URL with a hostname", label)
+		}
+		return "", "", fmt.Errorf("endpoint must be an HTTP/HTTPS URL with a hostname")
+	}
+	return endpoint, label, nil
+}
+
+func readRPCURLFile(path string) (string, error) {
+	// Check before opening so a FIFO or device does not block startup.
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot stat file")
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("must be a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot open file for reading")
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("cannot read a regular file")
+	}
+
+	const maxLineBytes = 64 * 1024
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), maxLineBytes+2)
+	for scanner.Scan() {
+		if len(scanner.Bytes()) > maxLineBytes {
+			return "", fmt.Errorf("line exceeds 64 KiB")
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" && !strings.HasPrefix(line, "#") {
+			return line, nil
+		}
+	}
+	if scanner.Err() != nil {
+		return "", fmt.Errorf("cannot read file or line exceeds 64 KiB")
+	}
+	return "", fmt.Errorf("no non-blank, non-comment URL line")
 }
 
 // SetDefaults sets default values for the cluster configuration

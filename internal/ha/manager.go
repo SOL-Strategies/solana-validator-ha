@@ -199,12 +199,25 @@ func (m *Manager) initialize() error {
 	}
 	m.cfg.Failover.Peers.Add(*m.peerSelf)
 
+	// Use source URIs for file-backed endpoints in startup diagnostics.
+	labels := m.cfg.Cluster.RPCURLLabels()
+	displayURL := func(endpoint string) string {
+		if label, ok := labels[endpoint]; ok {
+			return label
+		}
+		return endpoint
+	}
+	clusterRPCLabels := make([]string, len(m.cfg.Cluster.RPCURLs))
+	for i, endpoint := range m.cfg.Cluster.RPCURLs {
+		clusterRPCLabels[i] = displayURL(endpoint)
+	}
+
 	// initialize
 	m.logger.Info("initializing",
 		"version", m.version,
 		"public_ip", publicIP,
-		"cluster_rpc_urls", m.cfg.Cluster.RPCURLs,
-		"validator_rpc_url", m.cfg.Validator.RPCURL,
+		"cluster_rpc_urls", clusterRPCLabels,
+		"validator_rpc_url", displayURL(m.cfg.Validator.RPCURL),
 		"active_pubkey", m.cfg.Validator.Identities.ActivePubkey(),
 		"passive_pubkey", m.cfg.Validator.Identities.PassivePubkey(),
 		"peers", m.cfg.Failover.Peers.String(),
@@ -216,6 +229,7 @@ func (m *Manager) initialize() error {
 	// the gossip state and the consensus detector both run on the HA monitor goroutine, so they
 	// can share one cluster RPC client and its URL rotation
 	clusterRPC := rpc.NewClient(m.logPrefix, m.cfg.Cluster.RPCURLs...).
+		WithURLLabels(labels).
 		WithTimeout(m.cfg.Cluster.RPCTimeoutDuration).
 		WithCooldown(m.cfg.Cluster.RPCURLCooldownDuration)
 
@@ -234,7 +248,7 @@ func (m *Manager) initialize() error {
 	// the consensus detector and the isolation monitor get their own local RPC client, shared on
 	// the HA monitor goroutine, because the local state's client is used by the health tracker
 	// goroutine
-	localRPC := rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL)
+	localRPC := rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL).WithURLLabels(labels)
 
 	// create consensus detector
 	m.logger.Debug("creating consensus detector", "mode", m.cfg.Cluster.Consensus.Mode)
@@ -251,7 +265,7 @@ func (m *Manager) initialize() error {
 	// create local state
 	m.logger.Debug("creating local state")
 	m.localState = local.NewState(local.Options{
-		RPC:          rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL),
+		RPC:          rpc.NewClient(m.logPrefix, m.cfg.Validator.RPCURL).WithURLLabels(labels),
 		Cfg:          m.cfg.Failover.SelfHealthy,
 		ActivePubkey: m.cfg.Validator.Identities.ActivePubkey(),
 		Ctx:          m.ctx,
