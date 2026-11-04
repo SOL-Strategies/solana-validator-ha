@@ -193,8 +193,9 @@ func atomicWrite(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
-// RecoverPartials finalizes valid checkpoint files as interrupted incidents.
-func RecoverPartials(outputDir string) ([]string, error) {
+// RecoverPartials finalizes valid checkpoints as interrupted incidents when keep is true,
+// or removes them when false. Invalid checkpoints are preserved and reported either way.
+func RecoverPartials(outputDir string, keep bool) ([]string, error) {
 	paths, err := filepath.Glob(filepath.Join(outputDir, "svha-*-recording.json.partial"))
 	if err != nil {
 		return nil, err
@@ -208,6 +209,12 @@ func RecoverPartials(outputDir string) ([]string, error) {
 		var event FailoverEvent
 		if err := json.Unmarshal(data, &event); err != nil {
 			return recovered, fmt.Errorf("parse partial %s: %w", partial, err)
+		}
+		if !keep {
+			if err := os.Remove(partial); err != nil && !os.IsNotExist(err) {
+				return recovered, err
+			}
+			continue
 		}
 		now := time.Now().UTC()
 		event.CompletedAt = &now

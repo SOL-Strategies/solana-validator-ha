@@ -362,10 +362,20 @@ failover:
     # When true, a JSON recording is checkpointed from the first anomaly through its outcome.
     enabled: false
 
-    # required: false | default: directory of the loaded config file
-    # Directory where recording files are written. Must exist and be writable — validated at startup.
-    # If omitted, files land next to the config file.
+    # required: false | default: recordings/ beside the loaded config file
+    # Destination directory; created on startup when recording is enabled.
     output_dir: "/var/log/solana-validator-ha/recordings"
+
+    retention:
+      cleanup:
+        enabled: false  # default; requires max_age when true
+        interval: 1h  # default; background cleanup interval when enabled
+        # Positive Go duration; required when cleanup is enabled.
+        # max_age: 1680h  # example: 10 weeks; Go does not support w units.
+      events:
+        failover: true
+        recovery: false
+        interruption: true
 
   # required: true | min: 1
   # Map of HA peers, excluding this node — it is added automatically at startup.
@@ -653,7 +663,11 @@ failover:
 
 When `failover.recording.enabled: true`, `solana-validator-ha` starts a recording on the first leaderless sample, gossip RPC error, self-gossip absence, or delinquency signal. It checkpoints the incident until the network recovers or the node reaches a terminal failover decision. This records the former active node's view as well as the takeover candidates' views without requiring shared infrastructure.
 
-While an incident is open, the latest state is stored atomically as `*.json.partial`. On the next start, a valid partial is finalized with the `interrupted` outcome so a process crash does not erase the available timeline. Recording failures are logged but never block an HA decision.
+While an incident is open, the latest state is stored atomically as `*.json.partial`. On the next start, a valid partial is finalized with the `interrupted` outcome when `retention.events.interruption` is enabled (the default), so a process crash does not erase the available timeline. Recording failures are logged but never block an HA decision.
+
+By default, completed recordings are kept for failover decisions and interruptions; incidents that recover without a failover are discarded, including their partial checkpoints. Set `failover.recording.retention.events.recovery: true` to retain them. Retention does not change HA decisions or when evidence is captured, and the age policy also applies to existing completed recordings in the destination directory.
+
+`retention.events.failover` includes promotions, demotions, failed actions, aborted attempts, and retained-active decisions. `retention.events.recovery` controls all `recovered_no_failover` outcomes regardless of duration. `retention.events.interruption` controls unfinished incidents at shutdown and checkpoint recovery at startup; when false, valid unfinished checkpoints are removed. Omitted settings use the defaults shown below. Temporary `.partial` checkpoints are still written while an incident is unresolved, even if its eventual outcome is excluded.
 
 ### File naming
 
@@ -690,10 +704,21 @@ Each recording file contains a single JSON object with:
 failover:
   recording:
     enabled: true
-    output_dir: "/var/log/solana-validator-ha/recordings"  # default: config file directory
+    output_dir: "/var/log/solana-validator-ha/recordings"  # default: <config directory>/recordings
+    retention:
+      cleanup:
+        enabled: false
+        interval: 1h
+        # max_age: 1680h  # required when cleanup.enabled: true; go duration string
+      events:
+        failover: true
+        recovery: false
+        interruption: true
 ```
 
-The output directory is validated at startup — `solana-validator-ha` will refuse to start if it does not exist or is not writable.
+When recording is enabled, the destination directory is created at startup if needed and checked for write access. When `output_dir` is omitted, it defaults to a `recordings` directory beside the loaded config file. Explicit relative paths remain relative to the process working directory. If creation or write access fails, startup fails. Existing `output_dir` settings remain supported. Move `keep_events` settings to `retention.events`; existing recordings are not moved automatically.
+
+`retention.cleanup.enabled` defaults to false: age-based cleanup stays disabled even if `max_age` is supplied. When enabled, `retention.cleanup.max_age` is required at startup and has no default. When supplied, it must be a positive Go duration such as `24h` or `1680h`; `10w` is not valid Go duration syntax. When cleanup is enabled, expired completed `svha-*-recording.json` files are deleted at startup and then every `retention.cleanup.interval` (default `1h`), based on file modification time. `retention.cleanup.interval` must also be a positive Go duration; it is validated even when cleanup is disabled. Recurring cleanup runs in its own goroutine. Cleanup leaves partial checkpoints, symlinks, subdirectories, and unrelated files untouched. Cleanup errors are logged and do not block HA decisions.
 
 ### Replay
 
