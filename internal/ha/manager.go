@@ -284,6 +284,17 @@ func (m *Manager) initialize() error {
 			return err
 		}
 		m.recordingOutputDir = m.cfg.Failover.Recording.ResolvedOutputDir(m.cfg.File)
+		retention := m.cfg.Failover.Recording.Retention
+		m.logger.Info("recording retention events configured",
+			"failover", retention.Events.Keeps("became_active"),
+			"recovery", retention.Events.Keeps("recovered_no_failover"),
+			"interruption", retention.Events.Keeps("interrupted"))
+		if retention.Cleanup.Enabled {
+			// Prepare validated these durations above, including the default interval.
+			interval, _ := retention.Cleanup.IntervalDuration()
+			maxAge, _ := retention.Cleanup.MaxAgeDuration()
+			m.logger.Info("recording cleanup enabled", "interval", interval, "max_age", maxAge)
+		}
 		recovered, recoverErr := recording.RecoverPartials(m.recordingOutputDir, m.cfg.Failover.Recording.Retention.Events.Keeps("interrupted"))
 		if recoverErr != nil {
 			m.logger.Error("failed to recover partial failover recordings", "error", recoverErr)
@@ -535,7 +546,11 @@ func (m *Manager) pruneRecordings() {
 	}
 	maxAge, err := m.cfg.Failover.Recording.Retention.Cleanup.MaxAgeDuration()
 	if err == nil && maxAge > 0 {
-		err = recording.Prune(m.recordingOutputDir, maxAge, time.Now())
+		var removed int
+		removed, err = recording.Prune(m.recordingOutputDir, maxAge, time.Now())
+		if removed > 0 {
+			m.logger.Info("pruned expired recordings", "removed", removed, "directory", m.recordingOutputDir, "max_age", maxAge)
+		}
 	}
 	if err != nil {
 		m.logger.Error("failed to prune expired recordings", "error", err)
