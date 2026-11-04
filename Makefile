@@ -12,7 +12,7 @@ LDFLAGS := -ldflags="-s -w -X github.com/sol-strategies/solana-validator-ha/cmd.
 export COMPOSE_BAKE := true
 
 # Build targets
-PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+PLATFORMS := linux/amd64 linux/arm64
 
 # Default target
 .PHONY: all
@@ -32,10 +32,10 @@ build-docker:
 	@mkdir -p $(BUILD_DIR)
 	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-$(ARTIFACT_VERSION)-linux-amd64 ./cmd/solana-validator-ha
 
-# Cross-platform build for all platforms
+# Build release binaries for supported Linux architectures
 .PHONY: build-all
 build-all:
-	@echo "Building $(BINARY_NAME) for all platforms..."
+	@echo "Building $(BINARY_NAME) for Linux (amd64 and arm64)..."
 	@mkdir -p $(BUILD_DIR)
 	@set -e; ARTIFACT_VERSION='$(ARTIFACT_VERSION)'; \
 	for platform in $(PLATFORMS); do \
@@ -225,7 +225,7 @@ uninstall:
 help:
 	@echo "Available targets:"
 	@echo "  build          - Build the binary locally"
-	@echo "  build-all      - Build binaries for all platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64)"
+	@echo "  build-all      - Build Linux binaries (linux/amd64, linux/arm64)"
 	@echo "  build-docker   - Build for Docker (linux-amd64)"
 	@echo "  clean          - Clean build artifacts"
 	@echo "  test           - Run tests"
