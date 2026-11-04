@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // ── Ring ────────────────────────────────────────────────────────────────────
@@ -251,7 +253,7 @@ func TestRecoverPartials(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	recovered, err := RecoverPartials(dir)
+	recovered, err := RecoverPartials(dir, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,5 +330,38 @@ func TestRecorder_DiscardAsyncRemovesCheckpoint(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Fatalf("output dir holds %v, want only the barrier recording", names)
+	}
+}
+
+func TestRecoverPartials_Discard(t *testing.T) {
+	dir := t.TempDir()
+	rec := makeRecorder()
+	rec.CheckpointAsync(dir, nil)
+	// Wait for the checkpoint via a subsequent write in the same FIFO queue.
+	barrier := New(NodeInfo{ActivePubkey: "barrier"}, ConfigSnapshot{}, time.Now(), nil)
+	barrier.FinishAsync(dir, Outcome{Result: "barrier"}, nil)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(dir, barrier.filename()))
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	recovered, err := RecoverPartials(dir, false)
+	require.NoError(t, err)
+	require.Empty(t, recovered)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, barrier.filename(), entries[0].Name())
+}
+
+func TestRecoverPartials_InvalidCheckpointPreserved(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "svha-invalid-recording.json.partial")
+		require.NoError(t, os.WriteFile(path, []byte("invalid JSON"), 0600))
+		_, err := RecoverPartials(dir, keep)
+		require.Error(t, err)
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, "invalid JSON", string(raw))
 	}
 }

@@ -3,8 +3,10 @@ package ha
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +27,8 @@ func TestObserveRecording_CapturesTransientRPCIncident(t *testing.T) {
 	dir := t.TempDir()
 	cfg := createTestConfig()
 	cfg.Failover.Recording.Enabled = true
+	keepRecovery := true
+	cfg.Failover.Recording.Retention.Events.Recovery = &keepRecovery
 	cfg.Failover.Recording.OutputDir = dir
 	manager := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
 	require.NoError(t, manager.initialize())
@@ -1246,4 +1250,237 @@ func TestEnsureHAState_DelinquencyBypass_Rank0_ProceedsToEnsureActive(t *testing
 	state := manager.cache.GetState()
 	assert.Equal(t, "becoming_active", state.FailoverStatus,
 		"rank-0 delinquency bypass should proceed to ensureActive() regardless of leaderless count")
+}
+
+func TestObserveRecording_RecoveryRetention(t *testing.T) {
+	for _, kind := range []string{"self_gossip_absent", "rpc_error", "leaderless"} {
+		for _, retain := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/retain=%t", kind, retain), func(t *testing.T) {
+				dir := t.TempDir()
+				cfg := createTestConfig()
+				cfg.Failover.Recording.Enabled = true
+				cfg.Failover.Recording.OutputDir = dir
+				if retain {
+					cfg.Failover.Recording.Retention.Events.Recovery = &retain
+				}
+				m := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+				require.NoError(t, m.initialize())
+				defer m.cancel()
+				start := time.Now().UTC()
+				healthy := recording.GossipSample{SampledAt: start.Add(-5 * time.Second), SelfInGossip: true, LocalRole: "passive", LocalHealthy: true}
+				m.ring.Add(healthy)
+				anomaly := healthy
+				anomaly.SampledAt = start
+				switch kind {
+				case "self_gossip_absent":
+					anomaly.SelfInGossip = false
+				case "rpc_error":
+					anomaly.RPCError = true
+				case "leaderless":
+					anomaly.LeaderlessSamplesCount = 1
+				}
+				m.ring.Add(anomaly)
+				require.True(t, m.observeRecording(anomaly, false))
+				waitForRecordingWrites(t)
+				partials, err := filepath.Glob(filepath.Join(dir, "*.partial"))
+				require.NoError(t, err)
+				require.Len(t, partials, 1)
+				recovered := healthy
+				recovered.SampledAt = start.Add(5 * time.Second)
+				// Recovery must also clear suppression for the next independent incident.
+				m.repeatOutcome = "aborted_not_healthy"
+				m.repeatOutcomeWriteFailed = &atomic.Bool{}
+				require.False(t, m.observeRecording(recovered, false))
+				require.Nil(t, m.activeRecorder)
+				require.Empty(t, m.repeatOutcome)
+				require.Nil(t, m.repeatOutcomeWriteFailed)
+				waitForRecordingWrites(t)
+				entries, err := os.ReadDir(dir)
+				require.NoError(t, err)
+				if !retain {
+					require.Empty(t, entries)
+					return
+				}
+				require.Len(t, entries, 1)
+				raw, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+				require.NoError(t, err)
+				var event recording.FailoverEvent
+				require.NoError(t, json.Unmarshal(raw, &event))
+				require.Equal(t, "recovered_no_failover", event.Outcome.Result)
+				require.Len(t, event.GossipSamples, 3)
+				require.Equal(t, healthy.SampledAt, event.GossipSamples[0].SampledAt)
+				require.Equal(t, start, event.DetectedAt)
+				require.Equal(t, "incident_started", event.Timeline[0].Event)
+				require.Equal(t, "network_recovered", event.Timeline[1].Event)
+			})
+		}
+	}
+}
+
+func TestFinishRecording_Retention(t *testing.T) {
+	outcomes := []string{
+		"became_active", "promotion_failed", "demoted_passive", "demoted_validator_down",
+		"demotion_failed", "not_voting_retained_active", "aborted_undeclared_active",
+		"last_node_standing_retained_active", "aborted_not_healthy", "aborted_not_healthy_long_enough",
+		"already_active", "aborted_delay_error", "aborted_revalidation_failed",
+		"aborted_cluster_stalled", "aborted_vote_account_excluded", "aborted_failover_ineffective",
+		"aborted_local_not_migrated", "aborted_peer_took_over", "interrupted", "recovered_no_failover",
+		"future_failover_outcome",
+	}
+	for _, outcome := range outcomes {
+		for _, retain := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/retain=%t", outcome, retain), func(t *testing.T) {
+				dir := t.TempDir()
+				cfg := createTestConfig()
+				other := !retain
+				cfg.Failover.Recording.Retention.Events = config.RecordingEvents{Failover: &retain, Recovery: &other, Interruption: &other}
+				switch outcome {
+				case "recovered_no_failover":
+					cfg.Failover.Recording.Retention.Events = config.RecordingEvents{Failover: &other, Recovery: &retain, Interruption: &other}
+				case "interrupted":
+					cfg.Failover.Recording.Retention.Events = config.RecordingEvents{Failover: &other, Recovery: &other, Interruption: &retain}
+				}
+				m := NewManager(NewManagerOptions{Cfg: cfg})
+				defer m.cancel()
+				m.recordingOutputDir = dir
+				m.activeRecorder = recording.New(recording.NodeInfo{}, recording.ConfigSnapshot{}, time.Now(), nil)
+				m.checkpointRecording()
+				// Excluded outcomes must be filtered before duplicate suppression.
+				if !retain {
+					m.repeatOutcome = outcome
+					m.repeatOutcomeWriteFailed = &atomic.Bool{}
+				}
+				m.finishRecording(outcome, "from", "to")
+				require.Nil(t, m.activeRecorder)
+				waitForRecordingWrites(t)
+				entries, err := os.ReadDir(dir)
+				require.NoError(t, err)
+				if retain {
+					require.Len(t, entries, 1)
+					require.Equal(t, outcome, waitForRecordingOutcome(t, dir))
+				} else {
+					require.Empty(t, entries)
+					require.Empty(t, m.repeatOutcome)
+					require.Nil(t, m.repeatOutcomeWriteFailed)
+				}
+			})
+		}
+	}
+}
+
+func TestInitialize_InterruptionRetention(t *testing.T) {
+	for _, retain := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retain=%t", retain), func(t *testing.T) {
+			dir := t.TempDir()
+			rec := recording.New(recording.NodeInfo{ActivePubkey: "unfinished"}, recording.ConfigSnapshot{}, time.Now(), nil)
+			rec.CheckpointAsync(dir, nil)
+			waitForRecordingWrites(t)
+			cfg := createTestConfig()
+			cfg.Failover.Recording.Enabled = true
+			cfg.Failover.Recording.OutputDir = dir
+			cfg.Failover.Recording.Retention.Events.Interruption = &retain
+			m := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+			defer m.cancel()
+			require.NoError(t, m.initialize())
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			if retain {
+				require.Len(t, entries, 1)
+				require.Equal(t, "interrupted", waitForRecordingOutcome(t, dir))
+			} else {
+				require.Empty(t, entries)
+			}
+		})
+	}
+}
+
+func TestInitialize_RecordingDirectoryAndExpiration(t *testing.T) {
+	root := t.TempDir()
+	cfg := createTestConfig()
+	cfg.File = filepath.Join(root, "config.yaml")
+	cfg.Failover.Recording.Enabled = true
+	cfg.Failover.Recording.Retention.Cleanup.Enabled = true
+	cfg.Failover.Recording.Retention.Cleanup.MaxAge = "24h"
+	m := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+	defer m.cancel()
+	require.NoError(t, m.initialize())
+	dir := filepath.Join(root, "recordings")
+	require.Equal(t, dir, m.recordingOutputDir)
+	require.DirExists(t, dir)
+	oldPath := filepath.Join(dir, "svha-old-recording.json")
+	freshPath := filepath.Join(dir, "svha-fresh-recording.json")
+	require.NoError(t, os.WriteFile(oldPath, []byte("{}"), 0600))
+	require.NoError(t, os.WriteFile(freshPath, []byte("{}"), 0600))
+	oldTime := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, os.Chtimes(oldPath, oldTime, oldTime))
+	// A new manager exercises startup expiration of existing recordings.
+	cfg2 := createTestConfig()
+	cfg2.File = cfg.File
+	cfg2.Failover.Recording = cfg.Failover.Recording
+	m2 := NewManager(NewManagerOptions{Cfg: cfg2, GetPublicIPFunc: mockPublicIPFunc})
+	defer m2.cancel()
+	require.NoError(t, m2.initialize())
+	require.NoFileExists(t, oldPath)
+	require.FileExists(t, freshPath)
+}
+
+func TestInitialize_RecordingRetentionIndefinite(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "recordings")
+	require.NoError(t, os.Mkdir(dir, 0755))
+	path := filepath.Join(dir, "svha-old-recording.json")
+	require.NoError(t, os.WriteFile(path, []byte("{}"), 0600))
+	oldTime := time.Now().Add(-365 * 24 * time.Hour)
+	require.NoError(t, os.Chtimes(path, oldTime, oldTime))
+	cfg := createTestConfig()
+	cfg.File = filepath.Join(root, "config.yaml")
+	cfg.Failover.Recording.Enabled = true
+	m := NewManager(NewManagerOptions{Cfg: cfg, GetPublicIPFunc: mockPublicIPFunc})
+	defer m.cancel()
+	require.NoError(t, m.initialize())
+	require.FileExists(t, path)
+	m.pruneRecordings() // periodic cleanup must also leave indefinite recordings alone
+	require.FileExists(t, path)
+	// Configuring an age alone must not enable either startup or periodic deletion.
+	cfg.Failover.Recording.Retention.Cleanup.MaxAge = "24h"
+	m.pruneRecordings()
+	require.FileExists(t, path)
+	cfg2 := createTestConfig()
+	cfg2.File = cfg.File
+	cfg2.Failover.Recording = cfg.Failover.Recording
+	m2 := NewManager(NewManagerOptions{Cfg: cfg2, GetPublicIPFunc: mockPublicIPFunc})
+	defer m2.cancel()
+	require.NoError(t, m2.initialize())
+	require.FileExists(t, path)
+	m2.recordingRetentionLoop() // disabled routine returns immediately
+	require.FileExists(t, path)
+}
+
+func TestRecordingRetentionLoop_ConfiguredInterval(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "svha-expired-recording.json")
+	require.NoError(t, os.WriteFile(path, []byte("{}"), 0600))
+	oldTime := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, os.Chtimes(path, oldTime, oldTime))
+	cfg := createTestConfig()
+	cfg.Failover.Recording.Retention.Cleanup = config.RecordingCleanup{Enabled: true, Interval: "10ms", MaxAge: "24h"}
+	m := NewManager(NewManagerOptions{Cfg: cfg})
+	m.recordingOutputDir = dir
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.recordingRetentionLoop()
+	}()
+	t.Cleanup(func() {
+		m.cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("cleanup routine did not stop after cancellation")
+		}
+	})
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(path)
+		return os.IsNotExist(err)
+	}, 2*time.Second, 10*time.Millisecond)
 }

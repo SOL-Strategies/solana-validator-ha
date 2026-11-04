@@ -147,6 +147,9 @@ func (m *Manager) Run() error {
 		return err
 	}
 	defer m.finishRecording("interrupted", "unknown", "unknown")
+	if m.cfg.Failover.Recording.Enabled && m.cfg.Failover.Recording.Retention.Cleanup.Enabled {
+		go m.recordingRetentionLoop()
+	}
 
 	// start metrics server
 	go m.startMetricsServer()
@@ -277,14 +280,18 @@ func (m *Manager) initialize() error {
 
 	// resolve recording output dir once so it is ready when a failover fires
 	if m.cfg.Failover.Recording.Enabled {
+		if err := m.cfg.Failover.Recording.Prepare(m.cfg.File); err != nil {
+			return err
+		}
 		m.recordingOutputDir = m.cfg.Failover.Recording.ResolvedOutputDir(m.cfg.File)
-		recovered, recoverErr := recording.RecoverPartials(m.recordingOutputDir)
+		recovered, recoverErr := recording.RecoverPartials(m.recordingOutputDir, m.cfg.Failover.Recording.Retention.Events.Keeps("interrupted"))
 		if recoverErr != nil {
 			m.logger.Error("failed to recover partial failover recordings", "error", recoverErr)
 		}
 		for _, path := range recovered {
 			m.logger.Warn("recovered interrupted failover recording", "path", path)
 		}
+		m.pruneRecordings()
 	}
 
 	m.logger.Debug("initialized")
@@ -522,6 +529,40 @@ func (m *Manager) recordingError(err error) {
 	m.logger.Error("failed to persist failover recording", "error", err)
 }
 
+func (m *Manager) pruneRecordings() {
+	if !m.cfg.Failover.Recording.Retention.Cleanup.Enabled {
+		return
+	}
+	maxAge, err := m.cfg.Failover.Recording.Retention.Cleanup.MaxAgeDuration()
+	if err == nil && maxAge > 0 {
+		err = recording.Prune(m.recordingOutputDir, maxAge, time.Now())
+	}
+	if err != nil {
+		m.logger.Error("failed to prune expired recordings", "error", err)
+	}
+}
+
+func (m *Manager) recordingRetentionLoop() {
+	if !m.cfg.Failover.Recording.Retention.Cleanup.Enabled {
+		return
+	}
+	interval, err := m.cfg.Failover.Recording.Retention.Cleanup.IntervalDuration()
+	if err != nil {
+		m.logger.Error("invalid recording cleanup interval", "error", err)
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+			m.pruneRecordings()
+		}
+	}
+}
+
 func (m *Manager) recordStep(event string, started time.Time, err error) {
 	if m.activeRecorder == nil {
 		return
@@ -542,6 +583,13 @@ func (m *Manager) checkpointRecording() {
 
 func (m *Manager) finishRecording(result, fromNode, toNode string) {
 	if m.activeRecorder == nil {
+		return
+	}
+	if !m.cfg.Failover.Recording.Retention.Events.Keeps(result) {
+		m.activeRecorder.DiscardAsync(m.recordingOutputDir, m.recordingError)
+		m.activeRecorder = nil
+		m.repeatOutcome = ""
+		m.repeatOutcomeWriteFailed = nil
 		return
 	}
 	if result == m.repeatOutcome && m.repeatOutcomeWriteFailed != nil && !m.repeatOutcomeWriteFailed.Load() {

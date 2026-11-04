@@ -275,12 +275,12 @@ func (c *Config) validate() error {
 
 	c.warnAboutTowerOnlySettings()
 
-	// failover.recording: validate output dir is reachable and writable at startup
+	// Validate retention and prepare the recording destination when enabled.
+	if err := c.Failover.Recording.Prepare(c.File); err != nil {
+		return err
+	}
 	if c.Failover.Recording.Enabled {
 		resolvedDir := c.Failover.Recording.ResolvedOutputDir(c.File)
-		if err := c.Failover.Recording.ValidateOutputDir(resolvedDir); err != nil {
-			return err
-		}
 		c.logger.Infof("failover recording enabled - writing to %s", resolvedDir)
 	}
 
