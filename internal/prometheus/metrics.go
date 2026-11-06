@@ -57,6 +57,8 @@ type Metrics struct {
 	localAlpenglowGenesis    *prometheus.GaugeVec
 	activeVoteLagSlots       *prometheus.GaugeVec
 	clusterFinalizedSlot     *prometheus.GaugeVec
+	clusterRPCFailures       *prometheus.GaugeVec
+	clusterRPCOutage         *prometheus.GaugeVec
 	clusterLive              *prometheus.GaugeVec
 	networkCurrentStakeRatio *prometheus.GaugeVec
 	alpenglowVerdicts        *prometheus.CounterVec
@@ -126,6 +128,22 @@ func (m *Metrics) initMetrics() {
 		m.commonLabelNames,
 	)
 
+	m.clusterRPCFailures = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: metricsNamespacePrefix + "cluster_rpc_consecutive_failures",
+			Help: "Consecutive polls on which every cluster RPC endpoint failed",
+		},
+		m.commonLabelNames,
+	)
+
+	m.clusterRPCOutage = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: metricsNamespacePrefix + "cluster_rpc_outage",
+			Help: "Whether every cluster RPC endpoint keeps failing, so this node cannot detect a missing active peer or take over (1 = yes, 0 = no)",
+		},
+		m.commonLabelNames,
+	)
+
 	// Failover status metric
 	failoverLabelNames := []string{
 		failoverStatusLabelName,
@@ -158,6 +176,8 @@ func (m *Metrics) initMetrics() {
 	m.registry.MustRegister(m.metadata)
 	m.registry.MustRegister(m.peerCount)
 	m.registry.MustRegister(m.selfInGossip)
+	m.registry.MustRegister(m.clusterRPCFailures)
+	m.registry.MustRegister(m.clusterRPCOutage)
 	m.registry.MustRegister(m.failoverStatus)
 	m.registry.MustRegister(m.updateAvailable)
 	m.registry.MustRegister(m.recordingWriteFailures)
@@ -264,6 +284,7 @@ func (m *Metrics) RefreshMetrics() {
 	m.exportMetricMetadata(&state)
 	m.exportMetricPeerCount(&state)
 	m.exportMetricSelfInGossip(&state)
+	m.exportMetricClusterRPC(&state)
 	m.exportMetricFailoverStatus(&state)
 	m.exportMetricUpdateAvailable(&state)
 	m.exportConsensusMetrics(&state)
@@ -310,6 +331,12 @@ func (m *Metrics) exportMetricSelfInGossip(state *cache.State) {
 	m.selfInGossip.
 		With(m.getCommonLabels(state)).
 		Set(selfInGossipValue)
+}
+
+func (m *Metrics) exportMetricClusterRPC(state *cache.State) {
+	labels := m.getCommonLabels(state)
+	m.clusterRPCFailures.With(labels).Set(float64(state.ClusterRPCFailures))
+	m.clusterRPCOutage.With(labels).Set(boolToFloat(state.ClusterRPCOutage))
 }
 
 func (m *Metrics) exportMetricFailoverStatus(state *cache.State) {

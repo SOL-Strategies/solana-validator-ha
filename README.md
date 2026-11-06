@@ -778,6 +778,8 @@ The application exposes Prometheus metrics on the configured port (default: 9090
 - **`solana_validator_ha_metadata`**: Validator metadata with role and status labels
 - **`solana_validator_ha_peer_count`**: Number of peers visible in gossip
 - **`solana_validator_ha_self_in_gossip`**: Whether this validator appears in gossip (1=yes, 0=no)
+- **`solana_validator_ha_cluster_rpc_consecutive_failures`**: Consecutive polls on which every `cluster.rpc_urls` endpoint failed
+- **`solana_validator_ha_cluster_rpc_outage`**: Whether every cluster RPC endpoint has failed for `failover.leaderless_samples_threshold` consecutive polls (1=yes, 0=no). While 1, this node cannot detect a missing active peer or take over, even though `failover_status` still reads idle, so it is worth alerting on
 - **`solana_validator_ha_failover_status`**: Current failover status
 - **`solana_validator_ha_update_available`**: Whether a newer release is available (1=yes, 0=no). Updated on startup and periodically per `update.check_interval_duration`
 - **`solana_validator_ha_recording_write_failures_total`**: Number of failed recording checkpoints or final writes
