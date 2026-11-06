@@ -22,6 +22,11 @@ type State struct {
 	// Failover status
 	FailoverStatus string // "idle", "becoming_active", "becoming_passive"
 
+	// ClusterRPCFailures is how many consecutive polls every cluster RPC endpoint has failed.
+	ClusterRPCFailures int
+	// ClusterRPCOutage is true once ClusterRPCFailures reaches the leaderless samples threshold.
+	ClusterRPCOutage bool
+
 	// Update availability
 	UpdateAvailable bool
 

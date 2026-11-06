@@ -170,8 +170,9 @@ func (p *State) Refresh() {
 	p.activeVoteLagKnown = false
 	p.alpenglowVerdict = ""
 
-	// get cluster nodes - if this fails we return an empty state, which should cause its consumer
-	// to check for failovers
+	// get cluster nodes - if this fails we keep the last known peer states and record no leaderless
+	// sample, so an RPC outage cannot trigger a failover. It cannot detect one either: see
+	// clusterRPCOutageMonitor in internal/ha.
 	clusterNodes, err := p.clusterRPC.GetClusterNodes(context.Background())
 	if err != nil {
 		p.lastRefreshHadRPCError = true
