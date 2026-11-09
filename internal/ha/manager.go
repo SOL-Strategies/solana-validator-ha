@@ -65,6 +65,8 @@ type Manager struct {
 	warnedBypassIgnored  bool
 	// isolation detects that this node, while active, has lost the network.
 	isolation *isolationMonitor
+	// clusterRPCOutage reports when every cluster RPC endpoint keeps failing.
+	clusterRPCOutage *clusterRPCOutageMonitor
 	// demotedWithLocalRPCDown is set when the passive command succeeded but the local RPC did
 	// not answer, i.e. the validator was stopped. It stops the passive command from being re-run
 	// on every poll until the local RPC answers again.
@@ -264,6 +266,7 @@ func (m *Manager) initialize() error {
 	})
 
 	m.isolation = newIsolationMonitor(localRPC, m.cfg.Failover.LeaderlessSamplesThreshold, m.cfg.Failover.Isolation.LocalSlotStallDuration)
+	m.clusterRPCOutage = newClusterRPCOutageMonitor(m.cfg.Failover.LeaderlessSamplesThreshold)
 
 	// create local state
 	m.logger.Debug("creating local state")
@@ -675,6 +678,7 @@ func (m *Manager) ensureHAState() {
 	// refresh consensus phase, then gossip state judged by that phase's rules
 	m.refreshConsensus()
 	m.gossipState.Refresh()
+	m.observeClusterRPCOutage()
 
 	// refresh metrics
 	m.refreshMetrics()
@@ -1038,6 +1042,22 @@ func (m *Manager) delinquencyBypassAllowed() bool {
 	return false
 }
 
+// observeClusterRPCOutage logs when every cluster RPC endpoint starts and stops failing. It only
+// reports: failed polls are already excluded from the failover decisions.
+func (m *Manager) observeClusterRPCOutage() {
+	switch m.clusterRPCOutage.observe(m.gossipState.LastRefreshHadRPCError()) {
+	case clusterRPCOutageStarted:
+		m.logger.Error("all cluster RPC endpoints are failing - cannot detect a missing active peer or take over until they recover",
+			"consecutive_failures", m.clusterRPCOutage.consecutiveFailures,
+			"failing_for", m.clusterRPCOutage.duration().Round(time.Second),
+		)
+	case clusterRPCOutageEnded:
+		m.logger.Info("cluster RPC endpoints recovered",
+			"outage_duration", m.clusterRPCOutage.duration().Round(time.Second),
+		)
+	}
+}
+
 // demoteIfIsolated runs the passive command when this node is active and has lost the network:
 // the cluster RPC has failed for failover.leaderless_samples_threshold consecutive polls and the
 // local processed slot has not moved for failover.isolation.local_slot_stall_duration. It
@@ -1383,6 +1403,8 @@ func (m *Manager) refreshMetrics() {
 		PeerCount:            peerCount,
 		SelfInGossip:         selfInGossip,
 		FailoverStatus:       constants.StatusIdle,
+		ClusterRPCFailures:   m.clusterRPCOutage.consecutiveFailures,
+		ClusterRPCOutage:     m.clusterRPCOutage.active,
 		ConsensusPhase:       view.Phase.String(),
 		AlpenglowGenesisSlot: view.GenesisSlot,
 	}

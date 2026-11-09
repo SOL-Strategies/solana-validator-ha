@@ -765,3 +765,27 @@ func TestMetrics_ConcurrentAccess(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, metricsList)
 }
+
+func TestClusterRPCMetricsExported(t *testing.T) {
+	cacheInstance := createTestCache()
+	m := New(Options{Config: createTestConfig(), Logger: createTestLogger(), Cache: cacheInstance})
+
+	state := cache.State{ValidatorName: "test-validator", PublicIP: "192.168.1.100", ClusterRPCFailures: 7, ClusterRPCOutage: true}
+	cacheInstance.UpdateState(state)
+	m.RefreshMetrics()
+
+	read := func(g *prometheus.GaugeVec) float64 {
+		var metric dto.Metric
+		require.NoError(t, g.With(m.getCommonLabels(&state)).Write(&metric))
+		return metric.GetGauge().GetValue()
+	}
+	assert.Equal(t, float64(7), read(m.clusterRPCFailures))
+	assert.Equal(t, float64(1), read(m.clusterRPCOutage))
+
+	state.ClusterRPCFailures = 0
+	state.ClusterRPCOutage = false
+	cacheInstance.UpdateState(state)
+	m.RefreshMetrics()
+	assert.Equal(t, float64(0), read(m.clusterRPCFailures))
+	assert.Equal(t, float64(0), read(m.clusterRPCOutage))
+}

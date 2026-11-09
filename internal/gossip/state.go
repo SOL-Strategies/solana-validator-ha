@@ -170,8 +170,9 @@ func (p *State) Refresh() {
 	p.activeVoteLagKnown = false
 	p.alpenglowVerdict = ""
 
-	// get cluster nodes - if this fails we return an empty state, which should cause its consumer
-	// to check for failovers
+	// Get cluster nodes. On failure, clear the peer states and leave the leaderless
+	// sample count unchanged, so RPC failures do not advance the failover threshold.
+	// Sustained failures are reported by clusterRPCOutageMonitor in internal/ha.
 	clusterNodes, err := p.clusterRPC.GetClusterNodes(context.Background())
 	if err != nil {
 		p.lastRefreshHadRPCError = true
