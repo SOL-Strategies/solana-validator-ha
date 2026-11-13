@@ -445,7 +445,7 @@ const replayTemplate = `{{ HRule }}
   {{ Muted "files:" }}
 {{ range .Nodes }}    {{ Muted "-" }} {{ LightGrey .File }} {{ Muted (printf "[schema=%s binary=%s]" .SchemaVersion (ValueOrUnknown .Info.BinaryVersion)) }}
 {{ end }}  {{ Muted "outcomes:" }}
-{{ range .Nodes }}    {{ Node .Info.Name }}  {{ if .Outcome }}{{ Outcome .Outcome.Result }}{{ else }}{{ Outcome "incomplete" }}{{ end }}  {{ Muted (printf "poll=%s threshold=%d delinquency_bypass=%t" .Config.PollIntervalDuration .Config.LeaderlessSamplesThreshold .Config.DelinquencyBypass) }}{{ if .Config.ConsensusMode }} {{ Muted (printf "consensus_mode=%s vote_lag_threshold=%d" .Config.ConsensusMode .Config.VoteLagSlotsThreshold) }}{{ end }}
+{{ range .Nodes }}    {{ Node .Info.Name }}  {{ if .Outcome }}{{ Outcome .Outcome.Result }}{{ if .Outcome.Error }} {{ LightGrey .Outcome.Error }}{{ end }}{{ else }}{{ Outcome "incomplete" }}{{ end }}  {{ Muted (printf "poll=%s threshold=%d delinquency_bypass=%t" .Config.PollIntervalDuration .Config.LeaderlessSamplesThreshold .Config.DelinquencyBypass) }}{{ if .Config.ConsensusMode }} {{ Muted (printf "consensus_mode=%s vote_lag_threshold=%d" .Config.ConsensusMode .Config.VoteLagSlotsThreshold) }}{{ end }}
 {{ end }}
   {{ Muted "TTFL=time to first leaderless" }}
 {{ HRule }}

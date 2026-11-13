@@ -698,6 +698,8 @@ Each recording file contains a single JSON object with:
 - **`timeline`** — ordered decisions and actions, including ranking, guardrails, hooks, commands, durations, and identity confirmation
 - **`outcome`** — recovery, demotion, promotion, guardrail, abort, failure, or interruption result for this node. A demotion whose passive command succeeded while the local validator was not answering RPC (for example because it was stopped) is recorded as `demoted_validator_down`, and the passive command is not re-run until the local RPC answers again
 
+Failed activation attempts are recorded as `activation_failed`, with diagnostic text in `outcome.error`.
+
 ### Configuration
 
 ```yaml
