@@ -1,11 +1,13 @@
 package command
 
 import (
-	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
@@ -67,52 +69,75 @@ func Run(opts RunOptions) error {
 	return runWithoutStreaming(cmd, logger)
 }
 
-// runWithStreaming executes the command and streams stdout/stderr in real-time
+// runWithStreaming drains output before returning and retains bounded failure diagnostics.
 func runWithStreaming(cmd *exec.Cmd, logger *log.Logger) error {
-	// Capture stdout and stderr
-	stdout, err := cmd.StdoutPipe()
+	stdout := &streamWriter{logger: logger, stream: "stdout"}
+	stderr := &streamWriter{logger: logger, stream: "stderr"}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	// This bounds output draining after exit, not command execution.
+	cmd.WaitDelay = time.Second
+	err := cmd.Run()
+	stdout.flush()
+	stderr.flush()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		logger.Warn("command exited successfully but output draining timed out; output may be truncated")
+		err = nil
+	}
 	if err != nil {
-		logger.Error("failed to create stdout pipe", "error", err)
-		return err
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		logger.Error("failed to create stderr pipe", "error", err)
-		return err
-	}
-
-	// Start the command
-	if err := cmd.Start(); err != nil {
-		logger.Error("failed to start command", "error", err)
-		return err
-	}
-
-	// Stream stdout
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			logger.Info(styledStreamOutputString("stdout", scanner.Text()))
+		if tail := strings.TrimSpace(string(stderr.tail)); tail != "" {
+			err = fmt.Errorf("%w; stderr tail: %s", err, tail)
 		}
-	}()
-
-	// Stream stderr
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			logger.Info(styledStreamOutputString("stderr", scanner.Text()))
-		}
-	}()
-
-	// Wait for command to complete
-	err = cmd.Wait()
-	if err != nil {
 		logger.Error("failed to run command", "error", err)
 		return err
 	}
-
 	logger.Debug("command completed successfully")
 	return nil
+}
+
+const stderrTailLimit = 4096
+
+// streamWriter logs lines or bounded chunks. Each writer is owned by one os/exec
+// copy goroutine until Run returns, after which the caller flushes it.
+type streamWriter struct {
+	logger  *log.Logger
+	stream  string
+	pending []byte
+	tail    []byte
+}
+
+func (w *streamWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	if w.stream == "stderr" {
+		tail := p
+		if len(tail) >= stderrTailLimit {
+			w.tail = w.tail[:0]
+			tail = tail[len(tail)-stderrTailLimit:]
+		} else if excess := len(w.tail) + len(tail) - stderrTailLimit; excess > 0 {
+			copy(w.tail, w.tail[excess:])
+			w.tail = w.tail[:len(w.tail)-excess]
+		}
+		w.tail = append(w.tail, tail...)
+	}
+	for len(p) > 0 {
+		size := min(len(p), stderrTailLimit-len(w.pending))
+		if newline := bytes.IndexByte(p[:size], '\n'); newline >= 0 {
+			size = newline + 1
+		}
+		w.pending = append(w.pending, p[:size]...)
+		p = p[size:]
+		if len(w.pending) == stderrTailLimit || w.pending[len(w.pending)-1] == '\n' {
+			w.flush()
+		}
+	}
+	return n, nil
+}
+
+func (w *streamWriter) flush() {
+	if len(w.pending) == 0 {
+		return
+	}
+	w.logger.Info(styledStreamOutputString(w.stream, strings.TrimRight(string(w.pending), "\r\n")))
+	w.pending = w.pending[:0]
 }
 
 // runWithoutStreaming executes the command and captures all output (original behavior)

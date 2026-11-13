@@ -80,15 +80,17 @@ type TimelineEntry struct {
 
 // Outcome describes what happened at the end of the failover attempt on this node.
 type Outcome struct {
-	// Result is one of: "became_active", "became_active_unconfirmed",
+	// Result is one of: "became_active", "activation_failed",
+	// "promotion_failed" and "became_active_unconfirmed" (legacy recordings),
 	// "aborted_peer_took_over", "aborted_not_healthy", "aborted_not_healthy_long_enough",
 	// "aborted_already_active", "aborted_self_not_in_gossip", "aborted_delay_error", "aborted_revalidation_failed",
 	// "aborted_cluster_stalled", "aborted_vote_account_excluded", "aborted_failover_ineffective",
 	// "aborted_local_not_migrated", "demoted_passive", "demoted_validator_down", "demotion_failed",
 	// "not_voting_retained_active"
 	Result   string `json:"result"`
-	FromNode string `json:"from_node"` // node name that was active before this failover
-	ToNode   string `json:"to_node"`   // node name that became active
+	Error    string `json:"error,omitempty"` // activation failure reason, including bounded command stderr
+	FromNode string `json:"from_node"`       // node name that was active before this failover
+	ToNode   string `json:"to_node"`         // node name that became active
 }
 
 // FailoverEvent is the top-level structure serialised to the recording file.

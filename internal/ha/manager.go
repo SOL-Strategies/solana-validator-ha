@@ -600,6 +600,11 @@ func (m *Manager) checkpointRecording() {
 }
 
 func (m *Manager) finishRecording(result, fromNode, toNode string) {
+	m.finishRecordingOutcome(recording.Outcome{Result: result, FromNode: fromNode, ToNode: toNode})
+}
+
+func (m *Manager) finishRecordingOutcome(outcome recording.Outcome) {
+	result := outcome.Result
 	if m.activeRecorder == nil {
 		return
 	}
@@ -630,9 +635,7 @@ func (m *Manager) finishRecording(result, fromNode, toNode string) {
 			m.recordingError(err)
 		}
 	}
-	m.activeRecorder.FinishAsync(m.recordingOutputDir, recording.Outcome{
-		Result: result, FromNode: fromNode, ToNode: toNode,
-	}, onError)
+	m.activeRecorder.FinishAsync(m.recordingOutputDir, outcome, onError)
 	m.activeRecorder = nil
 }
 
@@ -951,15 +954,15 @@ func (m *Manager) ensureHAState() {
 		m.checkpointRecording()
 	}
 	ensureActiveStart := time.Now()
-	m.ensureActive()
+	activationErr := m.ensureActive()
 	if m.activeRecorder != nil {
 		duration := time.Since(ensureActiveStart).Round(time.Millisecond)
-		if m.localState.IsSelfActive() {
+		if activationErr == nil {
 			m.activeRecorder.AddEvent("confirmed_active", fmt.Sprintf("duration=%s", duration))
 			m.finishRecording("became_active", fromNode, m.cfg.Validator.Name)
 		} else {
-			m.activeRecorder.AddEvent("ensure_active_failed", fmt.Sprintf("duration=%s", duration))
-			m.finishRecording("promotion_failed", fromNode, m.cfg.Validator.Name)
+			m.activeRecorder.AddEvent("ensure_active_failed", fmt.Sprintf("duration=%s error=%s", duration, activationErr))
+			m.finishRecordingOutcome(recording.Outcome{Result: "activation_failed", FromNode: fromNode, ToNode: "unknown", Error: activationErr.Error()})
 		}
 	}
 }
@@ -1232,7 +1235,7 @@ func (m *Manager) ensurePassive() (outcome string) {
 // ensureActive makes the node active - this should be idempotent in setting the  active role
 // safest thing would be to to ensure validator service alywas starts with passive identity
 // and the failover.passive.command simply retsarts the validator service
-func (m *Manager) ensureActive() {
+func (m *Manager) ensureActive() error {
 	var err error
 	activePubkey := m.cfg.Validator.Identities.ActivePubkey()
 	m.logger.Info("becoming active", "pubkey", activePubkey)
@@ -1260,7 +1263,7 @@ func (m *Manager) ensureActive() {
 	}
 	if err != nil {
 		m.logger.Error("failed to run pre-active hooks", "error", err)
-		return
+		return fmt.Errorf("pre-active hooks: %w", err)
 	}
 
 	// run active command
@@ -1281,7 +1284,7 @@ func (m *Manager) ensureActive() {
 	m.recordStep("active_command_complete", commandStarted, err)
 	if err != nil {
 		m.logger.Warn("failed to run active command", "error", err)
-		return
+		return fmt.Errorf("active command: %w", err)
 	}
 
 	// run post hooks
@@ -1302,14 +1305,18 @@ func (m *Manager) ensureActive() {
 	}
 
 	// check to ensure the call to the failover.active.command was successful
-	if !m.localState.IsSelfActive() {
+	identity, identityErr := m.localState.SelfIdentity()
+	if identityErr != nil || identity != activePubkey {
 		m.logger.Error("this node is not active as reported by local rpc - unable to become active in failover",
 			"active_pubkey", activePubkey,
 		)
 		if m.activeRecorder != nil {
 			m.activeRecorder.AddEvent("active_identity_unconfirmed", fmt.Sprintf("expected=%s", activePubkey))
 		}
-		return
+		if identityErr != nil {
+			return fmt.Errorf("confirm active identity %s: %w", activePubkey, identityErr)
+		}
+		return fmt.Errorf("local RPC did not confirm active identity: expected=%s actual=%s", activePubkey, identity)
 	}
 
 	m.logger.Info("we are confirmed to be active", "active_pubkey", activePubkey)
@@ -1317,6 +1324,7 @@ func (m *Manager) ensureActive() {
 		m.activeRecorder.AddEvent("active_identity_confirmed", fmt.Sprintf("pubkey=%s", activePubkey))
 		m.checkpointRecording()
 	}
+	return nil
 }
 
 // startHealthyTracker starts a goroutine that samples the local validator health on its own

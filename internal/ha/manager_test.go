@@ -1319,7 +1319,7 @@ func TestObserveRecording_RecoveryRetention(t *testing.T) {
 
 func TestFinishRecording_Retention(t *testing.T) {
 	outcomes := []string{
-		"became_active", "promotion_failed", "demoted_passive", "demoted_validator_down",
+		"became_active", "activation_failed", "promotion_failed", "demoted_passive", "demoted_validator_down",
 		"demotion_failed", "not_voting_retained_active", "aborted_undeclared_active",
 		"last_node_standing_retained_active", "aborted_not_healthy", "aborted_not_healthy_long_enough",
 		"already_active", "aborted_delay_error", "aborted_revalidation_failed",

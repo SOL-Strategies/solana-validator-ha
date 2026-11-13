@@ -174,3 +174,34 @@ func TestReplayV3ShowsAlpenglowEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestReplayActivationFailureDiagnostics(t *testing.T) {
+	data, warnings, err := LoadReplayData([]string{"testdata/activation-failure/01-london.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if data.ToNode != "" {
+		t.Fatalf("failed activation has destination %q", data.ToNode)
+	}
+	out, err := RenderReplay(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"activation_failed", "cannot positively fence peer; staying passive"} {
+		if !strings.Contains(out, expected) {
+			t.Errorf("replay missing %q", expected)
+		}
+	}
+	// The structured error appears in the summary even when the timeline is absent.
+	data.Entries = nil
+	out, err = RenderReplay(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, data.Nodes[0].Outcome.Error) {
+		t.Fatal("outcome summary lost diagnostic")
+	}
+}
